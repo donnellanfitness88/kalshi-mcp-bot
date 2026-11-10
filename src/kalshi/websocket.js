@@ -23,6 +23,9 @@ export class KalshiWebSocket {
 this._diagReceived = 0;
 this._diagValid = 0;
 this._diagLastReport = Date.now();
+    
+this._diagReasons = {};
+
 // watchdog — triggers reconnect if feed goes silent
 
     // In-memory orderbook: price (as string) → quantity (as float)
