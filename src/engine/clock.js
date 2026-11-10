@@ -121,7 +121,8 @@ async function onWindowRoll(asset) {
   // Clear stale prices so tick() skips this asset until fresh WS data arrives
   s.yesAsk = null;
   s.yesBid = null;
-
+s.lastQuoteMessageTs = null;
+s.lastQuoteChangeTs = null;
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
       const market = await findActiveMarket(asset);
