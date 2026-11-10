@@ -57,8 +57,13 @@ function updateYes(asset, yesAsk, yesBid) {
     if (jump > 3) s.lastLargeJumpTs = now;
   }
 
-  s.yesAsk = yesAsk;
-  s.yesBid = yesBid;
+  if (s.yesAsk !== yesAsk || s.yesBid !== yesBid) {
+  s.lastQuoteChangeTs = Date.now();
+}
+
+s.lastQuoteMessageTs = Date.now();
+s.yesAsk = yesAsk;
+s.yesBid = yesBid;
 }
 
 function secsLeft() {
