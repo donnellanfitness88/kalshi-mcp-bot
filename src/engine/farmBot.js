@@ -1,6 +1,6 @@
 import { buildFeatures, buildFeaturesNorm } from '../nn/features.js';
 import { predict } from '../nn/network.js';
-import { executeBuy } from '../kalshi/orders.js';
+import { executeBuy, confirmedFillCount } from '../kalshi/orders.js';
 import { checkRiskGuards, RISK_COOLDOWN_FAST_MS } from './riskManager.js';
 import { priceFeed } from '../prices/binance.js';
 import { notify } from '../notify.js';
@@ -483,10 +483,16 @@ export async function checkFarmBot(ctx) {
   await notify(`🤖 ${asset} Farm Entry`, `${mode} ${bet} $${amount.toFixed(2)} | p=${(modelProb*100).toFixed(0)}% conf=${confidence.toFixed(2)}`, 'default');
 
   try {
-    const { result } = await executeBuy(s.ticker, bet, amount, s.yesAsk, s.yesBid);
-    const filled = typeof result?.order?.remaining_count === 'number'
-      ? (Math.floor(amount / (bet === 'UP' ? s.yesAsk : (1 - s.yesBid))) - result.order.remaining_count)
-      : Math.floor(amount / (bet === 'UP' ? s.yesAsk : (1 - s.yesBid)));
+    
+const { body, result } = await executeBuy(
+  s.ticker, bet, amount, s.yesAsk, s.yesBid
+);
+
+const filled = confirmedFillCount(result, Number(body.count));
+
+console.log(
+  `[Farm] Confirmed ${filled}/${body.count} contracts filled`
+);
 
     if (filled < 1) { console.warn('[Farm] 0 contracts filled'); s.lastExitTime = Date.now(); return; }
 
