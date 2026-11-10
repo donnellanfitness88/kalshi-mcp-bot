@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { placeOrder, cancelOrder, getOrders } from './client.js';
 import { state } from '../engine/state.js';
 
