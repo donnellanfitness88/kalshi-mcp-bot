@@ -262,7 +262,7 @@ _bestPrices() {
   }
 
   
-if (yesAsk < yesBid) {
+if (yesBid - yesAsk > 1e-9) {
   const now = Date.now();
 
   if (!this._lastCrossedLog ||
