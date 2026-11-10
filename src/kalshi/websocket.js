@@ -53,6 +53,7 @@ this._diagReasons = {};
     this._noBook.clear();
     this._sid = null;
     this._lastBookSeq = null;
+    this._wasCrossed = false;
 
     const headers = buildHeaders('GET', '/trade-api/ws/v2');
     this.ws = new WebSocket(WS_URL, { headers });
