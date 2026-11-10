@@ -176,10 +176,26 @@ if (data.market_ticker && data.market_ticker !== this.ticker) return;
 
     // Compute best bid/ask from current orderbook state
     const { yesAsk, yesBid } = this._bestPrices();
-    if (yesAsk !== null && yesBid !== null) {
-      this._resetHeartbeat(); // feed is live — reset watchdog
-      this.onPrice(yesAsk, yesBid, data.market_ticker || this.ticker);
-    }
+    
+if (yesAsk !== null && yesBid !== null) {
+  this._diagValid++;
+  this._resetHeartbeat();
+  this.onPrice(yesAsk, yesBid, data.market_ticker || this.ticker);
+}
+
+if (Date.now() - this._diagLastReport >= 30000) {
+  console.log(
+    `[WS-HEALTH] ticker=${this.ticker}` +
+    ` received=${this._diagReceived}` +
+    ` valid=${this._diagValid}` +
+    ` invalid=${this._diagReceived - this._diagValid}`
+  );
+
+  this._diagReceived = 0;
+  this._diagValid = 0;
+  this._diagLastReport = Date.now();
+}
+
   }
 
   /**
