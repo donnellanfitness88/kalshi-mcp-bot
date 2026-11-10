@@ -65,11 +65,11 @@ export class KalshiWebSocket {
   try {
         const msg = JSON.parse(data.toString());
 
+
 if (
   msg.type === 'subscribed' ||
   msg.type === 'error' ||
-  msg.type === 'orderbook_snapshot' ||
-  msg.type === 'orderbook_delta'
+  msg.type === 'orderbook_snapshot'
 ) {
   console.log(
     `[WS-DIAG] ticker=${this.ticker}` +
