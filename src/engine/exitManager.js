@@ -1,4 +1,4 @@
-import { executeSell } from '../kalshi/orders.js';
+import { executeSell, confirmedFillCount } from '../kalshi/orders.js';
 import { getMarket } from '../kalshi/client.js';
 import { recordTradePnL } from './riskManager.js';
 import { recordTrade as recordBrainTrade } from '../nn/store.js';
@@ -199,7 +199,20 @@ async function executeExit(asset, s, reason, unrealizedPnL) {
   await notify(`${emoji} ${asset} Exit — ${reason}`, `${trade.mode} ${trade.bet} | PnL: $${unrealizedPnL.toFixed(3)}`, 'default');
 
   try {
-    await executeSell(trade.ticker, trade.side, trade.count);
+    
+const { body, result } = await executeSell(
+  trade.ticker, trade.side, trade.count
+);
+
+const filled = confirmedFillCount(result, Number(body.count));
+
+if (filled !== Number(body.count)) {
+  console.warn(
+    `[Exit] Sell not fully filled: ${filled}/${body.count}`
+  );
+  return;
+}
+
   } catch (err) {
     // If market is finalized, Kalshi already settled the position — clear it
     if (err.message.includes('market_not_found')) {
