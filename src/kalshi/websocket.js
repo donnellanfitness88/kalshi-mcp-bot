@@ -3,7 +3,7 @@ import { buildHeaders } from './client.js';
 
 const WS_URL = 'wss://api.elections.kalshi.com/trade-api/ws/v2';
 const RECONNECT_DELAY_MS  = 500;
-const HEARTBEAT_TIMEOUT_MS = 5_000; // force reconnect if no orderbook message for 5s
+const HEARTBEAT_TIMEOUT_MS = 30_000; // force reconnect if no orderbook message for 5s
 // WHY these values: STALE_PRICE exit fires after 30s of no price updates.
 // Old values (15s timeout + 3s delay) left only ~10s margin before the stale exit fired,
 // and Kalshi sometimes takes 5-8s to deliver the first message after reconnect.
