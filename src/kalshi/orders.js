@@ -29,30 +29,6 @@ export function buildSellBody(ticker, side, contractsHeld) {
   };
 }
 
-
-export function buildSellBody(ticker, side, contractsHeld) {
-  const count = Math.floor(contractsHeld);
-  if (count < 1) throw new Error(`Invalid contractsToSell: ${contractsHeld}`);
-
-  const body = {
-    ticker,
-    client_order_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    side,
-    action: 'sell',
-    count,
-    time_in_force: 'fill_or_kill',
-  };
-
-  // Minimum acceptable sell price — take whatever the market gives
-  if (side === 'yes') {
-    body.yes_price_dollars = '0.0100';
-  } else {
-    body.no_price_dollars = '0.0100';
-  }
-
-  return body;
-}
-
 export async function executeBuy(ticker, bet, amount, yesAsk, yesBid) {
   const body = buildBuyBody(ticker, bet, amount, yesAsk, yesBid);
   // Sim mode — paper trade, no API call
