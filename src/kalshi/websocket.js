@@ -110,7 +110,7 @@ export class KalshiWebSocket {
 
     const data = msg?.msg;
     if (!data) return;
-
+if (data.market_ticker && data.market_ticker !== this.ticker) return;
     if (type === 'orderbook_snapshot') {
       // Populate orderbook from snapshot.
       // yes_dollars_fp: [[price_dollars, qty], ...] — YES bids
