@@ -19,7 +19,11 @@ export class KalshiWebSocket {
     this.intentionalClose = false;
     this.cmdSeq = 1;
     this._sid = null;  // subscription ID returned by server — needed for unsubscribe
-    this._heartbeatTimer = null; // watchdog — triggers reconnect if feed goes silent
+    this._heartbeatTimer = null; 
+this._diagReceived = 0;
+this._diagValid = 0;
+this._diagLastReport = Date.now();
+// watchdog — triggers reconnect if feed goes silent
 
     // In-memory orderbook: price (as string) → quantity (as float)
     // yesBook: bids for YES contracts
