@@ -319,6 +319,7 @@ if (yesBid - yesAsk > 1e-9) {
     this.ticker = newTicker;
     this._yesBook.clear();
     this._noBook.clear();
+    this._lastBookSeq = null;
     if (this.ws?.readyState === WebSocket.OPEN) {
       if (this._sid !== null) {
         this._unsubscribe(this._sid);
