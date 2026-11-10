@@ -363,7 +363,7 @@ if (now % 60000 < 1000) {
       : 'none'}s`
   );
 }
-}
+
     // Skip if no market data
     if (!s.ticker || s.yesAsk === null) continue;
 
