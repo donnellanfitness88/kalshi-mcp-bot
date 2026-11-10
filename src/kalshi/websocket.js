@@ -52,6 +52,7 @@ this._diagReasons = {};
     this._yesBook.clear();
     this._noBook.clear();
     this._sid = null;
+    this._lastBookSeq = null;
 
     const headers = buildHeaders('GET', '/trade-api/ws/v2');
     this.ws = new WebSocket(WS_URL, { headers });
