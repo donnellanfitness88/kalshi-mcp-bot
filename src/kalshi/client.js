@@ -155,7 +155,9 @@ export async function placeOrder(body) {
       },
     };
   }
-  return request('POST', '/portfolio/orders', body);
+  
+return request('POST', '/portfolio/events/orders', body);
+
 }
 
 export async function cancelOrder(orderId) {
