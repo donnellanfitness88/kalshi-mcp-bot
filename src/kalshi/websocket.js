@@ -194,6 +194,13 @@ if (Date.now() - this._diagLastReport >= 30000) {
     ` invalid=${this._diagReceived - this._diagValid}`
   );
 
+console.log(
+  `[WS-REASONS] ticker=${this.ticker}` +
+  ` reasons=${JSON.stringify(this._diagReasons)}`
+);
+
+this._diagReasons = {};
+
   this._diagReceived = 0;
   this._diagValid = 0;
   this._diagLastReport = Date.now();
