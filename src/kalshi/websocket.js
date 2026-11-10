@@ -64,7 +64,22 @@ export class KalshiWebSocket {
   
   try {
         const msg = JSON.parse(data.toString());
-        this._handleMessage(msg);
+
+if (
+  msg.type === 'subscribed' ||
+  msg.type === 'error' ||
+  msg.type === 'orderbook_snapshot' ||
+  msg.type === 'orderbook_delta'
+) {
+  console.log(
+    `[WS-DIAG] ticker=${this.ticker}` +
+    ` type=${msg.type}` +
+    ` market=${msg.msg?.market_ticker ?? 'none'}` +
+    ` sid=${msg.msg?.sid ?? 'none'}`
+  );
+}
+
+this._handleMessage(msg);
       } catch {
         // ignore malformed frames
       }
