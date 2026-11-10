@@ -185,7 +185,6 @@ if (data.market_ticker && data.market_ticker !== this.ticker) return;
     
 if (yesAsk !== null && yesBid !== null) {
   this._diagValid++;
-  this._resetHeartbeat();
   this.onPrice(yesAsk, yesBid, data.market_ticker || this.ticker);
 }
 
