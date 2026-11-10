@@ -343,7 +343,11 @@ async function _tickBody() {
       }
       // ok === null → already in progress or offline, skip silently
     }
-
+if (now % 60000 < 1000) {
+  console.log(
+    `[KalshiFeed] ${asset} ticker=${s.ticker} ask=${s.yesAsk} bid=${s.yesBid} armed=${s.farmArmed} history=${s.yesPriceHistory.length}`
+  );
+}
     // Skip if no market data
     if (!s.ticker || s.yesAsk === null) continue;
 
