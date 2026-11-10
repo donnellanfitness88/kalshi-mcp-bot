@@ -144,6 +144,35 @@ if (
     const data = msg?.msg;
     if (!data) return;
 if (data.market_ticker && data.market_ticker !== this.ticker) return;
+
+if (type === 'orderbook_snapshot') {
+  this._lastBookSeq = msg.seq;
+}
+
+if (type === 'orderbook_delta') {
+  if (!Number.isSafeInteger(msg.seq)) {
+    console.warn('[WS-SEQ] Missing or invalid sequence number');
+    this._open();
+    return;
+  }
+
+  if (this._lastBookSeq === null) {
+    console.warn('[WS-SEQ] Delta received before snapshot');
+    this._open();
+    return;
+  }
+
+  if (msg.seq !== this._lastBookSeq + 1) {
+    console.warn(
+      `[WS-SEQ] Gap detected: expected ${this._lastBookSeq + 1}, got ${msg.seq}`
+    );
+    this._open();
+    return;
+  }
+
+  this._lastBookSeq = msg.seq;
+}
+
     if (type === 'orderbook_snapshot') {
       // Populate orderbook from snapshot.
       // yes_dollars_fp: [[price_dollars, qty], ...] — YES bids
