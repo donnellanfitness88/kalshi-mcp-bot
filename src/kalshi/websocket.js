@@ -208,44 +208,57 @@ if (Date.now() - this._diagLastReport >= 30000) {
    * Best YES ask  = 1 - highest price in noBook
    *                 (sellers of YES = buyers of NO; best NO bid implies best YES ask)
    */
-  _bestPrices() {
-    let bestYesBid = -Infinity;
-    for (const price of this._yesBook.keys()) {
-      const p = parseFloat(price);
-      if (p > bestYesBid) bestYesBid = p;
-    }
+  
+_bestPrices() {
+  const invalid = (reason) => {
+    this._diagReasons[reason] =
+      (this._diagReasons[reason] || 0) + 1;
 
-    let bestNoBid = -Infinity;
-    for (const price of this._noBook.keys()) {
-      const p = parseFloat(price);
-      if (p > bestNoBid) bestNoBid = p;
-    }
+    return { yesAsk: null, yesBid: null };
+  };
 
-    // Need at least the YES book to compute a price
-    if (bestYesBid === -Infinity) return { yesAsk: null, yesBid: null };
+  let bestYesBid = -Infinity;
 
-    const yesBid = bestYesBid;
-    let yesAsk;
-
-    if (bestNoBid !== -Infinity) {
-      // Normal case: derive ask from best NO bid
-      yesAsk = 1 - bestNoBid;
-    } else {
-      // NO book is empty (thin market / extreme probability).
-      // Estimate ask = best YES bid + 1¢ minimum spread.
-      yesAsk = Math.min(0.99, bestYesBid + 0.01);
-    }
-
-    // Sanity check
-    if (yesBid <= 0 || yesBid >= 1 || yesAsk <= 0 || yesAsk >= 1 || yesAsk < yesBid) {
-      return { yesAsk: null, yesBid: null };
-    }
-
-    return { yesAsk, yesBid };
+  for (const price of this._yesBook.keys()) {
+    const p = parseFloat(price);
+    if (p > bestYesBid) bestYesBid = p;
   }
 
-  // Call this when the 15-minute window rolls and a new ticker is active.
-  // Unsubscribes from the old ticker first to avoid duplicate orderbook feeds.
+  let bestNoBid = -Infinity;
+
+  for (const price of this._noBook.keys()) {
+    const p = parseFloat(price);
+    if (p > bestNoBid) bestNoBid = p;
+  }
+
+  if (bestYesBid === -Infinity) {
+    return invalid('EMPTY_YES_BOOK');
+  }
+
+  const yesBid = bestYesBid;
+
+  const yesAsk =
+    bestNoBid !== -Infinity
+      ? 1 - bestNoBid
+      : Math.min(0.99, bestYesBid + 0.01);
+
+  if (!Number.isFinite(yesBid) ||
+      !Number.isFinite(yesAsk)) {
+    return invalid('NONFINITE_PRICE');
+  }
+
+  if (yesBid <= 0 || yesBid >= 1 ||
+      yesAsk <= 0 || yesAsk >= 1) {
+    return invalid('OUT_OF_RANGE');
+  }
+
+  if (yesAsk < yesBid) {
+    return invalid('CROSSED_BOOK');
+  }
+
+  return { yesAsk, yesBid };
+}
+
   switchTicker(newTicker) {
     this.ticker = newTicker;
     this._yesBook.clear();
