@@ -123,12 +123,15 @@ this._handleMessage(msg);
 
   _handleMessage(msg) {
     const type = msg?.type;
+
 if (
   type === 'orderbook_snapshot' ||
   type === 'orderbook_delta'
 ) {
   this._diagReceived++;
+  this._resetHeartbeat();
 }
+
 
 
     // Capture subscription ID from server ack — needed for clean unsubscribe on ticker switch
