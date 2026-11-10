@@ -61,7 +61,7 @@ export class KalshiWebSocket {
     });
 
     this.ws.on('message', (data) => {
-  this._resetHeartbeat();
+  
   try {
         const msg = JSON.parse(data.toString());
         this._handleMessage(msg);
