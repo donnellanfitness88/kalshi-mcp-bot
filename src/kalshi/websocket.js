@@ -215,11 +215,11 @@ if (type === 'orderbook_delta') {
 
 if (type === 'orderbook_delta') {
   const bestYes = Math.max(
-    ...this._yesBook.keys().map(Number)
-  );
-  const bestNo = Math.max(
-    ...this._noBook.keys().map(Number)
-  );
+  ...Array.from(this._yesBook.keys(), Number)
+);
+const bestNo = Math.max(
+  ...Array.from(this._noBook.keys(), Number)
+);
 
   const crossed = Number.isFinite(bestYes) &&
     Number.isFinite(bestNo) &&
