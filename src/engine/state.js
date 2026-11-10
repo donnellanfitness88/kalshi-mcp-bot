@@ -22,8 +22,8 @@ function createAssetState() {
     ticksTotal: 0,
 
     // Bot control
-    farmArmed: false,
-    autoBuyArmed: false,
+    farmArmed: true,
+    autoBuyArmed: true,
 
     // Active trade (null when flat)
     activeTrade: null,
