@@ -54,7 +54,15 @@ class BinanceFeed {
     });
   }
 
-  _sample() {
+  _sample() {this._diagnosticTicks = (this._diagnosticTicks ?? 0) + 1;
+
+if (this._diagnosticTicks % 60 === 0) {
+  for (const asset of ['BTC', 'ETH']) {
+    console.log(
+      `[PriceFeed] ${asset} samples=${this.buffer[asset].length} ready=${this.isReady(asset)} price=${this.lastPrice[asset] ?? 'none'}`
+    );
+  }
+}
     for (const asset of ['BTC', 'ETH']) {
       if (this.lastPrice[asset] !== null) {
         this.buffer[asset].push(this.lastPrice[asset]);
