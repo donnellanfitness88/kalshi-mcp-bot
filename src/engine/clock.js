@@ -350,8 +350,18 @@ async function _tickBody() {
     }
 if (now % 60000 < 1000) {
   console.log(
-    `[KalshiFeed] ${asset} ticker=${s.ticker} ask=${s.yesAsk} bid=${s.yesBid} armed=${s.farmArmed} history=${s.yesPriceHistory.length}`
+    `[KalshiFeed] ${asset}` +
+    ` ticker=${s.ticker}` +
+    ` ask=${s.yesAsk} bid=${s.yesBid}` +
+    ` armed=${s.farmArmed}` +
+    ` messageAge=${s.lastQuoteMessageTs
+      ? Math.round((now - s.lastQuoteMessageTs) / 1000)
+      : 'none'}s` +
+    ` changeAge=${s.lastQuoteChangeTs
+      ? Math.round((now - s.lastQuoteChangeTs) / 1000)
+      : 'none'}s`
   );
+}
 }
     // Skip if no market data
     if (!s.ticker || s.yesAsk === null) continue;
