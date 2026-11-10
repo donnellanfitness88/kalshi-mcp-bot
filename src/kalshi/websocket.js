@@ -211,6 +211,36 @@ if (type === 'orderbook_delta') {
     }
 
     // Compute best bid/ask from current orderbook state
+
+if (type === 'orderbook_delta') {
+  const bestYes = Math.max(
+    ...this._yesBook.keys().map(Number)
+  );
+  const bestNo = Math.max(
+    ...this._noBook.keys().map(Number)
+  );
+
+  const crossed = Number.isFinite(bestYes) &&
+    Number.isFinite(bestNo) &&
+    bestYes + bestNo > 1 + 1e-9;
+
+  if (crossed && !this._wasCrossed) {
+    console.warn(
+      `[WS-FIRST-CROSS] ticker=${this.ticker}` +
+      ` seq=${msg.seq}` +
+      ` side=${data.side}` +
+      ` price=${data.price_dollars}` +
+      ` delta=${data.delta_fp}` +
+      ` bestYes=${bestYes}` +
+      ` bestNo=${bestNo}` +
+      ` yesLevels=${this._yesBook.size}` +
+      ` noLevels=${this._noBook.size}`
+    );
+  }
+
+  this._wasCrossed = crossed;
+}
+
     const { yesAsk, yesBid } = this._bestPrices();
     
 if (type === 'orderbook_snapshot') {
