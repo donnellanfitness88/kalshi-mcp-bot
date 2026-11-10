@@ -213,6 +213,20 @@ if (type === 'orderbook_delta') {
     // Compute best bid/ask from current orderbook state
     const { yesAsk, yesBid } = this._bestPrices();
     
+if (type === 'orderbook_snapshot') {
+  console.log(
+    `[WS-SNAPSHOT-CHECK] ticker=${this.ticker}` +
+    ` seq=${msg.seq}` +
+    ` yesBid=${yesBid}` +
+    ` yesAsk=${yesAsk}` +
+    ` yesLevels=${this._yesBook.size}` +
+    ` noLevels=${this._noBook.size}` +
+    ` crossed=${yesBid !== null &&
+      yesAsk !== null &&
+      yesBid - yesAsk > 1e-9}`
+  );
+}
+
 if (yesAsk !== null && yesBid !== null) {
   this._diagValid++;
   this.onPrice(yesAsk, yesBid, data.market_ticker || this.ticker);
