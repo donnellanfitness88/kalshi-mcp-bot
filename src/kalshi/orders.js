@@ -6,39 +6,26 @@ import { state } from '../engine/state.js';
 // DOWN bet → buy NO side  → count = floor(amount / (1 - bid_yes_price))
 // Getting this wrong makes DOWN P&L show ~$0.00 (was 16x too small before fix)
 
-export function buildBuyBody(ticker, bet, amount, yesAsk, yesBid) {
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error(`Invalid amount: ${amount}`);
+
+export function buildSellBody(ticker, side, contractsHeld) {
+  const count = Math.floor(contractsHeld);
+
+  if (!Number.isFinite(contractsHeld) || count < 1) {
+    throw new Error(`Invalid contracts held: ${contractsHeld}`);
   }
 
-  if (!Number.isFinite(yesAsk) ||
-      !Number.isFinite(yesBid) ||
-      yesBid <= 0 ||
-      yesAsk >= 1 ||
-      yesAsk < yesBid) {
-    throw new Error('Invalid orderbook prices');
-  }
-
-  const isUp = bet === 'UP';
-
-  if (!isUp && bet !== 'DOWN') {
-    throw new Error(`Invalid bet: ${bet}`);
-  }
-
-  const sidePrice = isUp ? yesAsk : 1 - yesBid;
-  const count = Math.floor(amount / sidePrice);
-
-  if (count < 1) {
-    throw new Error('Budget too low for one contract');
+  if (side !== 'yes' && side !== 'no') {
+    throw new Error(`Invalid position side: ${side}`);
   }
 
   return {
     ticker,
     client_order_id: crypto.randomUUID(),
-    side: isUp ? 'bid' : 'ask',
+    side: side === 'yes' ? 'ask' : 'bid',
     count: count.toFixed(2),
-    price: (isUp ? yesAsk : yesBid).toFixed(4),
-    time_in_force: 'fill_or_kill'
+    price: side === 'yes' ? '0.0100' : '0.9900',
+    time_in_force: 'fill_or_kill',
+    reduce_only: true
   };
 }
 
