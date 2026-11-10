@@ -259,9 +259,26 @@ _bestPrices() {
     return invalid('OUT_OF_RANGE');
   }
 
-  if (yesAsk < yesBid) {
-    return invalid('CROSSED_BOOK');
+  
+if (yesAsk < yesBid) {
+  const now = Date.now();
+
+  if (!this._lastCrossedLog ||
+      now - this._lastCrossedLog >= 30000) {
+    console.warn(
+      `[WS-CROSSED] ticker=${this.ticker}` +
+      ` yesBid=${yesBid.toFixed(4)}` +
+      ` yesAsk=${yesAsk.toFixed(4)}` +
+      ` noBid=${bestNoBid.toFixed(4)}` +
+      ` yesLevels=${this._yesBook.size}` +
+      ` noLevels=${this._noBook.size}`
+    );
+    this._lastCrossedLog = now;
   }
+
+  return invalid('CROSSED_BOOK');
+}
+
 
   return { yesAsk, yesBid };
 }
