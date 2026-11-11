@@ -33,6 +33,10 @@ this._diagReasons = {};
     // noBook:  bids for NO contracts (best NO bid = 1 - best YES ask)
     this._yesBook = new Map();
     this._noBook  = new Map();
+  
+this._crossedSince = null;
+this._lastCrossedResync = 0;
+
   }
 
   connect(ticker) {
@@ -151,6 +155,7 @@ if (type === 'orderbook_snapshot') {
   this._lastBookSeq = msg.seq;
   this._crossFollowup = null;
   this._wasCrossed = false;
+  this._crossedSince = null;
 }
 
 
@@ -472,6 +477,30 @@ _bestPrices() {
 if (yesBid - yesAsk > 1e-9) {
   const now = Date.now();
 
+if (this._crossedSince === null) {
+  this._crossedSince = now;
+}
+
+const crossedDuration = now - this._crossedSince;
+const resyncCooldown = now - this._lastCrossedResync;
+
+if (
+  crossedDuration >= 2000 &&
+  resyncCooldown >= 30000
+) {
+  this._lastCrossedResync = now;
+  this._crossedSince = null;
+
+  console.warn(
+    `[WS-RESYNC] ticker=${this.ticker}` +
+    ` crossedDurationMs=${crossedDuration}` +
+    ` yesBid=${yesBid}` +
+    ` yesAsk=${yesAsk}`
+  );
+
+  this._open();
+}
+
   if (!this._lastCrossedLog ||
       now - this._lastCrossedLog >= 30000) {
     console.warn(
@@ -488,7 +517,8 @@ if (yesBid - yesAsk > 1e-9) {
   return invalid('CROSSED_BOOK');
 }
 
-
+this._crossedSince = null;
+return { yesAsk, yesBid };
   return { yesAsk, yesBid };
 }
 
