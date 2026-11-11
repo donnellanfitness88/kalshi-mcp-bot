@@ -370,7 +370,6 @@ switchTicker(newTicker) {
   this._open();
 }
 
-  }
 
   _resetHeartbeat() {
     clearTimeout(this._heartbeatTimer);
