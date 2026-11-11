@@ -360,21 +360,16 @@ if (yesBid - yesAsk > 1e-9) {
   return { yesAsk, yesBid };
 }
 
-  switchTicker(newTicker) {
-    this.ticker = newTicker;
-    this._yesBook.clear();
-    this._noBook.clear();
-    this._lastBookSeq = null;
-    this._wasCrossed = false;
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      if (this._sid !== null) {
-        this._unsubscribe(this._sid);
-        this._sid = null;
-      }
-      this._subscribe(newTicker);
-    } else {
-      this._open();
-    }
+  
+switchTicker(newTicker) {
+  if (newTicker === this.ticker) return;
+
+  this.ticker = newTicker;
+  this._clearHeartbeat();
+  clearTimeout(this.reconnectTimer);
+  this._open();
+}
+
   }
 
   _resetHeartbeat() {
