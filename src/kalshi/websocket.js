@@ -263,6 +263,9 @@ console.warn(
     const localYes = bestAfterYes;
     const localNo = bestAfterNo;
 
+const localYesQty = this._yesBook.get(localYes) ?? 0;
+const localNoQty = this._noBook.get(localNo) ?? 0;
+
     getMarketOrderbook(ticker)
       .then(response => {
         
@@ -304,6 +307,28 @@ console.warn(
 
         const restYes = best(levels('yes'));
         const restNo = best(levels('no'));
+
+const qtyAt = (rows, price) => {
+  const row = rows.find(
+    ([p]) => Math.abs(Number(p) - price) < 1e-9
+  );
+  return row ? Number(row[1]) : 0;
+};
+
+const restYesQty = qtyAt(levels('yes'), localYes);
+const restNoQty = qtyAt(levels('no'), localNo);
+
+console.warn(
+  `[WS-LEVEL-COMPARE] ticker=${ticker}` +
+  ` localYesPrice=${localYes}` +
+  ` localYesQty=${localYesQty}` +
+  ` restYesQtyAtLocalPrice=${restYesQty}` +
+  ` localNoPrice=${localNo}` +
+  ` localNoQty=${localNoQty}` +
+  ` restNoQtyAtLocalPrice=${restNoQty}` +
+  ` restBestYes=${restYes}` +
+  ` restBestNo=${restNo}`
+);
 
         console.warn(
           `[WS-REST-COMPARE] ticker=${ticker}` +
