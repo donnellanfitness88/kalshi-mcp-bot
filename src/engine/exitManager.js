@@ -141,18 +141,28 @@ export async function checkExit(ctx) {
   // secsLeft <= 30: FORCE exit regardless of PnL — prevents MARKET_SETTLED losses.
   // Live data: 3 MARKET_SETTLED trades lost $1.56 total ($0.44–$0.62 each) by holding
   // to expiry. A forced exit at breakeven or small loss is always better than settlement.
-  if (!exitReason) {
-    if (
-      (secsLeft <= 30)                                ||   // FORCE exit — avoid market settlement
-      (secsLeft <= 45  && unrealizedPnL >= 0)         ||   // breakeven OK
-      (secsLeft <= 90  && unrealizedPnL > 0)          ||   // any profit
-      (secsLeft <= 180 && pctCaptured >= 0.08)         ||
-      (secsLeft <= 360 && pctCaptured >= 0.20)         ||
+  
+if (!exitReason) {
+  const heldSeconds = trade.startedAt
+    ? (Date.now() - trade.startedAt) / 1000
+    : 0;
+
+  const minimumHoldMet = heldSeconds >= 15;
+
+  if (
+    (secsLeft <= 30) ||
+    (minimumHoldMet && (
+      (secsLeft <= 45 && unrealizedPnL >= 0) ||
+      (secsLeft <= 90 && unrealizedPnL > 0) ||
+      (secsLeft <= 180 && pctCaptured >= 0.08) ||
+      (secsLeft <= 360 && pctCaptured >= 0.20) ||
       (secsLeft <= 600 && pctCaptured >= 0.35)
-    ) {
-      exitReason = 'TIME_FLOOR';
-    }
+    ))
+  ) {
+    exitReason = 'TIME_FLOOR';
   }
+}
+
 
   // 6. Stale price guard — exit if YES price frozen > 30s during final 5 min
   // Protects against holding through an untracked move when Kalshi WS goes silent
