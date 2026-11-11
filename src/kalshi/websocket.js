@@ -184,7 +184,7 @@ if (type === 'orderbook_delta') {
       if (Array.isArray(data.yes_dollars_fp)) {
         for (const [price, qty] of data.yes_dollars_fp) {
           const q = parseFloat(qty);
-          if (q > 0) this._yesBook.set(price, q);
+          if (q > 0) this._yesBook.set(Number(price), q);
         }
       }
       if (Array.isArray(data.no_dollars_fp)) {
