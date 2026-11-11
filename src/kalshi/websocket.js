@@ -213,11 +213,17 @@ if (type === 'orderbook_delta') {
 if (Number.isFinite(price) && Number.isFinite(delta)) {
   const bestBeforeYes = Math.max(...this._yesBook.keys());
   const bestBeforeNo = Math.max(...this._noBook.keys());
-  const current = book.get(price) ?? 0;
-  const updated = current + delta;
+  
+const current = book.get(price) ?? 0;
+const updated = current + delta;
 
-  if (updated <= 0) book.delete(price);
-  else book.set(price, updated);
+// Remove floating-point residual quantities.
+if (updated <= 1e-8) {
+  book.delete(price);
+} else {
+  book.set(price, updated);
+}
+
 
   const bestAfterYes = Math.max(...this._yesBook.keys());
   const bestAfterNo = Math.max(...this._noBook.keys());
