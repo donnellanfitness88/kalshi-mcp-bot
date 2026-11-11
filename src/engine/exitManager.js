@@ -265,8 +265,7 @@ async function performExit(asset, s, reason, unrealizedPnL) {
   }
   const pctCaptured = trade.maxProfit > 0 ? unrealizedPnL / trade.maxProfit : 0;
   console.log(`[Exit] ${asset} ${trade.mode ?? ''} ${trade.bet} ${reason} PnL=$${unrealizedPnL.toFixed(2)}`);
-  const emoji = unrealizedPnL > 0 ? '✅' : '❌';
-  await notify(`${emoji} ${asset} Exit — ${reason}`, `${trade.mode} ${trade.bet} | PnL: $${unrealizedPnL.toFixed(3)}`, 'default');
+  
 
   try {
     
