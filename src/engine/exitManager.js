@@ -309,9 +309,9 @@ if (filled < Number(body.count)) {
         const market = await getMarket(trade.ticker);
         if (market.status === 'finalized') {
           console.log(`[Exit] Market finalized — Kalshi settled position; clearing trade`);
-          recordTradePnL(s, unrealizedPnL);
-          await appendLog({ asset, bet: trade.bet, mode: trade.mode, amount: trade.amount,
-            pnl: unrealizedPnL, win: unrealizedPnL > 0, reason: 'MARKET_SETTLED', at: new Date().toISOString() });
+          console.warn(
+  `[Exit] ${trade.ticker} finalized; actual settlement P&L not yet verified`
+);
           s.lastExitTime = Date.now();
           s.activeTrade = null;
           return;
