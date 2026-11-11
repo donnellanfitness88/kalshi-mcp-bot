@@ -79,7 +79,12 @@ export async function getFills(params = {}) {
   const data = await request('GET', path);
   return data.fills || [];
 }
-
+export async function getSettlements(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const path = '/portfolio/settlements' + (qs ? '?' + qs : '');
+  const data = await request('GET', path);
+  return data.settlements || [];
+}
 export async function getOrders(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const path = '/portfolio/orders' + (qs ? '?' + qs : '');
