@@ -100,6 +100,14 @@ export async function getMarket(ticker) {
   return data.market;
 }
 
+export async function getMarketOrderbook(ticker) {
+  return request(
+    'GET',
+    `/markets/${encodeURIComponent(ticker)}/orderbook?depth=0`
+  );
+}
+
+
 // Find the active 15M market for an asset (BTC or ETH).
 //
 // Strategy: target the market closing at the NEXT 15-minute UTC boundary.
