@@ -31,6 +31,7 @@ export function buildBuyBody(ticker, bet, amount, yesAsk, yesBid) {
     count: count.toFixed(2),
     price: (isUp ? yesAsk : yesBid).toFixed(4),
     time_in_force: 'fill_or_kill',
+    self_trade_prevention_type: 'taker_at_cross',
   };
 }
 
@@ -48,8 +49,9 @@ export function buildSellBody(ticker, side, contractsHeld) {
     side: side === 'yes' ? 'ask' : 'bid',
     count: count.toFixed(2),
     price: side === 'yes' ? '0.0100' : '0.9900',
-    time_in_force: 'fill_or_kill',
-    reduce_only: true,
+    time_in_force: 'immediate_or_cancel',
+self_trade_prevention_type: 'taker_at_cross',
+reduce_only: true,
   };
 }
 
