@@ -233,7 +233,7 @@ if (Number.isFinite(price) && Number.isFinite(delta)) {
       ` afterNo=${bestAfterNo}`
     );
 }
-
+}
     } else {
       // Not a price message we care about
       return;
