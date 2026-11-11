@@ -360,11 +360,13 @@ if (filled < Number(body.count)) {
     }
   }
 
-  // Append to trade log
+   // Log estimated exit P&L separately from verified P&L.
   await appendLog({
     asset, bet: trade.bet, mode: trade.mode,
-    amount: trade.amount, pnl: unrealizedPnL,
-    win: unrealizedPnL > 0, reason,
+    amount: trade.amount,
+    estimatedPnl: unrealizedPnL,
+    pnlStatus: 'UNVERIFIED',
+    reason,
     at: new Date().toISOString(),
     ...(state.simMode ? { sim: true } : {}),
   });
