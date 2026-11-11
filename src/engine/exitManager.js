@@ -204,14 +204,34 @@ const { body, result } = await executeSell(
   trade.ticker, trade.side, trade.count
 );
 
+
 const filled = confirmedFillCount(result, Number(body.count));
 
-if (filled !== Number(body.count)) {
+if (filled < Number(body.count)) {
   console.warn(
     `[Exit] Sell not fully filled: ${filled}/${body.count}`
   );
+
+  if (filled > 0) {
+    const originalCount = trade.count;
+    const fractionSold = filled / originalCount;
+
+    trade.count = Math.max(0, originalCount - filled);
+    trade.amount *= (1 - fractionSold);
+    trade.maxProfit *= (1 - fractionSold);
+
+    if (trade.lockedTP != null) {
+      trade.lockedTP *= (1 - fractionSold);
+    }
+
+    console.log(
+      `[Exit] Partial fill recorded: ${filled} sold, ${trade.count} remaining`
+    );
+  }
+
   return;
 }
+
 
   } catch (err) {
     // If market is finalized, Kalshi already settled the position — clear it
