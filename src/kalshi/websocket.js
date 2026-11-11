@@ -200,12 +200,40 @@ if (type === 'orderbook_delta') {
       const delta = parseFloat(data.delta_fp ?? '0');
       const book  = data.side === 'yes' ? this._yesBook : this._noBook;
 
-      if (price != null) {
-        const current = book.get(price) ?? 0;
-        const updated = current + delta;
-        if (updated <= 0) book.delete(price);
-        else              book.set(price, updated);
-      }
+      
+if (Number.isFinite(price) && Number.isFinite(delta)) {
+  const bestBeforeYes = Math.max(...this._yesBook.keys());
+  const bestBeforeNo = Math.max(...this._noBook.keys());
+  const current = book.get(price) ?? 0;
+  const updated = current + delta;
+
+  if (updated <= 0) book.delete(price);
+  else book.set(price, updated);
+
+  const bestAfterYes = Math.max(...this._yesBook.keys());
+  const bestAfterNo = Math.max(...this._noBook.keys());
+
+  const crossedBefore =
+    bestBeforeYes + bestBeforeNo > 1 + 1e-9;
+  const crossedAfter =
+    bestAfterYes + bestAfterNo > 1 + 1e-9;
+
+  if (!crossedBefore && crossedAfter) {
+    console.warn(
+      `[WS-DELTA-TRACE] ticker=${this.ticker}` +
+      ` seq=${msg.seq}` +
+      ` side=${data.side}` +
+      ` price=${price}` +
+      ` delta=${delta}` +
+      ` oldQty=${current}` +
+      ` newQty=${updated}` +
+      ` beforeYes=${bestBeforeYes}` +
+      ` beforeNo=${bestBeforeNo}` +
+      ` afterYes=${bestAfterYes}` +
+      ` afterNo=${bestAfterNo}`
+    );
+}
+
     } else {
       // Not a price message we care about
       return;
