@@ -97,9 +97,27 @@ export async function executeSell(ticker, side, contractsHeld) {
     console.log(`[SIM] SELL ${side} ${contractsHeld} contracts`);
     return { body, result: { fill_count: body.count, remaining_count: '0.00', sim: true } };
   }
-  await cancelOpenOrders(ticker);
-  const result = await placeOrder(body);
-  confirmedFillCount(result, Number(body.count));
-  return { body, result };
+
+console.log('[SELL-DIAG] Request:', JSON.stringify({
+  ticker: body.ticker,
+  side: body.side,
+  price: body.price,
+  count: body.count,
+  time_in_force: body.time_in_force,
+  reduce_only: body.reduce_only
+}));
+
+const result = await placeOrder(body);
+
+console.log('[SELL-DIAG] Response:', JSON.stringify({
+  order_id: result?.order_id ?? result?.order?.order_id,
+  fill_count: result?.fill_count,
+  remaining_count: result?.remaining_count,
+  status: result?.status ?? result?.order?.status
+}));
+
+confirmedFillCount(result, Number(body.count));
+return { body, result };
+
 }
 
