@@ -134,7 +134,9 @@ export async function getSettlementPage(params = {}) {
 export async function getSettlements(params = {}) {
   const data = await getSettlementPage(params);
   return data.settlements;
-}export async function getAllSettlements(params = {}) {
+}
+
+export async function getAllSettlements(params = {}) {
   const settlements = [];
   const seenCursors = new Set();
   let cursor = null;
