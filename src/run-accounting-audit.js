@@ -21,6 +21,48 @@ async function main() {
   printCounts('Total fills', fills);
   printCounts('Total settlements', settlements);
 
+  const target = fills.find(f =>
+    f.ticker?.startsWith(
+      'KXMVECROSSCATEGORY0-SHARD1-S202651C95801F1E-DB7CBCC8ECC'
+    )
+  );
+
+  if (target) {
+    const related = fills.filter(
+      f => f.ticker === target.ticker
+    );
+
+    const summary = {};
+
+    for (const f of related) {
+      const key =
+        `${f.action}:${f.outcome_side || f.side}`;
+
+      summary[key] ??= {
+        fills: 0,
+        contracts: 0
+      };
+
+      summary[key].fills++;
+      summary[key].contracts += Number(f.count_fp);
+    }
+
+    console.log('=== UNMATCHED MARKET ===');
+    console.log('Market fill count:', related.length);
+    console.log('Buy/sell totals:', summary);
+    console.log(
+      'Earliest fill:',
+      related.map(f => f.created_time || f.ts)
+        .sort()[0]
+    );
+  }
+```
+
+Commit and rerun the audit. It may still show a red X, but this time the logs will contain the buy/sell totals for the problematic market.
+
+Send me the **UNMATCHED MARKET** section.
+
+That will help determine whether we're missing purchase records or whether our matching logic needs to account for a different transaction structure. <MemoryCite />
   // The current reconciler does not isolate
   // individual subaccounts.
   const subaccounts = new Set(
