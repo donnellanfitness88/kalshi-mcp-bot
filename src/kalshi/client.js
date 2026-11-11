@@ -134,6 +134,37 @@ export async function getSettlementPage(params = {}) {
 export async function getSettlements(params = {}) {
   const data = await getSettlementPage(params);
   return data.settlements;
+}export async function getAllSettlements(params = {}) {
+  const settlements = [];
+  const seenCursors = new Set();
+  let cursor = null;
+
+  for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+    const page = await getSettlementPage({
+      ...params,
+      limit: 200,
+      ...(cursor ? { cursor } : {})
+    });
+
+    if (!Array.isArray(page.settlements)) {
+      throw new Error('Invalid Kalshi settlements response');
+    }
+
+    settlements.push(...page.settlements);
+
+    if (!page.cursor) {
+      return settlements;
+    }
+
+    if (seenCursors.has(page.cursor)) {
+      throw new Error('Repeated Kalshi settlement cursor');
+    }
+
+    seenCursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+
+  throw new Error('Settlement pagination limit reached');
 }
 export async function getOrders(params = {}) {
   const qs = new URLSearchParams(params).toString();
