@@ -231,6 +231,38 @@ async function executeExit(asset, s, reason, unrealizedPnL) {
 }
 async function performExit(asset, s, reason, unrealizedPnL) {
   const trade = s.activeTrade;
+    // Reconcile against Kalshi before submitting a sell.
+  if (!state.simMode && process.env.DRY_RUN !== 'true') {
+    try {
+      const positions = await getPositions();
+      const position = positions.find(p => p.ticker === trade.ticker);
+      const held = Number(position?.position_fp ?? 0);
+      const expectedSide = trade.side === 'yes' ? 1 : -1;
+
+      if (!Number.isFinite(held)) {
+        console.warn('[Exit] Invalid position data; skipping sell');
+        return;
+      }
+
+      if (held * expectedSide <= 0) {
+        console.warn(
+          `[Exit] No matching position for ${trade.ticker}; reconciliation required`
+        );
+        return;
+      }
+
+      const actualCount = Math.abs(held);
+      if (actualCount < trade.count) {
+        console.warn(
+          `[Exit] Position count mismatch: tracked=${trade.count}, actual=${actualCount}`
+        );
+        return;
+      }
+    } catch (err) {
+      console.error('[Exit] Position check failed:', err.message);
+      return;
+    }
+  }
   const pctCaptured = trade.maxProfit > 0 ? unrealizedPnL / trade.maxProfit : 0;
   console.log(`[Exit] ${asset} ${trade.mode ?? ''} ${trade.bet} ${reason} PnL=$${unrealizedPnL.toFixed(2)}`);
   const emoji = unrealizedPnL > 0 ? '✅' : '❌';
