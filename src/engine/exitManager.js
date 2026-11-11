@@ -1,3 +1,5 @@
+
+import { getEarlyRetracementExitReason } from './EarlyRetracement.js';
 import { executeSell, confirmedFillCount } from '../kalshi/orders.js';
 import { getMarket } from '../kalshi/client.js';
 import { recordTradePnL } from './riskManager.js';
@@ -39,6 +41,23 @@ export async function checkExit(ctx) {
   const { yesAsk, yesBid, yesVelHistory, secsLeft } = s;
   const unrealizedPnL = computeUnrealizedPnL(trade, yesAsk, yesBid);
   const pctCaptured = trade.maxProfit > 0 ? unrealizedPnL / trade.maxProfit : 0;
+
+  // Dedicated exits for BTC early-retracement trades.
+  // Do not apply the standard Farm exit rules to this mode.
+  if (trade.mode === 'EARLY_RETRACEMENT') {
+    const exitReason = getEarlyRetracementExitReason(
+      trade,
+      yesAsk,
+      yesBid,
+      secsLeft
+    );
+
+    if (exitReason) {
+      await executeExit(asset, s, exitReason, unrealizedPnL);
+    }
+
+    return;
+  }
 
   // Track peak side price for trail stop
   const currentSidePrice = trade.side === 'yes' ? yesBid : (1 - yesAsk);
