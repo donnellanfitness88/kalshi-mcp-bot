@@ -463,11 +463,24 @@ export async function startClock() {
   // Restore persisted arm state (farm/autobuy armed flags)
   loadBotState();
 
-  // 1-second heartbeat
-  setInterval(() => {
-    tick().catch(err => console.error('[Clock] tick error:', err.message));
+  
+ // 1-second heartbeat — prevent overlapping cycles
+let tickInProgress = false;
+
+setInterval(async () => {
+  if (tickInProgress) return;
+
+  tickInProgress = true;
+  try {
+    await tick();
+  } catch (err) {
+    console.error('[Clock] tick error:', err.message);
+  } finally {
+    tickInProgress = false;
     writeStateSnapshot();
-  }, 1000);
+  }
+}, 1000);
+
 
   console.log('[Clock] Running.');
 }
