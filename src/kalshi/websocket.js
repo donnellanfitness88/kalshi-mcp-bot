@@ -248,7 +248,12 @@ if (Number.isFinite(price) && Number.isFinite(delta)) {
 
     getMarketOrderbook(ticker)
       .then(response => {
-        const orderbook = response.orderbook ?? response;
+        
+const orderbook =
+  response.orderbook_fp ??
+  response.orderbook ??
+  response;
+
 
 console.warn(
   `[WS-REST-SHAPE] ticker=${ticker}` +
