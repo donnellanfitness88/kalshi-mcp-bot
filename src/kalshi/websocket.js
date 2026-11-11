@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { buildHeaders } from './client.js';
-
+import { getMarketOrderbook } from './client.js';
 const WS_URL = 'wss://api.elections.kalshi.com/trade-api/ws/v2';
 const RECONNECT_DELAY_MS  = 500;
 const HEARTBEAT_TIMEOUT_MS = 30_000; // force reconnect if no orderbook message for 5s
@@ -241,6 +241,47 @@ if (Number.isFinite(price) && Number.isFinite(delta)) {
 
   // Track the next 30 deltas after a book first crosses.
   if (!crossedBefore && crossedAfter) {
+    
+    const ticker = this.ticker;
+    const localYes = bestAfterYes;
+    const localNo = bestAfterNo;
+
+    getMarketOrderbook(ticker)
+      .then(response => {
+        const orderbook = response.orderbook ?? response;
+
+        const levels = (side) =>
+          orderbook[`${side}_dollars_fp`] ??
+          orderbook[`${side}_dollars`] ??
+          [];
+
+        const best = (rows) => Math.max(
+          -Infinity,
+          ...rows
+            .filter(row => Number(row[1]) > 0)
+            .map(row => Number(row[0]))
+        );
+
+        const restYes = best(levels('yes'));
+        const restNo = best(levels('no'));
+
+        console.warn(
+          `[WS-REST-COMPARE] ticker=${ticker}` +
+          ` localYes=${localYes}` +
+          ` localNo=${localNo}` +
+          ` restYes=${restYes}` +
+          ` restNo=${restNo}` +
+          ` restCrossed=${restYes + restNo > 1 + 1e-9}`
+        );
+      })
+      .catch(error => {
+        console.warn(
+          `[WS-REST-COMPARE-ERROR] ticker=${ticker}` +
+          ` error=${error.message}`
+        );
+      });
+
+
     this._crossFollowup = {
       remaining: 30,
       yesPrice: bestAfterYes,
