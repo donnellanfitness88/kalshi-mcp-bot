@@ -88,6 +88,38 @@ export async function getFills(params = {}) {
   const data = await getFillPage(params);
   return data.fills;
 }
+export async function getAllFills(params = {}) {
+  const fills = [];
+  const seenCursors = new Set();
+  let cursor = null;
+
+  for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+    const page = await getFillPage({
+      ...params,
+      limit: 200,
+      ...(cursor ? { cursor } : {})
+    });
+
+    if (!Array.isArray(page.fills)) {
+      throw new Error('Invalid Kalshi fills response');
+    }
+
+    fills.push(...page.fills);
+
+    if (!page.cursor) {
+      return fills;
+    }
+
+    if (seenCursors.has(page.cursor)) {
+      throw new Error('Repeated Kalshi pagination cursor');
+    }
+
+    seenCursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+
+  throw new Error('Fill pagination limit reached');
+}
 export async function getSettlementPage(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const path = '/portfolio/settlements' + (qs ? '?' + qs : '');
