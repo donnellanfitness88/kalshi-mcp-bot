@@ -190,13 +190,13 @@ if (type === 'orderbook_delta') {
       if (Array.isArray(data.no_dollars_fp)) {
         for (const [price, qty] of data.no_dollars_fp) {
           const q = parseFloat(qty);
-          if (q > 0) this._noBook.set(price, q);
+          if (q > 0) this._noBook.set(Number(price), q);
         }
       }
     } else if (type === 'orderbook_delta') {
       // Apply delta to the relevant book.
       // side: "yes" → YES book, side: "no" → NO book
-      const price = data.price_dollars;
+      const price = Number(data.price_dollars);
       const delta = parseFloat(data.delta_fp ?? '0');
       const book  = data.side === 'yes' ? this._yesBook : this._noBook;
 
