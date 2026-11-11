@@ -73,11 +73,20 @@ export async function getPositions() {
   return data.market_positions || [];
 }
 
-export async function getFills(params = {}) {
+export async function getFillPage(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const path = '/portfolio/fills' + (qs ? '?' + qs : '');
   const data = await request('GET', path);
-  return data.fills || [];
+
+  return {
+    fills: data.fills || [],
+    cursor: data.cursor || null
+  };
+}
+
+export async function getFills(params = {}) {
+  const data = await getFillPage(params);
+  return data.fills;
 }
 export async function getSettlementPage(params = {}) {
   const qs = new URLSearchParams(params).toString();
