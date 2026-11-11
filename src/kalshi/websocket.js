@@ -232,9 +232,45 @@ if (Number.isFinite(price) && Number.isFinite(delta)) {
       ` afterYes=${bestAfterYes}` +
       ` afterNo=${bestAfterNo}`
     );
-}
+
+  }
+
+  // Track the next 30 deltas after a book first crosses.
+  if (!crossedBefore && crossedAfter) {
+    this._crossFollowup = {
+      remaining: 30,
+      yesPrice: bestAfterYes,
+      noPrice: bestAfterNo
+    };
+  } else if (this._crossFollowup?.remaining > 0) {
+    const trace = this._crossFollowup;
+    const targeted =
+      (data.side === 'yes' && price === trace.yesPrice) ||
+      (data.side === 'no' && price === trace.noPrice);
+
+    console.warn(
+      `[WS-CROSS-FOLLOWUP] ticker=${this.ticker}` +
+      ` seq=${msg.seq}` +
+      ` side=${data.side}` +
+      ` price=${price}` +
+      ` delta=${delta}` +
+      ` oldQty=${current}` +
+      ` newQty=${Math.max(0, updated)}` +
+      ` targeted=${targeted}` +
+      ` bestYes=${bestAfterYes}` +
+      ` bestNo=${bestAfterNo}` +
+      ` crossed=${crossedAfter}`
+    );
+
+    trace.remaining--;
+
+    if (!crossedAfter || trace.remaining === 0) {
+      this._crossFollowup = null;
+    }
+  }
 }
     } else {
+
       // Not a price message we care about
       return;
     }
