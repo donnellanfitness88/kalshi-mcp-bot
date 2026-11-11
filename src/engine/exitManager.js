@@ -1,7 +1,7 @@
 
 import { getEarlyRetracementExitReason } from './EarlyRetracement.js';
 import { executeSell, confirmedFillCount } from '../kalshi/orders.js';
-import { getMarket } from '../kalshi/client.js';
+import { getMarket, getPositions } from '../kalshi/client.js';
 import { recordTradePnL } from './riskManager.js';
 import { recordTrade as recordBrainTrade } from '../nn/store.js';
 import { buildFeatures, buildFeaturesNorm } from '../nn/features.js';
