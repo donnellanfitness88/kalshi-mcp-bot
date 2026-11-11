@@ -146,9 +146,13 @@ if (
     if (!data) return;
 if (data.market_ticker && data.market_ticker !== this.ticker) return;
 
+
 if (type === 'orderbook_snapshot') {
   this._lastBookSeq = msg.seq;
+  this._crossFollowup = null;
+  this._wasCrossed = false;
 }
+
 
 if (type === 'orderbook_delta') {
   if (!Number.isSafeInteger(msg.seq)) {
