@@ -221,6 +221,14 @@ if (!exitReason) {
 }
 
 async function executeExit(asset, s, reason, unrealizedPnL) {
+    if (s.exitInProgress) return;
+  s.exitInProgress = true;
+  try {
+    await performExit(asset, s, reason, unrealizedPnL);
+  } finally {
+    s.exitInProgress = false;
+  }
+}async function performExit(asset, s, reason, unrealizedPnL) {
   const trade = s.activeTrade;
   const pctCaptured = trade.maxProfit > 0 ? unrealizedPnL / trade.maxProfit : 0;
   console.log(`[Exit] ${asset} ${trade.mode ?? ''} ${trade.bet} ${reason} PnL=$${unrealizedPnL.toFixed(2)}`);
