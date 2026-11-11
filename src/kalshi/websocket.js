@@ -228,6 +228,18 @@ if (Number.isFinite(price) && Number.isFinite(delta)) {
     bestAfterYes + bestAfterNo > 1 + 1e-9;
 
   if (!crossedBefore && crossedAfter) {
+    
+console.warn(
+  `[WS-RAW-CROSS] ticker=${this.ticker}` +
+  ` seq=${msg.seq}` +
+  ` raw=${JSON.stringify(data)}` +
+  ` priceType=${typeof data.price_dollars}` +
+  ` deltaType=${typeof data.delta_fp}` +
+  ` snapshotSeq=${this._lastBookSeq}` +
+  ` yesBest=${bestAfterYes}` +
+  ` noBest=${bestAfterNo}`
+);
+
     console.warn(
       `[WS-DELTA-TRACE] ticker=${this.ticker}` +
       ` seq=${msg.seq}` +
