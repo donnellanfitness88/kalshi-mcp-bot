@@ -1,0 +1,39 @@
+
+name: Inspect Kalshi Accounting Fields
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check credentials
+        env:
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+        run: |
+          test -n "$KALSHI_KEY_ID" || { echo "Missing KALSHI_KEY_ID secret"; exit 1; }
+          test -n "$KALSHI_PRIVATE_KEY" || { echo "Missing KALSHI_PRIVATE_KEY secret"; exit 1; }
+
+      - name: Inspect transaction field names
+        env:
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+        run: node src/kalshi/inspect-accounting.js
