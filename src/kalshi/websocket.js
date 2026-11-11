@@ -519,7 +519,7 @@ if (
 
 this._crossedSince = null;
 return { yesAsk, yesBid };
-  return { yesAsk, yesBid };
+
 }
 
   
