@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import fs from 'fs';
+import { checkEarlyRetracement } from './EarlyRetracement.js';
 import { checkFarmBot } from './farmBot.js';
 import { checkAutoBuy } from './autoBuy.js';
 import { checkExit } from './exitManager.js';
@@ -379,11 +380,24 @@ if (now % 60000 < 1000) {
       await checkExit(ctx);
     }
 
-    // New entry only when flat — skip disabled assets (sim training focus)
+    
+    // New entry only when flat — skip disabled assets.
     if (!s.activeTrade && !state.disabledAssets.includes(asset)) {
-      if (s.farmArmed)     await checkFarmBot(ctx);
-      else if (s.autoBuyArmed) await checkAutoBuy(ctx);
+      // BTC early-retracement strategy gets first evaluation.
+      if (asset === 'BTC' && s.farmArmed) {
+        await checkEarlyRetracement(ctx);
+      }
+
+      // Preserve existing Farm and AutoBuy strategies.
+      if (!s.activeTrade) {
+        if (s.farmArmed) {
+          await checkFarmBot(ctx);
+        } else if (s.autoBuyArmed) {
+          await checkAutoBuy(ctx);
+        }
+      }
     }
+
   }
 }
 
