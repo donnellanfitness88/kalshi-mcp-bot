@@ -2,55 +2,81 @@
 import { getAllFills } from './kalshi/client.js';
 
 function decimal(value, field) {
-  if (typeof value !== 'string' &&
-      typeof value !== 'number') {
-    throw new Error(`Missing ${field}`);
-  }
-
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) {
+  if (
+    (typeof value !== 'string' &&
+      typeof value !== 'number') ||
+    value === '' ||
+    !Number.isFinite(Number(value)) ||
+    Number(value) < 0
+  ) {
     throw new Error(`Invalid ${field}`);
   }
-  return n;
+  return Number(value);
 }
 
-function reconcile(fills) {
+export function reconcileFills(fills) {
+  if (!Array.isArray(fills)) {
+    throw new Error('Fills must be an array');
+  }
+
   const unique = new Map();
 
   for (const fill of fills) {
     if (!fill.fill_id) {
       throw new Error('Fill missing fill_id');
     }
+    if (unique.has(fill.fill_id)) {
+      throw new Error(`Duplicate fill_id: ${fill.fill_id}`);
+    }
     unique.set(fill.fill_id, fill);
   }
 
-  const ordered = [...unique.values()].sort(
-    (a, b) =>
-      Date.parse(a.created_time || a.ts) -
-      Date.parse(b.created_time || b.ts)
-  );
+  const ordered = [...unique.values()].map(fill => {
+    const timestamp = Date.parse(
+      fill.created_time || fill.ts
+    );
+
+    if (!Number.isFinite(timestamp)) {
+      throw new Error('Invalid fill timestamp');
+    }
+
+    return { fill, timestamp };
+  }).sort((a, b) => a.timestamp - b.timestamp);
 
   const positions = new Map();
   const results = [];
 
-  for (const fill of ordered) {
-    const side = fill.side || fill.outcome_side;
-    const key = `${fill.ticker}:${side}`;
+  for (const { fill } of ordered) {
+    const side = fill.outcome_side || fill.side;
+
+    if (!['yes', 'no'].includes(side)) {
+      throw new Error('Invalid contract side');
+    }
+    if (!fill.ticker) {
+      throw new Error('Missing ticker');
+    }
+
     const action = fill.action;
     const count = decimal(fill.count_fp, 'count_fp');
+
+    if (count <= 0) {
+      throw new Error('Invalid contract quantity');
+    }
+
     const price = decimal(
       side === 'yes'
         ? fill.yes_price_dollars
         : fill.no_price_dollars,
       'price'
     );
+
     const fee = decimal(fill.fee_cost, 'fee_cost');
+    const key = `${fill.ticker}:${side}`;
 
     const p = positions.get(key) || {
       count: 0,
       cost: 0,
-      fees: 0,
-      realized: 0
+      fees: 0
     };
 
     if (action === 'buy') {
@@ -59,12 +85,7 @@ function reconcile(fills) {
       p.fees += fee;
     } else if (action === 'sell') {
       if (count > p.count + 1e-9) {
-        results.push({
-          ticker: fill.ticker,
-          side,
-          status: 'UNMATCHED_SELL'
-        });
-        continue;
+        throw new Error(`Unmatched sell: ${key}`);
       }
 
       const fraction = count / p.count;
@@ -77,7 +98,6 @@ function reconcile(fills) {
       p.count -= count;
       p.cost -= cost;
       p.fees -= entryFee;
-      p.realized += pnl;
 
       results.push({
         ticker: fill.ticker,
@@ -96,23 +116,7 @@ function reconcile(fills) {
   return { results, positions };
 }
 
-const fills = await getAllFills();
-const report = reconcile(fills);
-
-console.log('=== MATCHED SELL RESULTS ===');
-
-for (const result of report.results) {
-  console.log(result);
-}
-
-console.log('=== REMAINING POSITIONS ===');
-
-for (const [key, position] of report.positions) {
-  if (position.count > 0.000001) {
-    console.log(key, {
-      count: position.count,
-      remainingCost: position.cost,
-      remainingEntryFees: position.fees
-    });
-  }
+export async function runFillReport() {
+  const fills = await getAllFills();
+  return reconcileFills(fills);
 }
