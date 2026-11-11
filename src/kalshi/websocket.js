@@ -250,6 +250,24 @@ if (Number.isFinite(price) && Number.isFinite(delta)) {
       .then(response => {
         const orderbook = response.orderbook ?? response;
 
+console.warn(
+  `[WS-REST-SHAPE] ticker=${ticker}` +
+  ` responseKeys=${JSON.stringify(Object.keys(response))}` +
+  ` orderbookKeys=${JSON.stringify(Object.keys(orderbook))}` +
+  ` yesSample=${JSON.stringify(
+    orderbook.yes_dollars_fp ??
+    orderbook.yes_dollars ??
+    orderbook.yes ??
+    null
+  ).slice(0, 250)}` +
+  ` noSample=${JSON.stringify(
+    orderbook.no_dollars_fp ??
+    orderbook.no_dollars ??
+    orderbook.no ??
+    null
+  ).slice(0, 250)}`
+);
+
         const levels = (side) =>
           orderbook[`${side}_dollars_fp`] ??
           orderbook[`${side}_dollars`] ??
