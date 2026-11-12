@@ -298,10 +298,15 @@ export function createScalpPosition({
     side: direction === 'UP' ? 'yes' : 'no',
     count: confirmedContracts,
     entrySidePrice: averageFillPrice,
-    amount: confirmedContracts * averageFillPrice,
-    entryFees,
-    estimatedExitFees,
-    startedAt
+    
+amount: confirmedContracts * averageFillPrice,
+maxProfit: confirmedContracts * (1 - averageFillPrice),
+entryFees,
+estimatedExitFees,
+startedAt,
+canStopAfter: startedAt,
+sim: false
+
   };
 
   const validation = validateScalpPosition(position);
