@@ -1,315 +1,95 @@
-import { normalizeFill } from './normalize-fills.js';
-import {
-  getAllFills,
-  getAllSettlements,
-  getPositions
-} from './kalshi/client.js';
 
-import {
-  auditAccounting
-} from './combined-accounting.js';
+/**
+ * Kalshi BTC/ETH 15-minute read-only accounting inventory.
+ * No order placement, trading configuration changes, or speculative P&L.
+ * Run: node src/run-accounting-audit.js
+ */
+import { getAllFills, getAllSettlements } from './kalshi/client.js';
 
-function printCounts(label, items) {
-  console.log(`${label}: ${items.length}`);
+const SERIES = ['KXBTC15M', 'KXETH15M'];
+const round = (x) => Number(x.toFixed(6));
+const classify = (ticker) => SERIES.find(s => typeof ticker === 'string' && ticker.startsWith(s + '-')) || null;
+const validNumber = (v) => (v === undefined || v === null || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+
+function summarize(series, fills, settlements) {
+  const f = fills.filter(x => classify(x.ticker) === series);
+  const s = settlements.filter(x => classify(x.ticker) === series);
+  const marketSet = new Set([...f, ...s].map(x => x.ticker));
+  const fillIds = new Set();
+  const issues = [];
+  let fees = 0;
+  let quantity = 0;
+  let notional = 0;
+  let knownFeeCount = 0;
+  let knownNotionalCount = 0;
+  const sides = {};
+  for (const x of f) {
+    if (!x.fill_id) issues.push({ticker:x.ticker, issue:'MISSING_FILL_ID'});
+    else if (fillIds.has(x.fill_id)) issues.push({ticker:x.ticker, issue:'DUPLICATE_FILL_ID'});
+    else fillIds.add(x.fill_id);
+    const side = x.outcome_side ?? x.side;
+    const key = `${x.action ?? 'missing'}:${side ?? 'missing'}`;
+    sides[key] = (sides[key] || 0) + 1;
+    const qty = validNumber(x.count_fp);
+    if (qty === null || qty <= 0) issues.push({ticker:x.ticker, issue:'INVALID_FILL_QUANTITY'});
+    else {
+      quantity += qty;
+      const price = validNumber(side === 'yes' ? x.yes_price_dollars : x.no_price_dollars);
+      if (price !== null && price >= 0 && price <= 1) {
+        notional += qty * price;
+        knownNotionalCount++;
+      } else issues.push({ticker:x.ticker, issue:'MISSING_OR_INVALID_PRICE'});
+    }
+    const fee = validNumber(x.fee_cost);
+    if (fee === null || fee < 0) issues.push({ticker:x.ticker, issue:'MISSING_OR_INVALID_FILL_FEE'});
+    else { fees += fee; knownFeeCount++; }
+  }
+  const settlementResults = {};
+  for (const x of s) {
+    const result = x.market_result ?? 'missing';
+    settlementResults[result] = (settlementResults[result] || 0) + 1;
+  }
+  const settledTickers = new Set(s.map(x => x.ticker));
+  const fillTickers = new Set(f.map(x => x.ticker));
+  return {
+    series,
+    fills: f.length,
+    settlements: s.length,
+    uniqueMarkets: marketSet.size,
+    fillMarketsWithoutSettlementRecord: [...fillTickers].filter(x => !settledTickers.has(x)).length,
+    settlementMarketsWithoutFillRecord: [...settledTickers].filter(x => !fillTickers.has(x)).length,
+    fillPatterns: sides,
+    settlementResults,
+    totalFilledContractsAcrossTransactions: round(quantity),
+    totalExecutedNotionalUsd: knownNotionalCount === f.length ? round(notional) : null,
+    observedFillFeesUsd: knownFeeCount === f.length ? round(fees) : null,
+    dataQuality: { issues: issues.length, examples: issues.slice(0, 10) },
+    pnl: {
+      status: 'NOT_VERIFIED',
+      realizedNetUsd: null,
+      winRate: null,
+      reason: 'Fill direction, position closure, settlement cash flows, and fee attribution are not yet reconciled. Notional and fill fees are not net profit.'
+    }
+  };
 }
 
 async function main() {
-  console.log('=== KALSHI READ-ONLY AUDIT ===');
-
-  const fills = await getAllFills();
-  const settlements = await getAllSettlements();
-
-  printCounts('Total fills', fills);
-  printCounts('Total settlements', settlements);
-
-  const patterns = {};
-
-  for (const f of fills) {
-    const key = [
-      f.action ?? 'missing',
-      f.outcome_side ?? f.side ?? 'missing',
-      f.book_side ?? 'missing'
-    ].join(' / ');
-
-    patterns[key] ??= {
-      fills: 0,
-      contracts: 0
-    };
-
-    patterns[key].fills++;
-    patterns[key].contracts += Number(f.count_fp || 0);
-  }
-
-  console.log('=== FILL PATTERNS ===');
-  console.log(JSON.stringify(patterns, null, 2));
-
-  const exposure = {
-    yes: { fills: 0, contracts: 0 },
-    no: { fills: 0, contracts: 0 },
-    unknown: { fills: 0, contracts: 0 }
+  console.log('=== KALSHI BTC/ETH READ-ONLY ACCOUNTING REPORT ===');
+  const [fills, settlements] = await Promise.all([getAllFills(), getAllSettlements()]);
+  if (!Array.isArray(fills) || !Array.isArray(settlements)) throw new Error('Invalid API response arrays');
+  const report = {
+    generatedAtUtc: new Date().toISOString(),
+    scope: 'KXBTC15M and KXETH15M ticker prefixes only; account fills may include manual trading',
+    sourceTotals: {fills: fills.length, settlements: settlements.length},
+    markets: SERIES.map(s => summarize(s, fills, settlements)),
+    exclusions: {
+      otherMarketFills: fills.filter(x => !classify(x.ticker)).length,
+      otherMarketSettlements: settlements.filter(x => !classify(x.ticker)).length
+    },
+    auditConclusion: 'HISTORICAL_NET_PNL_UNVERIFIED',
+    nextEvidenceNeeded: 'Authoritative position-close and settlement cash-flow interpretation, plus bot order identifiers to distinguish bot trades from manual trades.'
   };
-
-  for (const f of fills) {
-    const side = f.outcome_side || f.side;
-
-    let direction = 'unknown';
-
-    if (
-      (f.action === 'buy' && side === 'yes') ||
-      (f.action === 'sell' && side === 'no')
-    ) {
-      direction = 'yes';
-    }
-
-    if (
-      (f.action === 'buy' && side === 'no') ||
-      (f.action === 'sell' && side === 'yes')
-    ) {
-      direction = 'no';
-    }
-
-    exposure[direction].fills++;
-    exposure[direction].contracts +=
-      Number(f.count_fp || 0);
-  }
-
-  console.log('=== ECONOMIC DIRECTION ===');
-  console.log(JSON.stringify(exposure, null, 2));
-
-  const target = fills.find(f =>
-    f.ticker?.startsWith(
-      'KXMVECROSSCATEGORY0-SHARD1-S202651C95801F1E-DB7CBCC8ECC'
-    )
-  );
-
-  if (target) {
-    const related = fills.filter(
-      f => f.ticker === target.ticker
-    );
-
-    const summary = {};
-
-    for (const f of related) {
-      const key =
-        `${f.action}:${f.outcome_side || f.side}`;
-
-      summary[key] ??= {
-        fills: 0,
-        contracts: 0
-      };
-
-      summary[key].fills++;
-      summary[key].contracts += Number(f.count_fp);
-    }
-
-    console.log('=== UNMATCHED MARKET ===');
-    
-    for (const f of related) {
-      console.log('FILL DETAIL:', {
-        time: f.created_time || f.ts,
-        action: f.action,
-        side: f.outcome_side || f.side,
-        book_side: f.book_side,
-        quantity: f.count_fp,
-        yes_price: f.yes_price_dollars,
-        no_price: f.no_price_dollars,
-        fee: f.fee_cost
-      });
-    }
-
-    console.log('Market fill count:', related.length);
-    console.log('Buy/sell totals:', summary);
-    console.log(
-      'Earliest fill:',
-      related.map(f => f.created_time || f.ts)
-        .sort()[0]
-    );
-  }
-
-  // Check subaccount scope before reconciliation.
-  const subaccounts = new Set(
-    fills.map(f => f.subaccount_number ?? 0)
-  );
-
-  if (subaccounts.size > 1) {
-    console.log(
-      'STATUS: MULTIPLE_SUBACCOUNTS_UNSUPPORTED'
-    );
-    return;
-  }
-
-  if (
-    subaccounts.size === 1 &&
-    !subaccounts.has(0)
-  ) {
-    console.log(
-      'STATUS: SETTLEMENT_ACCOUNT_SCOPE_UNVERIFIED'
-    );
-    return;
-  }
-
-  console.log('=== NORMALIZATION VALIDATION ===');
-
-  const results = {
-    total: fills.length,
-    normalized: 0,
-    rejected: 0,
-    bySide: { yes: 0, no: 0 },
-    rejectionReasons: {}
-  };
-
-  for (const fill of fills) {
-    try {
-      const normalized = normalizeFill(fill);
-
-      results.normalized++;
-
-      results.bySide[normalized.economicSide]++;
-    } catch (error) {
-      results.rejected++;
-
-      const reason = error.message;
-
-      results.rejectionReasons[reason] =
-        (results.rejectionReasons[reason] || 0) + 1;
-    }
-  }
-
-  console.log(JSON.stringify(results, null, 2));
-
-  if (results.rejected > 0) {
-    console.log('STATUS: NORMALIZATION_REVIEW_REQUIRED');
-    return;
-  }
-
-  console.log('STATUS: NORMALIZATION_PASSED');
-
-  console.log('=== KALSHI POSITION PNL CHECK ===');
-
-  const positions = await getPositions();
-
-  const summary = {
-    returnedPositions: positions.length,
-    withDollarPnl: 0,
-    missingDollarPnl: 0,
-    reportedRealizedPnlDollars: 0,
-    examples: []
-  };
-
-  for (const p of positions) {
-    const pnl = Number(p.realized_pnl_dollars);
-
-    if (
-      p.realized_pnl_dollars == null ||
-      !Number.isFinite(pnl)
-    ) {
-      summary.missingDollarPnl++;
-      continue;
-    }
-
-    summary.withDollarPnl++;
-    summary.reportedRealizedPnlDollars += pnl;
-
-    if (summary.examples.length < 5) {
-      summary.examples.push({
-        ticker: p.ticker,
-        realizedPnlDollars: pnl
-      });
-    }
-  }
-
-  console.log(JSON.stringify(summary, null, 2));
-
-  console.log('=== SETTLEMENT VALUE CHECK ===');
-
-  const examples = settlements
-    .filter(s =>
-      Number(s.yes_count_fp || 0) > 0 ||
-      Number(s.no_count_fp || 0) > 0
-    )
-    .slice(0, 5);
-
-  for (const s of examples) {
-    console.log({
-      marketResult: s.market_result,
-      yesCount: s.yes_count_fp,
-      noCount: s.no_count_fp,
-      yesCost: s.yes_total_cost_dollars,
-      noCost: s.no_total_cost_dollars,
-      revenue: s.revenue,
-      value: s.value,
-      fee: s.fee_cost
-    });
-  }
-
-  console.log('Settlement examples:', examples.length);
-
-  console.log('=== SETTLEMENT PAYOUT AUDIT ===');
-
-  const payoutAudit = {
-    checked: 0,
-    matched: 0,
-    mismatched: 0,
-    unsupported: 0,
-    examples: []
-  };
-
-  for (const s of settlements) {
-    const yes = Number(s.yes_count_fp);
-    const no = Number(s.no_count_fp);
-    const revenue = Number(s.revenue);
-    const value = Number(s.value);
-
-    if (
-      !['yes', 'no'].includes(s.market_result) ||
-      ![yes, no, revenue, value].every(Number.isFinite)
-    ) {
-      payoutAudit.unsupported++;
-      continue;
-    }
-
-    // Expected total payout in cents for binary markets.
-    const expected =
-      yes * value + no * (100 - value);
-
-    payoutAudit.checked++;
-
-    if (Math.abs(expected - revenue) < 0.01) {
-      payoutAudit.matched++;
-    } else {
-      payoutAudit.mismatched++;
-
-      if (payoutAudit.examples.length < 5) {
-        payoutAudit.examples.push({
-          result: s.market_result,
-          yes,
-          no,
-          value,
-          expectedRevenueCents: expected,
-          actualRevenueCents: revenue
-        });
-      }
-    }
-  }
-
-  console.log(JSON.stringify(payoutAudit, null, 2));
-
-  // Existing reconciliation remains unchanged
-  // until position accounting is verified.
-  return;
-
-  const report = auditAccounting(fills, settlements);
-
-  console.log('=== AUDIT SUMMARY ===');
-  console.log('Status:', report.status);
-  console.log('Matched sales:', report.fillSales);
-  console.log('Settlements checked:', report.settlementsChecked);
-  console.log('Quantity checks:', report.checks.length);
-  console.log('Issues:', report.issues.length);
-  console.log('Unresolved positions:', report.unresolved.length);
+  console.log(JSON.stringify(report, null, 2));
+  console.log('STATUS: READ_ONLY_INVENTORY_COMPLETE_PNL_UNVERIFIED');
 }
-
-main().catch(error => {
-  console.error('AUDIT FAILED:', error.message);
-  process.exitCode = 1;
-});
+main().catch(error => { console.error('AUDIT FAILED:', error.message); process.exitCode = 1; });
