@@ -1,4 +1,6 @@
 
+import { getAllFills } from '../kalshi/client.js';
+
 /**
  * SCALP strategy — research and testing.
  * No live order placement.
@@ -309,4 +311,38 @@ export function createScalpPosition({
   }
 
   return position;
+}
+
+/**
+ * Retrieve execution records for a SCALP order.
+ * Read-only: does not submit or cancel orders.
+ */
+export async function getScalpOrderFills({
+  ticker,
+  orderId
+}) {
+  if (
+    typeof ticker !== 'string' ||
+    !ticker.trim() ||
+    typeof orderId !== 'string' ||
+    !orderId.trim()
+  ) {
+    throw new Error('Invalid SCALP order identifiers');
+  }
+
+  const fills = await getAllFills({ ticker });
+
+  const matching = fills.filter(
+    fill => fill.order_id === orderId
+  );
+
+  return {
+    ticker,
+    orderId,
+    fills: matching,
+    fillCount: matching.length,
+    rawFields: matching.length
+      ? Object.keys(matching[0])
+      : []
+  };
 }
