@@ -27,6 +27,13 @@ function createAssetState() {
 
     // Active trade (null when flat)
     activeTrade: null,
+    
+    // SCALP entry state.
+    // An uncertain order must be reconciled, not retried.
+    scalpEntryInProgress: false,
+    scalpPendingOrder: null,
+    scalpEntryError: null,
+
     /* activeTrade shape:
       { ticker, bet, side, amount, count, entryYes, maxProfit,
         lockedTP, lockedSL, peakYes,
