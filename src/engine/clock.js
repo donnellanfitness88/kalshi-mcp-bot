@@ -389,7 +389,13 @@ if (
     yesBid: s.yesBid
   });
 
-  if (scalpSignal.shouldEnter) {
+  
+if (
+  scalpSignal.shouldEnter &&
+  Date.now() - (s.lastExitTime || 0) >= 8_000 &&
+  s.secsLeft > 60
+) {
+
     const now = Date.now();
 
     if (
