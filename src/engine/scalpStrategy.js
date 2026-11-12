@@ -219,3 +219,43 @@ export function evaluateScalpEntry({
     moveCents: move * 100
   };
 }
+
+/**
+ * Validate a SCALP position before evaluating
+ * profit targets or submitting an exit.
+ */
+export function validateScalpPosition(trade) {
+  if (!trade || trade.mode !== 'SCALP') {
+    return { valid: false, reason: 'NOT_SCALP' };
+  }
+
+  if (
+    !trade.ticker ||
+    !['yes', 'no'].includes(trade.side) ||
+    !Number.isInteger(trade.count) ||
+    trade.count <= 0
+  ) {
+    return { valid: false, reason: 'INVALID_POSITION' };
+  }
+
+  if (
+    !Number.isFinite(trade.entrySidePrice) ||
+    trade.entrySidePrice <= 0 ||
+    trade.entrySidePrice >= 1 ||
+    !Number.isFinite(trade.startedAt) ||
+    trade.startedAt <= 0
+  ) {
+    return { valid: false, reason: 'INVALID_ENTRY' };
+  }
+
+  if (
+    !Number.isFinite(trade.entryFees) ||
+    !Number.isFinite(trade.estimatedExitFees) ||
+    trade.entryFees < 0 ||
+    trade.estimatedExitFees < 0
+  ) {
+    return { valid: false, reason: 'INVALID_FEES' };
+  }
+
+  return { valid: true, reason: 'POSITION_VALID' };
+}
