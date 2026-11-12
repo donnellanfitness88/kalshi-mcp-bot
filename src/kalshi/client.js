@@ -79,11 +79,6 @@ export async function getPositions() {
 }
 
 
-export async function getPositions() {
-  const data = await request('GET', '/portfolio/positions');
-  return data.market_positions || [];
-}
-
 export async function getFillPage(params = {}) {
   const qs = new URLSearchParams(params).toString();
   const path = '/portfolio/fills' + (qs ? '?' + qs : '');
