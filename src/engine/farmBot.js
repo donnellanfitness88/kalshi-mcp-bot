@@ -387,10 +387,17 @@ export async function checkFarmBot(ctx) {
   });
   if (!features) { if (Math.random() < 0.02) console.log(`[Farm] ${asset} features null — buffer not warm`); return; }
 
-  if (!decision.shouldFarm) {
-    if (Math.random() < 0.01) console.log(`[Farm] ${asset} blocked: ${decision.reason}`);
-    return;
+  
+if (!decision.shouldFarm) {
+  if (Math.random() < 0.01) {
+    console.log(`[Farm] ${asset} blocked: ${decision.reason}`);
+    if (decision.diagnostics) {
+      console.log(`[Farm] ${asset} entry diagnostics: ${JSON.stringify(decision.diagnostics)}`);
+    }
   }
+  return;
+}
+
 
   const { bet, target, stop, mode } = decision;
 
