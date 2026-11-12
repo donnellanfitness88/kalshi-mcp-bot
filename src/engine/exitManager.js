@@ -302,7 +302,10 @@ if (filled < Number(body.count)) {
   if (filled > 0) {
     const originalCount = trade.count;
     const fractionSold = filled / originalCount;
-
+if (fractionSold <= 0 || fractionSold > 1) {
+  console.error('[Exit] Invalid partial fill fraction:', fractionSold);
+  return;
+}
     trade.count = Math.max(0, originalCount - filled);
     trade.amount *= (1 - fractionSold);
     trade.maxProfit *= (1 - fractionSold);
