@@ -48,6 +48,20 @@ async function main() {
     }
 
     console.log('=== UNMATCHED MARKET ===');
+    
+    for (const f of related) {
+      console.log('FILL DETAIL:', {
+        time: f.created_time || f.ts,
+        action: f.action,
+        side: f.outcome_side || f.side,
+        book_side: f.book_side,
+        quantity: f.count_fp,
+        yes_price: f.yes_price_dollars,
+        no_price: f.no_price_dollars,
+        fee: f.fee_cost
+      });
+    }
+
     console.log('Market fill count:', related.length);
     console.log('Buy/sell totals:', summary);
     console.log(
