@@ -29,7 +29,7 @@ export function reconcileManualExit(trade, held, fills) {
   let sold = 0, proceeds = 0, fees = 0;
   for (const fill of fills) {
     if ((fill.ticker ?? fill.market_ticker) !== trade.ticker) continue;
-    if (fill.order_id === trade.entryOrderId || accounted.has(fill.order_id)) continue;
+    if ((trade.entryOrderIds ?? [trade.entryOrderId]).includes(fill.order_id) || accounted.has(fill.order_id)) continue;
     const ts = Date.parse(fill.created_time);
     // Fill timestamps may be rounded to seconds. Never match earlier windows.
     if (!Number.isFinite(ts) || ts < Math.floor(trade.startedAt / 1000) * 1000) continue;

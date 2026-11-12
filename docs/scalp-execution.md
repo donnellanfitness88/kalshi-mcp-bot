@@ -6,7 +6,7 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 ## Current scalp rules
 
 - Entry budget: at most $10 including a fee reserve. One position or unresolved
-  order across BTC and ETH. Early entries require more than 480 seconds remaining.
+  order across BTC and ETH, with additions allowed only to the same late holding. Early entries require more than 480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
   Early entries allow YES below 15 cents, or either side at 55–70 cents inclusive.
   Cheap NO entries are blocked. When YES is below 40 cents and falling,
@@ -15,7 +15,8 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
   A YES purchase below 15 cents targets a 20-cent executable bid.
   Higher-priced scalps (above 70 and below 97 cents) are allowed only with
   strictly less than 120 seconds remaining. They retain momentum confirmation
-  and scalp profit targets. Prices >=97 cents remain reserved for late settlement.
+  and scalp profit targets. Prices >=97 cents remain reserved for late settlement. Qualifying staged
+  settlement entries take priority over higher-priced scalps.
 - Require at least a 2-cent midpoint move over 5–10 seconds, positive movement
   in each of the last three elapsed one-second intervals, and no pullback
   greater than 1 cent below the purchased contract's recent midpoint high.
@@ -48,13 +49,34 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 ## Late settlement entries
 
-Between 480 and 120 seconds remaining inclusive, open no new position.
-Higher-priced scalps can open below 120 seconds; in the final 90 seconds,
-qualifying settlement entries take priority. In the final
-90 seconds, when flat, allow one late entry per ticker on a YES or NO
-executable ask >=97 cents and <$1. Entry cost plus estimated standard taker
-fees must fit within $10 and potential settlement gain must exceed estimated
-fees. This price is not an independent probability estimate or guarantee.
+Late entries use three incremental budgets, including estimated entry fees:
+
+| Time remaining | Minimum executable contract ask | Additional budget |
+| --- | --- | --- |
+| Below 180 seconds, down to 120 seconds inclusive | 90 cents | $1 |
+| Below 120 seconds, down to 60 seconds inclusive | 94 cents | $10 |
+| Below 60 seconds, above zero | 97 cents | $20 |
+
+Each stage may be attempted once per ticker. Missed earlier stages are skipped;
+there is no catch-up buying. A higher price does not trigger several stages at
+once. Each budget buys whole contracts and is bounded by available cash and the
+remaining combined $31 cap. Potential payout must exceed estimated fees.
+Market price is not an independent probability estimate or a guarantee.
+
+The first purchase requires a flat account. Later stages may add only to the
+same ticker, side, and live/simulation mode. An open scalp, a different asset's
+holding, an unexpected account position, or a resting/uncertain order blocks
+additions. Existing risk guards continue to apply. The tracked weighted entry
+price, contract count, actual fees, total spend, and every entry order ID are
+persisted together. Partial fills consume that stage; unresolved orders are
+reconciled before any further purchase. Explicit rejections consume the stage
+without adding spend or P&L. A fully verified manual close ends further stages
+for that ticker. Partial manual sales do not reset the spend cap.
+
+Older journal holdings without staged reservation history are held and
+reconciled normally but cannot receive additions. Higher-priced scalp entries
+retain their existing below-two-minute timing and profit targets if no staged
+settlement entry qualifies. Early scalp rules are unchanged.
 
 Late positions use `LATE_SETTLEMENT` mode and hold through settlement; scalp
 profit targets do not apply. Full
@@ -102,7 +124,7 @@ signal, valid quotes, a flat account and no unresolved order are still required.
 Consecutive-loss, session-loss and daily-loss guards remain in force; those
 can still prevent new entries. Other strategies retain their existing cooldowns.
 A 61-cent scalp entry targets 66 cents immediately when executable. The late
-settlement entry keeps its once-per-ticker reservation and existing risk guards.
+settlement entry keeps its once-per-stage reservation and existing risk guards.
 
 ## Explicitly rejected requests
 
