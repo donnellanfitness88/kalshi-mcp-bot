@@ -259,3 +259,54 @@ export function validateScalpPosition(trade) {
 
   return { valid: true, reason: 'POSITION_VALID' };
 }
+
+/**
+ * Build a SCALP position from a confirmed fill.
+ * Does not submit an order.
+ */
+export function createScalpPosition({
+  ticker,
+  direction,
+  confirmedContracts,
+  averageFillPrice,
+  entryFees,
+  estimatedExitFees,
+  startedAt = Date.now()
+}) {
+  if (
+    !ticker ||
+    !['UP', 'DOWN'].includes(direction) ||
+    !Number.isInteger(confirmedContracts) ||
+    confirmedContracts <= 0 ||
+    !Number.isFinite(averageFillPrice) ||
+    averageFillPrice <= 0 ||
+    averageFillPrice >= 1 ||
+    !Number.isFinite(entryFees) ||
+    entryFees < 0 ||
+    !Number.isFinite(estimatedExitFees) ||
+    estimatedExitFees < 0
+  ) {
+    throw new Error('Invalid SCALP fill data');
+  }
+
+  const position = {
+    ticker,
+    mode: 'SCALP',
+    bet: direction,
+    side: direction === 'UP' ? 'yes' : 'no',
+    count: confirmedContracts,
+    entrySidePrice: averageFillPrice,
+    amount: confirmedContracts * averageFillPrice,
+    entryFees,
+    estimatedExitFees,
+    startedAt
+  };
+
+  const validation = validateScalpPosition(position);
+
+  if (!validation.valid) {
+    throw new Error(validation.reason);
+  }
+
+  return position;
+}
