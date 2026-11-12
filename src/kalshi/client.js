@@ -63,10 +63,21 @@ async function request(method, path, body = null) {
 }
 
 // Portfolio
-export async function getBalance() {
-  const data = await request('GET', '/portfolio/balance');
-  return data.balance;
+
+export async function getPositions() {
+  const data = await request('GET', '/portfolio/positions');
+
+  console.log('=== POSITIONS API METADATA ===');
+  console.log({
+    responseFields: Object.keys(data),
+    returnedPositions: data.market_positions?.length ?? 0,
+    hasCursor: Boolean(data.cursor),
+    hasEventPositions: Array.isArray(data.event_positions)
+  });
+
+  return data.market_positions || [];
 }
+
 
 export async function getPositions() {
   const data = await request('GET', '/portfolio/positions');
