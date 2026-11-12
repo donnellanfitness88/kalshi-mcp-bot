@@ -421,9 +421,15 @@ if (
     // New entry only when flat — skip disabled assets.
     if (!s.activeTrade && !state.disabledAssets.includes(asset)) {
       // BTC early-retracement strategy gets first evaluation.
-      if (asset === 'BTC' && s.farmArmed) {
-        await checkEarlyRetracement(ctx);
-      }
+     
+if (
+  asset === 'BTC' &&
+  s.farmArmed &&
+  process.env.SCALP_ENABLED !== 'true'
+) {
+  await checkEarlyRetracement(ctx);
+}
+
 
       
 // Keep SCALP monitoring separate from other entries.
