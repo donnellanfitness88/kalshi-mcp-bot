@@ -450,3 +450,56 @@ export function normalizeKalshiScalpFills(fills, side) {
     return { contracts, price, fee };
   });
 }
+
+/**
+ * Reconcile a SCALP buy order using actual Kalshi fills.
+ * Read-only. Does not place orders.
+ */
+export async function reconcileScalpEntry({
+  ticker,
+  orderId,
+  direction,
+  expectedContracts
+}) {
+  if (!['UP', 'DOWN'].includes(direction)) {
+    throw new Error('Invalid SCALP direction');
+  }
+
+  if (
+    !Number.isSafeInteger(expectedContracts) ||
+    expectedContracts <= 0
+  ) {
+    throw new Error('Invalid expected contract count');
+  }
+
+  const side = direction === 'UP' ? 'yes' : 'no';
+
+  const result = await getScalpOrderFills({
+    ticker,
+    orderId
+  });
+
+  const normalized = normalizeKalshiScalpFills(
+    result.fills,
+    side
+  );
+
+  const execution = calculateScalpExecution(normalized);
+
+  if (
+    execution.confirmedContracts > expectedContracts
+  ) {
+    throw new Error(
+      'SCALP fills exceed expected contracts'
+    );
+  }
+
+  return {
+    ticker,
+    orderId,
+    direction,
+    ...execution,
+    fullyFilled:
+      execution.confirmedContracts === expectedContracts
+  };
+}
