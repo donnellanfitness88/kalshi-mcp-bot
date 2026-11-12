@@ -207,6 +207,56 @@ async function main() {
 
   console.log('Settlement examples:', examples.length);
 
+  console.log('=== SETTLEMENT PAYOUT AUDIT ===');
+
+  const payoutAudit = {
+    checked: 0,
+    matched: 0,
+    mismatched: 0,
+    unsupported: 0,
+    examples: []
+  };
+
+  for (const s of settlements) {
+    const yes = Number(s.yes_count_fp);
+    const no = Number(s.no_count_fp);
+    const revenue = Number(s.revenue);
+    const value = Number(s.value);
+
+    if (
+      !['yes', 'no'].includes(s.market_result) ||
+      ![yes, no, revenue, value].every(Number.isFinite)
+    ) {
+      payoutAudit.unsupported++;
+      continue;
+    }
+
+    // Expected total payout in cents for binary markets.
+    const expected =
+      yes * value + no * (100 - value);
+
+    payoutAudit.checked++;
+
+    if (Math.abs(expected - revenue) < 0.01) {
+      payoutAudit.matched++;
+    } else {
+      payoutAudit.mismatched++;
+
+      if (payoutAudit.examples.length < 5) {
+        payoutAudit.examples.push({
+          result: s.market_result,
+          yes,
+          no,
+          value,
+          expectedRevenueCents: expected,
+          actualRevenueCents: revenue
+        });
+      }
+    }
+  }
+
+  console.log(JSON.stringify(payoutAudit, null, 2));
+
   // Existing reconciliation remains unchanged
   // until position accounting is verified.
   return;
