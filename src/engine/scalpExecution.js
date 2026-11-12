@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { state } from './state.js';
+import { reconcileManualExit, remainingHeldContracts } from './manualExitReconciliation.js';
 import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
 import { buildBuyBody, buildSellBody } from '../kalshi/orders.js';
 import { SCALP_CONFIG, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
@@ -76,6 +77,7 @@ export function createScalpExecutor(deps = {}) {
   let lastAttempt = 0;
   let lateEntryTickers = [];
   const settlementPolls = new Map();
+  const manualPolls = new Map();
   const assets = () => ['BTC', 'ETH'].map(asset => shared[asset]);
   const snapshot = () => ({ pending, lateEntryTickers, positions: Object.fromEntries(['BTC', 'ETH'].map(asset =>
     [asset, isManagedTrade(shared[asset].activeTrade) ? shared[asset].activeTrade : null])) });
@@ -100,6 +102,7 @@ export function createScalpExecutor(deps = {}) {
     } else if (p.kind === 'exit' && fill.count) {
       const trade = s.activeTrade;
       if (!trade || fill.count > trade.count) throw new Error('Exit exceeds tracked position');
+      if (p.orderId) trade.accountedExitOrderIds = [...new Set([...(trade.accountedExitOrderIds ?? []), p.orderId])];
       const allocatedFees = trade.entryFees * fill.count / trade.count;
       const net = fill.count * (fill.price - trade.entrySidePrice) - allocatedFees - fill.fees;
       trade.realizedNet += net;
@@ -213,6 +216,56 @@ export function createScalpExecutor(deps = {}) {
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
       direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
+  async function reconcileExternal(ctx, suppliedPositions) {
+    const { asset, s } = ctx;
+    const trade = s.activeTrade;
+    if (!trade || trade.sim) return false;
+    const positions = suppliedPositions ?? await api.getPositions();
+    const held = remainingHeldContracts(positions, trade);
+    if (held === trade.count) return false;
+    const fills = await api.getAllFills({ ticker: trade.ticker });
+    let reduction;
+    try { reduction = reconcileManualExit(trade, held, fills); }
+    catch (error) {
+      // Zero can mean settlement, not a manual sale. Let the settlement path
+      // verify the account record; never invent closing fills to make it fit.
+      if (held === 0 && error.message.startsWith('Manual fills do not match') &&
+          (await api.getMarket(trade.ticker)).status === 'finalized') return false;
+      throw error;
+    }
+    for (const item of reduction.orders) {
+      const order = await api.getOrder(item.orderId);
+      if (!order || order.ticker !== trade.ticker || !['executed', 'canceled'].includes(order.status) ||
+          decimal(order.fill_count_fp, 'manual order fill count') !== item.count) {
+        throw new Error('Manual closing order not fully reconciled');
+      }
+    }
+    // Re-read after fill/order lookups: do not apply a stale position snapshot.
+    if (remainingHeldContracts(await api.getPositions(), trade) !== held) {
+      throw new Error('Position changed during manual reconciliation');
+    }
+    const next = { ...trade,
+      count: held, amount: held * trade.entrySidePrice, maxProfit: held * (1 - trade.entrySidePrice),
+      entryFees: trade.entryFees - reduction.allocatedEntryFees,
+      realizedNet: (trade.realizedNet ?? 0) + reduction.net,
+      manualExitFillIds: [...(trade.manualExitFillIds ?? []), ...reduction.fillIds]
+    };
+    // Persist the replacement before mutating live state. A disk failure leaves
+    // the old state intact, so a later retry cannot count the manual sale twice.
+    const saved = snapshot();
+    saved.positions[asset] = held ? next : null;
+    save(saved);
+    s.activeTrade = held ? next : null;
+    if (!held) {
+      recordTradePnL(s, next.realizedNet);
+      s.lastExitTime = Date.now();
+    }
+    log({ event: held ? 'MANUAL_PARTIAL_EXIT_RECONCILED' : 'MANUAL_CLOSE_RECONCILED',
+      asset, ticker: trade.ticker, sold: reduction.sold, remaining: held,
+      saleProceeds: reduction.proceeds, saleFees: reduction.fees,
+      realizedNet: next.realizedNet, mode: trade.mode, sim: false });
+    return true;
+  }
   async function settle(ctx) {
     const { asset, s } = ctx;
     const trade = s.activeTrade;
@@ -237,6 +290,7 @@ export function createScalpExecutor(deps = {}) {
       }
       const fills = await api.getAllFills({ ticker: trade.ticker });
       if (!trade.entryOrderId || fills.some(fill => fill.order_id !== trade.entryOrderId &&
+          !(trade.manualExitFillIds ?? []).includes(fill.fill_id ?? fill.trade_id) &&
           Date.parse(fill.created_time) >= trade.startedAt - 1000)) {
         throw new Error('Other fills affected late holding; settlement reconciliation required');
       }
@@ -244,7 +298,7 @@ export function createScalpExecutor(deps = {}) {
     // Attribute only this tracked lot. A settlement row can include earlier scalps
     // in the same ticker; its cumulative revenue/fees must not be counted again.
     const payout = result === trade.side ? trade.count : 0;
-    const pnl = payout - trade.amount - trade.entryFees;
+    const pnl = (trade.realizedNet ?? 0) + payout - trade.amount - trade.entryFees;
     if (trade.sim) shared.paperBalance += pnl;
     recordTradePnL(s, pnl);
     s.activeTrade = null;
@@ -282,10 +336,12 @@ export function createScalpExecutor(deps = {}) {
     if (!decision.shouldExit) return;
     if (!trade.sim) {
       if (process.env.DRY_RUN === 'true') throw new Error('Live SCALP requires live exit; DRY_RUN changed');
-      const position = (await api.getPositions()).find(p => p.ticker === trade.ticker);
-      const held = Number(position?.position_fp);
-      const expected = trade.side === 'yes' ? trade.count : -trade.count;
-      if (!Number.isFinite(held) || held !== expected) throw new Error('SCALP position mismatch; reconciliation required');
+      const positions = await api.getPositions();
+      const held = remainingHeldContracts(positions, trade);
+      if (held !== trade.count) {
+        await reconcileExternal(ctx, positions);
+        return; // Next tick uses the updated remaining count.
+      }
     }
     const body = buildSellBody(trade.ticker, trade.side, trade.count);
     await submit({ kind: 'exit', asset, side: trade.side, body, sim: trade.sim,
@@ -296,6 +352,11 @@ export function createScalpExecutor(deps = {}) {
     busy = true;
     try {
       if (pending) { await reconcile(); return; }
+      if (isManagedTrade(ctx.s.activeTrade) && !ctx.s.activeTrade.sim &&
+          Date.now() - (manualPolls.get(ctx.asset) ?? 0) >= 5000) {
+        manualPolls.set(ctx.asset, Date.now());
+        if (await reconcileExternal(ctx)) return;
+      }
       if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT') await settle(ctx);
       else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else await enter(ctx);

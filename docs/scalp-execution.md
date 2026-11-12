@@ -84,3 +84,18 @@ filters do not change the late settlement entry or existing exit rules.
 
 Validate with:
 `node --test tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
+
+## Manual sales
+
+When a live holding is reduced outside the bot, poll account positions and
+match the reduction to closing fills since entry. Verify each external
+order is terminal, count/price/fee fields are valid, and the position is
+unchanged on a second read. An absent position alone never clears a trade.
+Full verified manual sales record net P&L and release the position lock;
+partial sales retain the remaining contracts, proportional entry fees, and
+realized net P&L. Persist before changing in-memory holdings. Remember
+manual fill IDs and bot exit order IDs to prevent duplicate accounting.
+The same path handles manual closure of late settlement holdings. Increased
+or reversed positions, missing fills, nonterminal orders, and invalid data
+remain blocked. Existing loss guards and cooldowns still apply after a
+verified manual close. No keys or journal deletion are needed.

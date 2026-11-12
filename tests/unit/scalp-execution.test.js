@@ -18,7 +18,10 @@ function fixture(direction = 'UP', sim = false) {
   const state = { BTC: asset(), ETH: { ...asset(), ticker: 'ETH-TEST' }, simMode: sim, paperBalance: 50, disabledAssets: [] };
   const requests = [], logs = [];
   let saved;
-  const api = { getPositions: async () => [], getOrders: async () => [], getBalance: async () => 10000,
+  const api = { getPositions: async () => ['BTC', 'ETH'].flatMap(asset => {
+    const t = state[asset].activeTrade;
+    return t && !t.sim ? [{ ticker: t.ticker, position_fp: String(t.side === 'yes' ? t.count : -t.count) }] : [];
+  }), getOrders: async () => [], getBalance: async () => 10000,
     placeOrder: async body => {
       requests.push(body);
       return { order_id: 'o1', fill_count: body.count, remaining_count: '0.00',
@@ -264,6 +267,7 @@ test('settlement waits for account record then records win/loss once with origin
     const t = f.state.BTC.activeTrade;
     f.state.BTC.ticker = 'NEXT-WINDOW';
     f.api.getMarket = async ticker => { assert.equal(ticker, 'BTC-TEST'); return { status: 'finalized', result }; };
+    f.api.getPositions = async () => [];
     f.api.getAllSettlements = async () => [];
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade, t);
@@ -289,4 +293,109 @@ test('unresolved late order blocks another submission and persists ticker reserv
   await f.executor.tick(f.ctx('ETH'));
   assert.equal(f.requests.length, 1);
   assert.deepEqual(f.executor.snapshot().lateEntryTickers, ['BTC-TEST']);
+});
+function manualFill(trade, count = trade.count, price = 0.50, fee = 0.05) {
+  return { fill_id: 'manual-f1', order_id: 'manual-o1', ticker: trade.ticker,
+    created_time: new Date(trade.startedAt + 1000).toISOString(),
+    book_side: trade.side === 'yes' ? 'ask' : 'bid', count_fp: String(count),
+    yes_price_dollars: String(trade.side === 'yes' ? price : 1 - price),
+    no_price_dollars: String(trade.side === 'no' ? price : 1 - price), fee_cost: String(fee) };
+}
+function manualOrder(trade, count) {
+  return { order_id: 'manual-o1', ticker: trade.ticker, status: 'executed', fill_count_fp: String(count) };
+}
+test('verified full manual sale clears YES or NO holding with actual net P&L; sends no sell', async () => {
+  for (const direction of ['UP','DOWN']) {
+    const f = fixture(direction); await f.executor.tick(f.ctx('BTC'));
+    const t = f.state.BTC.activeTrade, expected = t.count * (0.50 - t.entrySidePrice) - t.entryFees - 0.05;
+    f.api.getPositions = async () => [];
+    f.api.getAllFills = async () => [manualFill(t)];
+    f.api.getOrder = async () => manualOrder(t, t.count);
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade, null);
+    assert.equal(f.state.BTC.tradeCount, 1);
+    assert.ok(Math.abs(f.state.BTC.totalPnL - expected) < 1e-9);
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.logs.at(-1).event, 'MANUAL_CLOSE_RECONCILED');
+    const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
+    restored.restore(f.saved());
+    await restored.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.tradeCount, 1);
+  }
+});
+test('partial manual sale preserves remaining position, fees and previously realized P&L', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const t = f.state.BTC.activeTrade, n = t.count, fees = t.entryFees;
+  f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(n - 3) }];
+  f.api.getAllFills = async () => [manualFill(t, 3)];
+  f.api.getOrder = async () => manualOrder(t, 3);
+  await f.executor.tick(f.ctx('BTC'));
+  const remaining = f.state.BTC.activeTrade;
+  assert.equal(remaining.count, n - 3);
+  assert.ok(Math.abs(remaining.entryFees - fees * (n - 3) / n) < 1e-9);
+  assert.equal(f.state.BTC.tradeCount, 0);
+  assert.ok(Math.abs(remaining.realizedNet - (3 * (0.50 - t.entrySidePrice) - fees * 3 / n - 0.05)) < 1e-9);
+  const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
+  restored.restore(f.saved());
+  await restored.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade.count, n - 3);
+  assert.equal(f.requests.length, 1);
+});
+test('zero account position without closing fills never clears the trade', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const t = f.state.BTC.activeTrade;
+  f.api.getPositions = async () => [];
+  f.api.getAllFills = async () => [];
+  f.api.getMarket = async () => ({ status: 'open' });
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade, t);
+  assert.equal(f.state.BTC.tradeCount, 0);
+});
+test('nonterminal manual order or missing fee keeps holding blocked', async () => {
+  for (const reason of ['resting','fee']) {
+    const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+    const t = f.state.BTC.activeTrade;
+    f.api.getPositions = async () => [];
+    f.api.getAllFills = async () => [{ ...manualFill(t), ...(reason === 'fee' ? { fee_cost: null } : {}) }];
+    f.api.getOrder = async () => ({ ...manualOrder(t, t.count), ...(reason === 'resting' ? { status: 'resting' } : {}) });
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade, t);
+    assert.equal(f.state.BTC.tradeCount, 0);
+    assert.equal(f.requests.length, 1);
+  }
+});
+test('manual reconciliation does not mutate live accounting when journal write fails', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const t = f.state.BTC.activeTrade;
+  f.api.getPositions = async () => [];
+  f.api.getAllFills = async () => [manualFill(t)];
+  f.api.getOrder = async () => manualOrder(t, t.count);
+  const executor = createScalpExecutor({ state: f.state, api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
+  await executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade, t);
+  assert.equal(f.state.BTC.tradeCount, 0);
+});
+test('manual close of a late holding reconciles without waiting for settlement', async () => {
+  const f = fixture();
+  Object.assign(f.state.BTC, { secsLeft: 60, yesAsk: 0.97, yesBid: 0.96 });
+  await f.executor.tick(f.ctx('BTC'));
+  const t = f.state.BTC.activeTrade;
+  assert.equal(t.mode, 'LATE_SETTLEMENT');
+  f.api.getPositions = async () => [];
+  f.api.getAllFills = async () => [manualFill(t, t.count, 0.98)];
+  f.api.getOrder = async () => manualOrder(t, t.count);
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade, null);
+  assert.equal(f.state.BTC.tradeCount, 1);
+  assert.equal(f.requests.length, 1);
+});
+test('an increased or opposite holding is not mistaken for a manual sale', async () => {
+  for (const position of ['-2', '100', null]) {
+    const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+    const t = f.state.BTC.activeTrade;
+    f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: position }];
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade, t);
+    assert.equal(f.state.BTC.tradeCount, 0);
+  }
 });
