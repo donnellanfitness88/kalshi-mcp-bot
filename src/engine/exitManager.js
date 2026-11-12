@@ -1,4 +1,9 @@
 
+import {
+  evaluateScalpProfit,
+  evaluateScalpExit
+} from './scalpStrategy.js';
+
 import { getEarlyRetracementExitReason } from './EarlyRetracement.js';
 import { executeSell, confirmedFillCount } from '../kalshi/orders.js';
 import { getMarket, getPositions } from '../kalshi/client.js';
@@ -41,6 +46,62 @@ export async function checkExit(ctx) {
   const { yesAsk, yesBid, yesVelHistory, secsLeft } = s;
   const unrealizedPnL = computeUnrealizedPnL(trade, yesAsk, yesBid);
   const pctCaptured = trade.maxProfit > 0 ? unrealizedPnL / trade.maxProfit : 0;
+
+// SCALP exit monitoring — no order placement.
+if (trade.mode === 'SCALP') {
+  const entryPrice = trade.entrySidePrice;
+  const exitBid = trade.side === 'yes'
+    ? yesBid
+    : 1 - yesAsk;
+
+  const contracts = trade.count;
+  const entryFees = trade.entryFees;
+  const exitFees = trade.estimatedExitFees;
+
+  if (
+    !Number.isFinite(entryPrice) ||
+    !Number.isFinite(exitBid) ||
+    !Number.isInteger(contracts) ||
+    contracts <= 0 ||
+    !Number.isFinite(entryFees) ||
+    !Number.isFinite(exitFees)
+  ) {
+    console.warn(
+      `[SCALP] ${asset} missing position or fee data`
+    );
+    return;
+  }
+
+  const profit = evaluateScalpProfit({
+    entryPrice,
+    exitBid,
+    contracts,
+    entryFees,
+    exitFees
+  });
+
+  const heldSeconds =
+    (Date.now() - trade.startedAt) / 1000;
+
+  const decision = evaluateScalpExit({
+    heldSeconds,
+    netReturn: profit.netReturn
+  });
+
+  if (decision.shouldExit) {
+    console.log(
+      `[SCALP] ${asset} exit signal: ` +
+      JSON.stringify({
+        reason: decision.reason,
+        heldSeconds,
+        netReturn: profit.netReturn,
+        netProfit: profit.netProfit
+      })
+    );
+  }
+
+  return;
+}
 
   // Dedicated exits for BTC early-retracement trades.
   // Do not apply the standard Farm exit rules to this mode.
