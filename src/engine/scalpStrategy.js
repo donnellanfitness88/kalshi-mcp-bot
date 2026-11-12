@@ -395,3 +395,58 @@ export function calculateScalpExecution(fills) {
     totalEntryCost: grossCost + entryFees
   };
 }
+
+/**
+ * Convert Kalshi buy fills into normalized SCALP records.
+ * Uses fixed-point contract quantities and dollar prices.
+ */
+export function normalizeKalshiScalpFills(fills, side) {
+  if (!Array.isArray(fills) || !fills.length) {
+    throw new Error('No Kalshi fills supplied');
+  }
+
+  if (!['yes', 'no'].includes(side)) {
+    throw new Error('Invalid SCALP side');
+  }
+
+  return fills.map(fill => {
+    if (fill.action !== 'buy' || fill.side !== side) {
+      throw new Error('Unexpected SCALP fill side/action');
+    }
+
+    const rawQty = fill.count_fp;
+    const rawPrice = side === 'yes'
+      ? fill.yes_price_dollars
+      : fill.no_price_dollars;
+    const rawFee = fill.fee_cost;
+
+    if (
+      typeof rawQty !== 'string' ||
+      typeof rawPrice !== 'string' ||
+      typeof rawFee !== 'string' ||
+      !/^\d+(\.\d+)?$/.test(rawQty) ||
+      !/^\d+(\.\d+)?$/.test(rawPrice) ||
+      !/^\d+(\.\d+)?$/.test(rawFee)
+    ) {
+      throw new Error('Missing or invalid Kalshi fill fields');
+    }
+
+    const contracts = Number(rawQty);
+    const price = Number(rawPrice);
+    const fee = Number(rawFee);
+
+    if (
+      !Number.isSafeInteger(contracts) ||
+      contracts <= 0 ||
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      price >= 1 ||
+      !Number.isFinite(fee) ||
+      fee < 0
+    ) {
+      throw new Error('Invalid SCALP execution values');
+    }
+
+    return { contracts, price, fee };
+  });
+}
