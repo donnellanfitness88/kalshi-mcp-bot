@@ -21,6 +21,27 @@ async function main() {
   printCounts('Total fills', fills);
   printCounts('Total settlements', settlements);
 
+  const patterns = {};
+
+  for (const f of fills) {
+    const key = [
+      f.action ?? 'missing',
+      f.outcome_side ?? f.side ?? 'missing',
+      f.book_side ?? 'missing'
+    ].join(' / ');
+
+    patterns[key] ??= {
+      fills: 0,
+      contracts: 0
+    };
+
+    patterns[key].fills++;
+    patterns[key].contracts += Number(f.count_fp || 0);
+  }
+
+  console.log('=== FILL PATTERNS ===');
+  console.log(JSON.stringify(patterns, null, 2));
+
   const target = fills.find(f =>
     f.ticker?.startsWith(
       'KXMVECROSSCATEGORY0-SHARD1-S202651C95801F1E-DB7CBCC8ECC'
