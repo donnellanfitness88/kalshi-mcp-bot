@@ -56,3 +56,41 @@ async function main() {
         .sort()[0]
     );
   }
+
+  // Check subaccount scope before reconciliation.
+  const subaccounts = new Set(
+    fills.map(f => f.subaccount_number ?? 0)
+  );
+
+  if (subaccounts.size > 1) {
+    console.log(
+      'STATUS: MULTIPLE_SUBACCOUNTS_UNSUPPORTED'
+    );
+    return;
+  }
+
+  if (
+    subaccounts.size === 1 &&
+    !subaccounts.has(0)
+  ) {
+    console.log(
+      'STATUS: SETTLEMENT_ACCOUNT_SCOPE_UNVERIFIED'
+    );
+    return;
+  }
+
+  const report = auditAccounting(fills, settlements);
+
+  console.log('=== AUDIT SUMMARY ===');
+  console.log('Status:', report.status);
+  console.log('Matched sales:', report.fillSales);
+  console.log('Settlements checked:', report.settlementsChecked);
+  console.log('Quantity checks:', report.checks.length);
+  console.log('Issues:', report.issues.length);
+  console.log('Unresolved positions:', report.unresolved.length);
+}
+
+main().catch(error => {
+  console.error('AUDIT FAILED:', error.message);
+  process.exitCode = 1;
+});
