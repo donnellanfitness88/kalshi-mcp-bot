@@ -238,14 +238,38 @@ async function performExit(asset, s, reason, unrealizedPnL) {
       const positions = await getPositions();
 const position = positions.find(p => p.ticker === trade.ticker);
 
+
 if (!position) {
-  console.warn('[Exit] Position not found:', {
+  console.warn('[Exit] Position not found:', JSON.stringify({
     ticker: trade.ticker,
     expectedSide: trade.side,
     availableTickers: positions.map(p => p.ticker)
-  });
+  }));
+
+  try {
+    const market = await getMarket(trade.ticker);
+
+    if (market?.status === 'finalized') {
+      console.warn(
+        `[Exit] ${trade.ticker} finalized; clearing stale activeTrade. Settlement P&L not yet reconciled.`
+      );
+      s.lastExitTime = Date.now();
+      s.activeTrade = null;
+      return;
+    }
+
+    console.warn(
+      `[Exit] ${trade.ticker} status=${market?.status ?? 'unknown'}; retaining activeTrade`
+    );
+  } catch (err) {
+    console.error(
+      `[Exit] Settlement check failed for ${trade.ticker}: ${err.message}`
+    );
+  }
+
   return;
 }
+
 
 console.log('[Exit] Position reconciliation:', {
   ticker: trade.ticker,
