@@ -425,14 +425,21 @@ if (
         await checkEarlyRetracement(ctx);
       }
 
-      // Preserve existing Farm and AutoBuy strategies.
-      if (!s.activeTrade) {
-        if (s.farmArmed) {
-          await checkFarmBot(ctx);
-        } else if (s.autoBuyArmed) {
-          await checkAutoBuy(ctx);
-        }
-      }
+      
+// Keep SCALP monitoring separate from other entries.
+// SCALP order execution is not connected yet.
+if (!s.activeTrade) {
+  if (process.env.SCALP_ENABLED === 'true') {
+    // SCALP signal monitoring only.
+    // Do not submit orders until entry execution
+    // and position reconciliation are tested.
+  } else if (s.farmArmed) {
+    await checkFarmBot(ctx);
+  } else if (s.autoBuyArmed) {
+    await checkAutoBuy(ctx);
+  }
+}
+
     }
 
   }
