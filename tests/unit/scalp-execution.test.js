@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createScalpExecutor, scalpSize, reserveFee, scalpAck } from '../../src/engine/scalpExecution.js';
+import { createScalpExecutor, scalpSize, reserveFee, scalpAck, entryPhase, lateFee } from '../../src/engine/scalpExecution.js';
 import { evaluateScalpExit } from '../../src/engine/scalpStrategy.js';
 
 process.env.SCALP_ENABLED = 'true';
@@ -25,7 +25,7 @@ function fixture(direction = 'UP', sim = false) {
       return { order_id: 'o1', fill_count: body.count, remaining_count: '0.00',
         average_fill_price: body.price, average_fee_paid: '0.0100' };
     } };
-  const dynamicApi = Object.fromEntries(['getPositions', 'getOrders', 'getBalance', 'placeOrder', 'getOrder', 'getAllFills'].map(key => [key, (...args) => api[key](...args)]));
+  const dynamicApi = Object.fromEntries(['getPositions', 'getOrders', 'getBalance', 'placeOrder', 'getOrder', 'getAllFills', 'getMarket', 'getAllSettlements'].map(key => [key, (...args) => api[key](...args)]));
   const executor = createScalpExecutor({ state, api: dynamicApi, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
   const ctx = asset => ({ asset, s: state[asset], balance: 100 });
   return { state, api, executor, requests, logs, ctx, saved: () => saved };
@@ -163,4 +163,131 @@ test('missing exit fill data retains the holding and prevents duplicate sales', 
   assert.equal(f.requests.length, 2);
   assert.equal(f.state.BTC.activeTrade, t);
   assert.equal(f.executor.snapshot().pending.kind, 'exit');
+});
+test('time boundaries: >180 scalp, 180 to >90 buffer, 90 to >0 late', () => {
+  for (const [seconds, phase] of [[181,'SCALP'], [180.001,'SCALP'], [180,'BUFFER'], [91,'BUFFER'], [90,'LATE_SETTLEMENT'], [1,'LATE_SETTLEMENT'], [0,'CLOSED'], [-1,'CLOSED'], [NaN,'CLOSED']]) {
+    assert.equal(entryPhase(seconds), phase);
+  }
+});
+test('no scalp buys inside 3 minutes, including the 90-second buffer', async () => {
+  for (const seconds of [180, 179, 120, 91, 90, 30, 0]) {
+    const f = fixture(); f.state.BTC.secsLeft = seconds;
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length, 0);
+  }
+});
+test('open scalp continues below 180 seconds; $3 net loss exits before 45 seconds', async () => {
+  const f = fixture();
+  await f.executor.tick(f.ctx('BTC'));
+  const t = f.state.BTC.activeTrade;
+  t.startedAt = Date.now() - 10000;
+  f.state.BTC.secsLeft = 170;
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length, 1);
+  f.state.BTC.yesBid = 0.40; f.state.BTC.yesAsk = 0.41;
+  f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.logs.find(log => log.event === 'CLOSED').reason, 'MAX_DOLLAR_LOSS');
+});
+test('loss under $3 does not stop a young scalp and profit exits are retained', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const t = f.state.BTC.activeTrade;
+  f.state.BTC.yesBid = 0.46; f.state.BTC.yesAsk = 0.47;
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.state.BTC.activeTrade, t);
+});
+test('late entries accept YES or NO at 97 cents and track distinct settlement mode', async () => {
+  for (const side of ['yes', 'no']) {
+    const f = fixture();
+    Object.assign(f.state.BTC, { secsLeft: 90, yesAsk: side === 'yes' ? 0.97 : 0.04, yesBid: side === 'yes' ? 0.96 : 0.03 });
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.state.BTC.activeTrade.mode, 'LATE_SETTLEMENT');
+    assert.equal(f.state.BTC.activeTrade.side, side);
+    assert.ok(f.state.BTC.activeTrade.amount + f.state.BTC.activeTrade.entryFees <= 10);
+  }
+});
+test('late entries reject 96 cents, stale quotes and an occupied account', async () => {
+  for (const reason of ['cheap', 'stale', 'occupied']) {
+    const f = fixture();
+    Object.assign(f.state.BTC, { secsLeft: 60, yesAsk: reason === 'cheap' ? 0.96 : 0.97, yesBid: 0.95 });
+    if (reason === 'stale') f.state.BTC.lastQuoteMessageTs -= 5000;
+    if (reason === 'occupied') f.state.ETH.activeTrade = { mode: 'SCALP' };
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length, 0);
+  }
+});
+test('late sizing includes fees throughout 97-99 cent range', () => {
+  for (const price of [0.97, 0.98, 0.99]) {
+    const count = scalpSize(price, 10, 'LATE_SETTLEMENT');
+    assert.ok(count * price + lateFee(count, price) <= 10 + 1e-9);
+    assert.ok(count * (1 - price) > lateFee(count, price));
+  }
+});
+test('entry rechecks actual close time after balance read crosses cutoff', async () => {
+  const f = fixture();
+  f.state.BTC.marketCloseTs = Date.now() + 181000;
+  f.api.getBalance = async () => { f.state.BTC.marketCloseTs = Date.now() + 179000; return 10000; };
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length, 0);
+});
+test('late entry does not slip past expiration while account is being checked', async () => {
+  const f = fixture();
+  Object.assign(f.state.BTC, { secsLeft: 30, yesAsk: 0.97, yesBid: 0.96 });
+  f.api.getBalance = async () => { f.state.BTC.marketCloseTs = Date.now() - 1; return 10000; };
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length, 0);
+});
+test('late holding ignores 45-second and $3 scalp exits and survives restart', async () => {
+  const f = fixture();
+  Object.assign(f.state.BTC, { secsLeft: 90, yesAsk: 0.97, yesBid: 0.96 });
+  await f.executor.tick(f.ctx('BTC'));
+  f.state.BTC.activeTrade.startedAt -= 60000;
+  Object.assign(f.state.BTC, { secsLeft: 20, yesAsk: 0.51, yesBid: 0.50 });
+  f.api.getMarket = async () => ({ status: 'open' });
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length, 1);
+  const saved = f.executor.snapshot();
+  const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
+  restored.restore(saved);
+  await restored.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade.mode, 'LATE_SETTLEMENT');
+  assert.deepEqual(restored.snapshot().lateEntryTickers, ['BTC-TEST']);
+  assert.equal(f.requests.length, 1);
+});
+test('settlement waits for account record then records win/loss once with original ticker', async () => {
+  for (const result of ['yes', 'no']) {
+    const f = fixture();
+    Object.assign(f.state.BTC, { secsLeft: 60, yesAsk: 0.97, yesBid: 0.96 });
+    await f.executor.tick(f.ctx('BTC'));
+    const t = f.state.BTC.activeTrade;
+    f.state.BTC.ticker = 'NEXT-WINDOW';
+    f.api.getMarket = async ticker => { assert.equal(ticker, 'BTC-TEST'); return { status: 'finalized', result }; };
+    f.api.getAllSettlements = async () => [];
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade, t);
+    // Restore in a new executor to avoid waiting for the next read-only poll.
+    f.api.getAllSettlements = async () => [{ ticker: t.ticker, settled_time: new Date(t.startedAt + 100000).toISOString(), market_result: result }];
+    f.api.getAllFills = async () => [{ order_id: t.entryOrderId, created_time: new Date(t.startedAt).toISOString() }];
+    const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: value => f.logs.push(value) });
+    restored.restore(f.executor.snapshot());
+    await restored.tick(f.ctx('BTC'));
+    const expected = (result === 'yes' ? t.count : 0) - t.amount - t.entryFees;
+    assert.ok(Math.abs(f.state.BTC.totalPnL - expected) < 1e-9);
+    assert.equal(f.state.BTC.activeTrade, null);
+    await restored.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.tradeCount, 1);
+    assert.equal(f.requests.length, 1);
+  }
+});
+test('unresolved late order blocks another submission and persists ticker reservation', async () => {
+  const f = fixture();
+  Object.assign(f.state.BTC, { secsLeft: 60, yesAsk: 0.97, yesBid: 0.96 });
+  f.api.placeOrder = async body => { f.requests.push(body); throw new Error('timeout'); };
+  await f.executor.tick(f.ctx('BTC'));
+  await f.executor.tick(f.ctx('ETH'));
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(f.executor.snapshot().lateEntryTickers, ['BTC-TEST']);
 });

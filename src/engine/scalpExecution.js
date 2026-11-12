@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { state } from './state.js';
-import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket } from '../kalshi/client.js';
+import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
 import { buildBuyBody, buildSellBody } from '../kalshi/orders.js';
 import { SCALP_CONFIG, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
 import { checkRiskGuards, recordTradePnL } from './riskManager.js';
@@ -24,11 +24,26 @@ function loadJournal() {
 // Reserve more than the standard maximum taker fee (1.75 cents/contract),
 // plus rounding. The budget includes this reserve, not only contract cost.
 export function reserveFee(count) { return Math.ceil((0.02 * count + 0.01) * 100) / 100; }
-export function scalpSize(price, balance) {
+export const isManagedTrade = trade => ['SCALP', 'LATE_SETTLEMENT'].includes(trade?.mode);
+export function remainingSeconds(s, now = Date.now()) {
+  if (Number.isFinite(s.marketCloseTs)) return (s.marketCloseTs - now) / 1000;
+  return s.secsLeft - Math.max(0, now - (s.clockUpdatedAt ?? now)) / 1000;
+}
+export function entryPhase(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'CLOSED';
+  if (seconds > SCALP_CONFIG.entryMinSecondsRemaining) return 'SCALP';
+  if (seconds <= SCALP_CONFIG.lateEntryMaxSecondsRemaining) return 'LATE_SETTLEMENT';
+  return 'BUFFER';
+}
+export function lateFee(count, price) {
+  return Math.ceil((0.07 * count * price * (1 - price) + 1e-9) * 100) / 100;
+}
+export function scalpSize(price, balance, mode = 'SCALP') {
   if (!Number.isFinite(price) || price <= 0 || price >= 1 || !Number.isFinite(balance)) return 0;
   const budget = Math.min(SCALP_CONFIG.maxEntryCostUsd, balance);
-  let count = Math.max(0, Math.floor(budget / (price + 0.02)));
-  while (count && count * price + reserveFee(count) > budget + 1e-9) count--;
+  const fee = mode === 'LATE_SETTLEMENT' ? n => lateFee(n, price) : reserveFee;
+  let count = Math.max(0, Math.floor(budget / price));
+  while (count && count * price + fee(count) > budget + 1e-9) count--;
   return count;
 }
 function decimal(raw, field) {
@@ -52,21 +67,24 @@ export function scalpAck(result, pending) {
 }
 
 export function createScalpExecutor(deps = {}) {
-  const api = { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, ...deps.api };
+  const api = { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements, ...deps.api };
   const shared = deps.state ?? state;
   const save = deps.save ?? saveJournal;
   const log = deps.log ?? (message => console.log('[SCALP] ' + JSON.stringify(message)));
   let busy = false;
   let pending = null;
   let lastAttempt = 0;
+  let lateEntryTickers = [];
+  const settlementPolls = new Map();
   const assets = () => ['BTC', 'ETH'].map(asset => shared[asset]);
-  const snapshot = () => ({ pending, positions: Object.fromEntries(['BTC', 'ETH'].map(asset =>
-    [asset, shared[asset].activeTrade?.mode === 'SCALP' ? shared[asset].activeTrade : null])) });
+  const snapshot = () => ({ pending, lateEntryTickers, positions: Object.fromEntries(['BTC', 'ETH'].map(asset =>
+    [asset, isManagedTrade(shared[asset].activeTrade) ? shared[asset].activeTrade : null])) });
   const persist = () => save(snapshot());
   const simulated = () => shared.simMode || process.env.DRY_RUN === 'true';
   function restore(saved) {
     if (!saved) return;
-    pending = saved.pending;
+    pending = saved.pending ?? null;
+    lateEntryTickers = saved.lateEntryTickers ?? [];
     for (const asset of ['BTC', 'ETH']) {
       if (saved.positions?.[asset]) shared[asset].activeTrade = saved.positions[asset];
     }
@@ -77,6 +95,7 @@ export function createScalpExecutor(deps = {}) {
       s.activeTrade = { ...createScalpPosition({ ticker: p.body.ticker, direction: p.direction,
         confirmedContracts: fill.count, averageFillPrice: fill.price, entryFees: fill.fees,
         estimatedExitFees: reserveFee(fill.count), startedAt: p.startedAt }),
+        mode: p.mode ?? 'SCALP', entryOrderId: p.orderId,
         sim: p.sim, realizedNet: 0, originalCost: fill.count * fill.price + fill.fees };
     } else if (p.kind === 'exit' && fill.count) {
       const trade = s.activeTrade;
@@ -107,6 +126,7 @@ export function createScalpExecutor(deps = {}) {
     if (p.orderId) order = await api.getOrder(p.orderId);
     else order = (await api.getOrders({ ticker: p.body.ticker })).find(o => o.client_order_id === p.body.client_order_id);
     if (!order || !['executed', 'canceled'].includes(order.status)) throw new Error('Order remains unverified; no retry');
+    p.orderId = order.order_id;
     const count = decimal(order.fill_count_fp, 'fill_count_fp');
     if (!Number.isSafeInteger(count) || count > Number(p.body.count)) throw new Error('Invalid reconciled count');
     if (!count) { applyFill(p, { count: 0, price: 0, fees: 0 }); return; }
@@ -128,16 +148,20 @@ export function createScalpExecutor(deps = {}) {
   }
   async function submit(p) {
     pending = p;
+    if (p.kind === 'entry' && p.mode === 'LATE_SETTLEMENT') {
+      lateEntryTickers = [...new Set([...lateEntryTickers, p.body.ticker])].slice(-500);
+    }
     persist(); // If this fails, no request is sent.
     let result;
     if (p.sim) {
       result = { fill_count: p.body.count, remaining_count: '0.00', average_fill_price: p.simYesPrice,
-        average_fee_paid: String(reserveFee(Number(p.body.count)) / Number(p.body.count)) };
+        average_fee_paid: String((p.mode === 'LATE_SETTLEMENT' ? lateFee(Number(p.body.count), p.side === 'yes' ? Number(p.body.price) : 1 - Number(p.body.price)) : reserveFee(Number(p.body.count))) / Number(p.body.count)) };
     } else {
       if (process.env.DRY_RUN === 'true') throw new Error('Live order blocked by DRY_RUN');
       result = await api.placeOrder(p.body);
     }
     pending.orderId = result.order_id;
+    if (p.mode === 'LATE_SETTLEMENT' && !pending.orderId) throw new Error('Missing late-entry order id');
     pending.response = result;
     persist();
     applyFill(p, scalpAck(result, p));
@@ -148,32 +172,86 @@ export function createScalpExecutor(deps = {}) {
         !Number.isFinite(Number(p.position_fp)) || Number(p.position_fp) !== 0)) return false;
     return (await api.getOrders({ status: 'resting' })).length === 0;
   }
+  function entrySignal(s, mode) {
+    const now = Date.now();
+    if (!Number.isFinite(s.lastQuoteMessageTs) || now - s.lastQuoteMessageTs > 2000 ||
+        s.lastQuoteMessageTs > now || ![s.yesAsk, s.yesBid].every(Number.isFinite) ||
+        s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid) return { shouldEnter: false };
+    if (mode === 'SCALP') return evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
+    if (mode !== 'LATE_SETTLEMENT' || lateEntryTickers.includes(s.ticker)) return { shouldEnter: false };
+    const candidates = [{ direction: 'UP', price: s.yesAsk }, { direction: 'DOWN', price: 1 - s.yesBid }]
+      .filter(c => c.price >= SCALP_CONFIG.lateEntryMinPrice - 1e-9 && c.price < 1)
+      .sort((a, b) => b.price - a.price);
+    return candidates.length ? { shouldEnter: true, direction: candidates[0].direction } : { shouldEnter: false };
+  }
   async function enter(ctx) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
     if (assets().some(a => a.activeTrade) || Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
     if (Date.now() - Math.max(...assets().map(a => a.lastExitTime || 0)) < SCALP_CONFIG.reentryCooldownMs) return;
-    if (s.secsLeft <= 60 || !s.ticker) return;
+    const mode = entryPhase(remainingSeconds(s));
+    if (!['SCALP', 'LATE_SETTLEMENT'].includes(mode) || !s.ticker) return;
+    const ticker = s.ticker;
     const sim = simulated();
     s._simMode = sim;
     if (checkRiskGuards(s, ctx.balance).blocked) return;
-    const signal = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
+    const signal = entrySignal(s, mode);
     if (!signal.shouldEnter) return;
     lastAttempt = Date.now();
     if (!sim && !await accountFlat()) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
-    // Revalidate after account reads; the WebSocket can update during awaits.
-    if (assets().some(a => a.activeTrade) || s.secsLeft <= 60) return;
-    const fresh = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
+    // Revalidate the actual close time, ticker and quote after slow account reads.
+    if (assets().some(a => a.activeTrade) || s.ticker !== ticker || entryPhase(remainingSeconds(s)) !== mode) return;
+    const fresh = entrySignal(s, mode);
     if (!fresh.shouldEnter || fresh.direction !== signal.direction) return;
-    const price = signal.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
-    const count = scalpSize(price, balance);
-    if (!count) return;
-    const body = buildBuyBody(s.ticker, signal.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
+    const price = fresh.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
+    const count = scalpSize(price, balance, mode);
+    if (!count || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price))) return;
+    const body = buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
     body.client_order_id = crypto.randomUUID();
-    await submit({ kind: 'entry', asset, side: signal.direction === 'UP' ? 'yes' : 'no',
-      direction: signal.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+    await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
+      direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+  }
+  async function settle(ctx) {
+    const { asset, s } = ctx;
+    const trade = s.activeTrade;
+    if (Date.now() - (settlementPolls.get(trade.ticker) ?? 0) < 10000) return;
+    settlementPolls.set(trade.ticker, Date.now());
+    const market = await api.getMarket(trade.ticker); // Original ticker, even after rollover.
+    if (market.status !== 'finalized') return;
+    let result = market.result;
+    if (!['yes', 'no'].includes(result)) throw new Error('Non-binary/void settlement requires reconciliation');
+    if (!trade.sim) {
+      const records = (await api.getAllSettlements({ ticker: trade.ticker })).filter(row => row.ticker === trade.ticker);
+      const record = records.find(row => Date.parse(row.settled_time) >= trade.startedAt);
+      if (!record) return; // Market result alone does not prove account settlement.
+      if (record.market_result !== result) throw new Error('Settlement result mismatch');
+      const position = (await api.getPositions()).find(row => row.ticker === trade.ticker);
+      if (position) {
+        if (!['string', 'number'].includes(typeof position.position_fp) ||
+            String(position.position_fp).trim() === '' || !Number.isFinite(Number(position.position_fp))) {
+          throw new Error('Invalid settled position');
+        }
+        if (Number(position.position_fp) !== 0) return;
+      }
+      const fills = await api.getAllFills({ ticker: trade.ticker });
+      if (!trade.entryOrderId || fills.some(fill => fill.order_id !== trade.entryOrderId &&
+          Date.parse(fill.created_time) >= trade.startedAt - 1000)) {
+        throw new Error('Other fills affected late holding; settlement reconciliation required');
+      }
+    }
+    // Attribute only this tracked lot. A settlement row can include earlier scalps
+    // in the same ticker; its cumulative revenue/fees must not be counted again.
+    const payout = result === trade.side ? trade.count : 0;
+    const pnl = payout - trade.amount - trade.entryFees;
+    if (trade.sim) shared.paperBalance += pnl;
+    recordTradePnL(s, pnl);
+    s.activeTrade = null;
+    s.lastExitTime = Date.now();
+    persist();
+    log({ event: 'SETTLED', asset, ticker: trade.ticker, mode: trade.mode, result, payout,
+      pnl, sim: trade.sim });
   }
   async function exit(ctx) {
     const { asset, s } = ctx;
@@ -194,8 +272,13 @@ export function createScalpExecutor(deps = {}) {
       const profit = evaluateScalpProfit({ entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask,
         contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count) });
       decision = evaluateScalpExit({ heldSeconds, netReturn: profit.netReturn });
+      // Include already-realized partial exits so repeated partial sales cannot
+      // reset the per-trade $3 loss budget.
+      if ((trade.realizedNet ?? 0) + profit.netProfit <= -SCALP_CONFIG.maxLossUsd) {
+        decision = { shouldExit: true, reason: 'MAX_DOLLAR_LOSS' };
+      }
     }
-    if (s.secsLeft <= 30 && s.ticker === trade.ticker) decision = { shouldExit: true, reason: 'MARKET_CLOSING' };
+
     if (!decision.shouldExit) return;
     if (!trade.sim) {
       if (process.env.DRY_RUN === 'true') throw new Error('Live SCALP requires live exit; DRY_RUN changed');
@@ -213,7 +296,8 @@ export function createScalpExecutor(deps = {}) {
     busy = true;
     try {
       if (pending) { await reconcile(); return; }
-      if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
+      if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT') await settle(ctx);
+      else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else await enter(ctx);
     } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', error: error.message,
       clientOrderId: pending?.body.client_order_id }); }

@@ -15,7 +15,7 @@ import { executeSell } from '../kalshi/orders.js';
 import { loadBrain } from '../nn/store.js';
 import { startOfflineTraining, stopOfflineTraining } from './offlineTrainer.js';
 import { notify } from '../notify.js';
-import { scalpExecutor, restoreScalpExecution } from './scalpExecution.js';
+import { scalpExecutor, restoreScalpExecution, isManagedTrade } from './scalpExecution.js';
 
 // ── Offline-mode tracking ─────────────────────────────────────────────────────
 // After OFFLINE_THRESHOLD consecutive failed onWindowRoll calls, the bot stops
@@ -132,6 +132,7 @@ s.lastQuoteChangeTs = null;
     try {
       const market = await findActiveMarket(asset);
       s.ticker = market.ticker;
+      s.marketCloseTs = Date.parse(market.close_time);
       kalshiWS[asset].switchTicker(market.ticker);
       console.log(`[Clock] ${asset} new ticker: ${market.ticker}`);
       _rolling[asset] = false;
@@ -212,6 +213,7 @@ async function exitOfflineMode(asset, market) {
 
   const s = state[asset];
   s.ticker          = market.ticker;
+  s.marketCloseTs   = Date.parse(market.close_time);
   s.windowId        = windowId();
   s.farmRounds      = 0;
   s.ticksAbove      = 0;
@@ -297,6 +299,7 @@ async function _tickBody() {
   for (const asset of ['BTC', 'ETH']) {
     const s = state[asset];
     s.secsLeft   = sl;
+    s.clockUpdatedAt = now;
     s.spotPrice  = priceFeed.getPrice(asset);
     s.liquidity  = getLiquidity(asset, hour, s.yesAsk, s.yesBid);
     s.regime     = priceFeed.getRegime(asset);
@@ -373,7 +376,7 @@ if (now % 60000 < 1000) {
 
     // Skip if no market data
     if (!s.ticker || s.yesAsk === null) {
-      if (s.activeTrade?.mode === 'SCALP' || scalpExecutor.snapshot().pending) {
+      if (isManagedTrade(s.activeTrade) || scalpExecutor.snapshot().pending) {
         await scalpExecutor.tick({ asset, s, balance: state.balance ?? 0 });
       }
       continue;
@@ -387,12 +390,12 @@ if (now % 60000 < 1000) {
     };
 
 // Pending orders and held scalps are serviced even if the entry toggle is off.
-    if (process.env.SCALP_ENABLED === 'true' || s.activeTrade?.mode === 'SCALP' || scalpExecutor.snapshot().pending) {
+    if (process.env.SCALP_ENABLED === 'true' || isManagedTrade(s.activeTrade) || scalpExecutor.snapshot().pending) {
       await scalpExecutor.tick(ctx);
     }
 
     // Exit check always runs first
-    if (s.activeTrade && s.activeTrade.mode !== 'SCALP') {
+    if (s.activeTrade && !isManagedTrade(s.activeTrade)) {
       await checkExit(ctx);
     }
 
@@ -456,7 +459,7 @@ export async function startClock() {
   // Restore our journal before servicing scalp orders. Existing account holdings
   // block new entries; do not liquidate unrelated positions during scalp startup.
   restoreScalpExecution();
-  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; budget=$10 including fee reserve; one position across BTC/ETH');
+  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; budget=$10 including fee reserve; one position across BTC/ETH; entries >180s; late >=97c at <=90s; scalp stop=$3');
   // Legacy startup handling applies only outside scalp mode.
   if (process.env.SCALP_ENABLED !== 'true') try {
     const positions = await getPositions();
@@ -489,6 +492,7 @@ export async function startClock() {
     try {
       const market = await findActiveMarket(asset);
       state[asset].ticker = market.ticker;
+      state[asset].marketCloseTs = Date.parse(market.close_time);
       state[asset].windowId = windowId();
       state[asset].windowOpenPrice = priceFeed.getPrice(asset);
       kalshiWS[asset].connect(market.ticker);

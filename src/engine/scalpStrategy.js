@@ -10,6 +10,10 @@ import { getAllFills, getOrders } from '../kalshi/client.js';
 export const SCALP_CONFIG = {
   minHoldSeconds: 15,
   maxHoldSeconds: 45,
+  maxLossUsd: 3.00,
+  entryMinSecondsRemaining: 180,
+  lateEntryMaxSecondsRemaining: 90,
+  lateEntryMinPrice: 0.97,
   minNetProfitPct: 0.05,
   preferredNetProfitPct: 0.10,
   reentryCooldownMs: 8_000,

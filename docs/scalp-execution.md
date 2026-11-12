@@ -35,3 +35,39 @@ API references:
 - https://docs.kalshi.com/api-reference/orders/get-order
 - https://docs.kalshi.com/api-reference/portfolio/get-fills
 - https://kalshi.com/docs/kalshi-fee-schedule.pdf
+
+## Timing and dollar-loss update
+
+- Open new scalps only with **more than 180 seconds** remaining. An existing
+  scalp is not liquidated merely because the clock passes that boundary.
+- Scalp profit targets remain 5% net after 15 seconds / 10% net immediately.
+  Trigger an exit at 45 seconds or estimated total trade net P&L <= -$3.
+  The loss calculation includes entry fees, reserved exit fees, and any
+  realized partial exits. Gaps, network delays and slippage can exceed $3.
+- Between 180 and 90 seconds remaining, open no new positions.
+- With >0 and <=90 seconds remaining, allow one late entry per ticker on
+  either side whose executable ask is >=$0.97 and <$1.00. Do not rely on
+  midpoint or the opposite side's bid as the purchase price. The contract
+  must have a positive potential payout after estimated entry fees.
+- Late entries have a $10 entry budget including a standard taker-fee
+  estimate, and share the single-position lock with scalp trades. Existing
+  disabled-asset, balance, loss and cooldown guards still apply.
+- Late trades use `LATE_SETTLEMENT` mode. Do not apply scalp stop-loss,
+  profit targets or its 45-second timer to them. They can lose their full
+  entry cost if the outcome reverses. A 97-cent price is not a guarantee.
+- The journal persists mode, pending orders and late-entry ticker
+  reservations. An unverified fill blocks further orders.
+- After rollover, keep querying the original held ticker. Wait for a
+  finalized binary result, a matching account settlement record and a zero
+  remaining account position before clearing a live late holding. Attribute
+  payout only to the tracked lot, subtract its confirmed entry cost/fee,
+  and do not count the settlement record's cumulative prior scalp fees or
+  revenue again. Unexpected fills, void results or invalid records require
+  reconciliation rather than assumed profit. Simulation uses public market
+  results and is explicitly marked simulated.
+- Entry timing is rechecked after portfolio/balance reads, using the market's
+  actual close time. Live holdings and pending orders remain managed even
+  when new-entry mode is disabled or the market quote is unavailable.
+
+Settlement schema reference:
+https://docs.kalshi.com/api-reference/portfolio/get-settlements
