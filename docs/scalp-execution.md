@@ -8,7 +8,11 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 - Entry budget: at most $10 including a fee reserve. One position or unresolved
   order across BTC and ETH. Early entries require more than 480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
-  Early entries allow below 40 cents or 55–70 cents inclusive.
+  Early entries allow YES below 15 cents, or either side at 55–70 cents inclusive.
+  Cheap NO entries are blocked. When YES is below 40 cents and falling,
+  the existing downward momentum signal can buy NO, subject to its own
+  executable 55–70-cent purchase price and the existing timing gates.
+  A YES purchase below 15 cents targets a 20-cent executable bid.
   Higher-priced scalps (above 70 and below 97 cents) are allowed only with
   strictly less than 120 seconds remaining. They retain momentum confirmation
   and scalp profit targets. Prices >=97 cents remain reserved for late settlement.
@@ -20,7 +24,8 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 | Actual entry price | Target contract bid |
 | --- | --- |
-| Below 80 cents | Entry plus 5 cents |
+| YES below 15 cents | 20 cents |
+| Other entries below 80 cents | Entry plus 5 cents |
 | 80 to below 90 cents | 90 cents |
 | 90 to below 97 cents | 97 cents |
 

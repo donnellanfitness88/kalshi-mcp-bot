@@ -82,31 +82,32 @@ export function evaluateScalpProfit({
  * Evaluate the holding window.
  * Returns a signal for simulation, not an order.
  */
-export function scalpEntryPriceAllowed(price, seconds = Infinity) {
+export function scalpEntryPriceAllowed(price, seconds = Infinity, side = null) {
   if (!Number.isFinite(price) || price <= 0 || price >= 0.97 - 1e-9) return false;
   const early = seconds > SCALP_CONFIG.entryMinSecondsRemaining;
   const final = Number.isFinite(seconds) && seconds > 0 &&
     seconds < SCALP_CONFIG.highPriceEntryMaxSecondsRemaining;
-  if (early) return price < 0.40 - 1e-9 || (price >= 0.55 - 1e-9 && price <= 0.70 + 1e-9);
+  if (early) return (side === 'yes' && price < 0.15 - 1e-9) || (price >= 0.55 - 1e-9 && price <= 0.70 + 1e-9);
   return final && price > 0.70 + 1e-9;
 }
 
 // Targets are contract-price points, not percentage returns on the stake.
-export function scalpTakeProfitPrice(entryPrice) {
+export function scalpTakeProfitPrice(entryPrice, side = null) {
   if (!Number.isFinite(entryPrice) || entryPrice <= 0 || entryPrice >= 1) {
     throw new Error('Invalid SCALP entry price');
   }
   const price = Math.round(entryPrice * 1000000) / 1000000;
+  if (side === 'yes' && price < 0.15) return 0.20;
   if (price >= 0.90) return 0.97;
   if (price >= 0.80) return 0.90;
   return Math.round((price + 0.05) * 1000000) / 1000000;
 }
-export function evaluateScalpExit({ heldSeconds, entryPrice, exitBid }) {
+export function evaluateScalpExit({ heldSeconds, entryPrice, exitBid, side = null }) {
   if (!Number.isFinite(heldSeconds) || heldSeconds < 0 ||
       !Number.isFinite(exitBid) || exitBid < 0 || exitBid > 1) {
     throw new Error('Invalid SCALP exit inputs');
   }
-  const targetPrice = scalpTakeProfitPrice(entryPrice);
+  const targetPrice = scalpTakeProfitPrice(entryPrice, side);
   if (Number.isFinite(SCALP_CONFIG.maxHoldSeconds) && heldSeconds >= SCALP_CONFIG.maxHoldSeconds) {
     return { shouldExit: true, reason: 'MAX_HOLD_TIME', targetPrice };
   }

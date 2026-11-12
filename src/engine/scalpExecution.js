@@ -232,7 +232,7 @@ export function createScalpExecutor(deps = {}) {
       const signal = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
       if (!signal.shouldEnter) return signal;
       const price = signal.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
-      if (!scalpEntryPriceAllowed(price, remainingSeconds(s))) return { shouldEnter: false, reason: 'ENTRY_PRICE_BAND' };
+      if (!scalpEntryPriceAllowed(price, remainingSeconds(s), signal.direction === 'UP' ? 'yes' : 'no')) return { shouldEnter: false, reason: 'ENTRY_PRICE_BAND' };
       return signal;
     }
     if (mode !== 'LATE_SETTLEMENT' || lateEntryTickers.includes(s.ticker)) return { shouldEnter: false };
@@ -388,7 +388,7 @@ export function createScalpExecutor(deps = {}) {
     if ([ask, bid].every(Number.isFinite) && bid >= 0 && ask <= 1 && ask >= bid) {
       const profit = evaluateScalpProfit({ entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask,
         contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count) });
-      decision = evaluateScalpExit({ heldSeconds, entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask });
+      decision = evaluateScalpExit({ heldSeconds, side: trade.side, entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask });
       // Include already-realized partial exits so repeated partial sales cannot
       // reset a configured per-trade loss budget (currently disabled).
       if (Number.isFinite(SCALP_CONFIG.maxLossUsd) && (trade.realizedNet ?? 0) + profit.netProfit <= -SCALP_CONFIG.maxLossUsd) {

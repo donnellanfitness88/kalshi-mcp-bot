@@ -11,10 +11,10 @@ function fixture(direction = 'UP', sim = false) {
   const asset = () => ({ activeTrade: null, farmArmed: true, lastExitTime: 0, lastLossTime: 0,
     consecutiveLosses: 0, sessionStartBalance: 100, dailyStartBalance: 100,
     sessionPnL: 0, dailyPnL: 0, totalPnL: 0, tradeCount: 0, secsLeft: 600,
-    ticker: 'BTC-TEST', yesAsk: 0.67, yesBid: 0.66, lastQuoteMessageTs: now,
+    ticker: 'BTC-TEST', yesAsk: direction === 'UP' ? 0.67 : 0.39, yesBid: direction === 'UP' ? 0.66 : 0.38, lastQuoteMessageTs: now,
     yesPriceHistory: Array.from({ length: 61 }, (_, i) => ({
       ts: now - 6000 + i * 100,
-      price: direction === 'UP' ? 0.635 + 0.03 * i / 60 : 0.695 - 0.03 * i / 60
+      price: direction === 'UP' ? 0.635 + 0.03 * i / 60 : 0.415 - 0.03 * i / 60
     })) });
   const state = { BTC: asset(), ETH: { ...asset(), ticker: 'ETH-TEST' }, simMode: sim, paperBalance: 50, disabledAssets: [] };
   const requests = [], logs = [];
@@ -48,7 +48,7 @@ test('UP and DOWN use confirmed count and YES book price conversion', async () =
     assert.equal(f.requests.length, 1);
     const t = f.state.BTC.activeTrade;
     assert.equal(t.side, direction === 'UP' ? 'yes' : 'no');
-    assert.ok(Math.abs(t.entrySidePrice - (direction === 'UP' ? 0.67 : 0.34)) < 1e-9);
+    assert.ok(Math.abs(t.entrySidePrice - (direction === 'UP' ? 0.67 : 0.62)) < 1e-9);
     assert.ok(t.amount + t.entryFees <= 10);
     assert.equal(f.requests[0].time_in_force, 'fill_or_kill');
     assert.equal(f.saved().pending, null);
@@ -408,8 +408,8 @@ test('an increased or opposite holding is not mistaken for a manual sale', async
   }
 });
 test('early price bands include 55 and 70 cents and reject expensive entries', () => {
-  for (const price of [0.40,0.496,0.549,0.701,0.78,0.80,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
-  for (const price of [0.11,0.30,0.399,0.55,0.60,0.65,0.70]) assert.equal(scalpEntryPriceAllowed(price), true);
+  for (const price of [0.11,0.30,0.399,0.40,0.496,0.549,0.701,0.78,0.80,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
+  for (const price of [0.55,0.60,0.65,0.70]) assert.equal(scalpEntryPriceAllowed(price), true);
 });
 function setEntryBook(f, side, price) {
   const s = f.state.BTC, now = Date.now();
@@ -421,14 +421,14 @@ function setEntryBook(f, side, price) {
     price: mid + (side === 'yes' ? -1 : 1) * 0.03 * (1-i/60)}));
 }
 test('live entry path blocks the purchased YES or NO contract in the excluded band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.40,0.496,0.549,0.701,0.78,0.80]) {
+  for (const side of ['yes','no']) for (const price of [0.15,0.30,0.39,0.40,0.496,0.549,0.701,0.78,0.80]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,0);
   }
 });
 test('live entry path permits both sides outside the band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.11,0.30,0.55,0.60,0.61,0.70]) {
+  for (const side of ['yes','no']) for (const price of [0.55,0.60,0.61,0.70]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,1);
@@ -627,4 +627,38 @@ test('account reads cannot carry an early entry into the buffer', async () => {
   f.api.getBalance=async()=> { f.state.BTC.secsLeft=480; return 10000; };
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,0);
+});
+
+test('cheap YES needs upward momentum and exits at 20 cents rather than entry plus five', async () => {
+  for (const price of [0.05,0.11,0.149]) {
+    const f=fixture(); setEntryBook(f,'yes',price);
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length,1);
+    assert.equal(f.state.BTC.activeTrade.side,'yes');
+    Object.assign(f.state.BTC,{yesBid:0.19,yesAsk:0.20});
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length,1);
+    Object.assign(f.state.BTC,{yesBid:0.20,yesAsk:0.21});
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length,2);
+    assert.equal(f.requests[1].price,'0.2000');
+    assert.equal(f.requests[1].reduce_only,true);
+  }
+});
+test('falling YES below 40 cents buys NO at 62 and takes profit at 67', async () => {
+  const f=fixture('DOWN');
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade.side,'no');
+  assert.ok(Math.abs(f.state.BTC.activeTrade.entrySidePrice-0.62)<1e-9);
+  Object.assign(f.state.BTC,{yesAsk:0.33,yesBid:0.32});
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,2);
+  assert.equal(f.requests[1].price,'0.3300');
+});
+test('cheap NO is blocked and a cheap YES without rising momentum cannot enter', async () => {
+  const f=fixture(); setEntryBook(f,'no',0.11);
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,0);
+  setEntryBook(f,'yes',0.11);
+  f.state.BTC.yesPriceHistory=f.state.BTC.yesPriceHistory.map(p=>({...p,price:0.105}));
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,0);
 });
