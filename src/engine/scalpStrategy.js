@@ -13,8 +13,8 @@ export const SCALP_CONFIG = {
   maxEntryPullback: 0.01,
   minHoldSeconds: 15,
   maxHoldSeconds: 45,
-  maxLossUsd: 3.00,
-  entryMinSecondsRemaining: 180,
+  maxLossUsd: 5.00,
+  entryMinSecondsRemaining: 480,
   lateEntryMaxSecondsRemaining: 90,
   lateEntryMinPrice: 0.97,
   minNetProfitPct: 0.05,
@@ -81,50 +81,34 @@ export function evaluateScalpProfit({
  * Evaluate the holding window.
  * Returns a signal for simulation, not an order.
  */
-export function evaluateScalpExit({
-  heldSeconds,
-  netReturn,
-  momentumStrong = false
-}) {
-  if (
-    !Number.isFinite(heldSeconds) ||
-    !Number.isFinite(netReturn) ||
-    heldSeconds < 0
-  ) {
+export function scalpEntryPriceAllowed(price) {
+  return Number.isFinite(price) && price > 0 &&
+    (price < 0.30 - 1e-9 || (price > 0.65 + 1e-9 && price < 0.97 - 1e-9));
+}
+
+// Targets are contract-price points, not percentage returns on the stake.
+export function scalpTakeProfitPrice(entryPrice) {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 || entryPrice >= 1) {
+    throw new Error('Invalid SCALP entry price');
+  }
+  const price = Math.round(entryPrice * 1000000) / 1000000;
+  if (price >= 0.90) return 0.97;
+  if (price >= 0.80) return 0.90;
+  return Math.round((price + 0.05) * 1000000) / 1000000;
+}
+export function evaluateScalpExit({ heldSeconds, entryPrice, exitBid }) {
+  if (!Number.isFinite(heldSeconds) || heldSeconds < 0 ||
+      !Number.isFinite(exitBid) || exitBid < 0 || exitBid > 1) {
     throw new Error('Invalid SCALP exit inputs');
   }
-
+  const targetPrice = scalpTakeProfitPrice(entryPrice);
   if (heldSeconds >= SCALP_CONFIG.maxHoldSeconds) {
-    return {
-      shouldExit: true,
-      reason: 'MAX_HOLD_TIME'
-    };
+    return { shouldExit: true, reason: 'MAX_HOLD_TIME', targetPrice };
   }
-
-  if (
-    netReturn >= SCALP_CONFIG.preferredNetProfitPct
-  ) {
-    return {
-      shouldExit: true,
-      reason: 'PREFERRED_PROFIT'
-    };
+  if (exitBid + 1e-9 >= targetPrice) {
+    return { shouldExit: true, reason: 'PRICE_TARGET', targetPrice };
   }
-
-  if (
-    heldSeconds >= SCALP_CONFIG.minHoldSeconds &&
-    netReturn >= SCALP_CONFIG.minNetProfitPct &&
-    !momentumStrong
-  ) {
-    return {
-      shouldExit: true,
-      reason: 'MIN_PROFIT'
-    };
-  }
-
-  return {
-    shouldExit: false,
-    reason: 'HOLD'
-  };
+  return { shouldExit: false, reason: 'HOLD', targetPrice };
 }
 
 /**

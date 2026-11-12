@@ -1,101 +1,83 @@
 # Scalp execution
 
-`SCALP_ENABLED=true` selects scalp entries instead of farm/auto-buy entries.
-The existing `DRY_RUN` and simulation override remain authoritative. Live
-execution requires `DRY_RUN=false` and a live account balance.
+`SCALP_ENABLED=true` selects scalp and late settlement entries. Existing
+DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
-- Entry cost is capped at $10 including a fee reserve (2 cents per contract
-  plus one cent rounding). Actual entry price and fee come from the V2 order
-  acknowledgment. This reserve exceeds the standard maximum taker fee for
-  the supported BTC/ETH markets; review it if their fee multiplier changes.
-- One active position or unresolved order across BTC and ETH.
-- FOK entries; reduce-only IOC exits. A 45-second threshold triggers an exit
-  attempt, not a guarantee of liquidation at that second or price.
-- Targets are net of entry fees and reserved exit fees: 10% immediately, or
-  at least 5% after 15 seconds. At 45 seconds exit regardless of return.
-- Timeouts and incomplete acknowledgments stay pending. Subsequent ticks
-  query the existing order and its fills; they do not resubmit it.
-- Partial sales retain the unsold holding. Net realized P&L uses actual
-  acknowledged prices and fees; final settlement requires reconciliation.
-- Existing account positions or resting orders block new entries. Startup
-  in scalp mode does not automatically liquidate unrelated account holdings.
-- `SCALP_STATE_DIR` should point to a persistent volume (production:
-  `/scalp-state`). The journal is written before an order is sent and restored
-  after restarts. Without persisted state, account holdings still block new
-  entries but cannot be reconstructed automatically.
-- Existing cooldown and loss guards still apply. Profitability is unproven.
+## Current scalp rules
 
-Validation: `node --test tests/unit/scalp-execution.test.js`.
-The repository's older general test suite contains pre-existing failures
-against its current API and neural-network shapes; compare to the parent
-commit before attributing them to this change.
+- Entry budget: at most $10 including a fee reserve. One position or unresolved
+  order across BTC and ETH. Entries require more than 480 seconds remaining.
+- Filter the executable ask of the contract being purchased, YES or NO.
+  Exclude 30–65 cents inclusive. Allow below 30 cents or above 65 cents and
+  below 97 cents. Prices >=97 cents are reserved for the separate late mode.
+- Require at least a 2-cent midpoint move over 5–10 seconds, positive movement
+  in each of the last three elapsed one-second intervals, and no pullback
+  greater than 1 cent below the purchased contract's recent midpoint high.
+  NO signals use 1 minus YES midpoint. Existing spread/freshness gates apply.
+- Profit exits use contract-price points, not a percent return on the stake:
 
-API references:
+| Actual entry price | Target contract bid |
+| --- | --- |
+| Below 80 cents | Entry plus 5 cents |
+| 80 to below 90 cents | 90 cents |
+| 90 to below 97 cents | 97 cents |
+
+- Profit targets can trigger immediately; no 15-second waiting period.
+  Examples: 70→75, 80→90, 90→97. Fees reduce net profit from these moves.
+- Keep the 45-second maximum-hold exit attempt. Trigger a loss exit at
+  estimated total trade net P&L <= -$5, including entry fees, reserved exit
+  fees and realized partial exits. Neither $5 nor 45 seconds guarantees a
+  completed exit at that loss/time when gaps or liquidity prevent a fill.
+- Profit exits use a reduce-only IOC limit at the target price; partial or
+  unfilled quantities remain managed. Time/loss exits retain the existing
+  aggressive reduce-only IOC behavior. A later loss/time trigger can exit
+  below an earlier unfilled profit target.
+- Existing scalps are not closed solely for passing the 480-second boundary.
+  Existing trades still receive the new $5/price-target rules after deploy;
+  entry-band restrictions apply to new orders, not forced liquidation.
+
+## Late settlement entries
+
+Between 480 and 90 seconds remaining, open no new position. In the final
+90 seconds, when flat, allow one late entry per ticker on a YES or NO
+executable ask >=97 cents and <$1. Entry cost plus estimated standard taker
+fees must fit within $10 and potential settlement gain must exceed estimated
+fees. This price is not an independent probability estimate or guarantee.
+
+Late positions use `LATE_SETTLEMENT` mode and hold through settlement; scalp
+profit targets, the $5 loss exit and the 45-second timer do not apply. Full
+entry cost remains at risk. After rollover, query the original held ticker.
+Require a finalized binary outcome, a matching account settlement record
+and no remaining account position before clearing a live holding. Attribute
+only this tracked lot's payout/cost/entry fee, not cumulative prior scalp
+activity in the same ticker. Void or ambiguous outcomes require reconciliation.
+
+## Order and manual-sale reconciliation
+
+FOK entries use actual acknowledged counts/prices/fees. Journal before
+sending; ambiguous responses are reconciled from the existing order and its
+fills, never resubmitted. A partial sale retains the remainder. Persist mode,
+pending orders and late ticker reservations under SCALP_STATE_DIR (production:
+/scalp-state on a volume). Holdings and pending orders remain managed when
+new entries are disabled or quotes are unavailable.
+
+For a manual sale, verify the account reduction against closing fills since
+entry, terminal external orders and actual fees, then reread positions.
+Full verified sales record net P&L and release the lock; partial sales retain
+remaining contracts, proportional fees and realized P&L. Persist before
+changing in-memory holdings. Remember manual fill IDs and bot exit order IDs
+against duplicate accounting. Missing fills, reversed/increased holdings or
+invalid data remain blocked. Risk guards and cooldowns still apply.
+
+Validate:
+`node --test tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
+
+The older general suite has pre-existing failures against current API/NN
+shapes. Passing execution tests verifies programmed behavior, not profitability.
+
+References:
 - https://docs.kalshi.com/api-reference/orders/create-order-v2
 - https://docs.kalshi.com/api-reference/orders/get-order
 - https://docs.kalshi.com/api-reference/portfolio/get-fills
+- https://docs.kalshi.com/api-reference/portfolio/get-settlements
 - https://kalshi.com/docs/kalshi-fee-schedule.pdf
-
-## Timing and dollar-loss update
-
-- Open new scalps only with **more than 180 seconds** remaining. An existing
-  scalp is not liquidated merely because the clock passes that boundary.
-- Scalp profit targets remain 5% net after 15 seconds / 10% net immediately.
-  Trigger an exit at 45 seconds or estimated total trade net P&L <= -$3.
-  The loss calculation includes entry fees, reserved exit fees, and any
-  realized partial exits. Gaps, network delays and slippage can exceed $3.
-- Between 180 and 90 seconds remaining, open no new positions.
-- With >0 and <=90 seconds remaining, allow one late entry per ticker on
-  either side whose executable ask is >=$0.97 and <$1.00. Do not rely on
-  midpoint or the opposite side's bid as the purchase price. The contract
-  must have a positive potential payout after estimated entry fees.
-- Late entries have a $10 entry budget including a standard taker-fee
-  estimate, and share the single-position lock with scalp trades. Existing
-  disabled-asset, balance, loss and cooldown guards still apply.
-- Late trades use `LATE_SETTLEMENT` mode. Do not apply scalp stop-loss,
-  profit targets or its 45-second timer to them. They can lose their full
-  entry cost if the outcome reverses. A 97-cent price is not a guarantee.
-- The journal persists mode, pending orders and late-entry ticker
-  reservations. An unverified fill blocks further orders.
-- After rollover, keep querying the original held ticker. Wait for a
-  finalized binary result, a matching account settlement record and a zero
-  remaining account position before clearing a live late holding. Attribute
-  payout only to the tracked lot, subtract its confirmed entry cost/fee,
-  and do not count the settlement record's cumulative prior scalp fees or
-  revenue again. Unexpected fills, void results or invalid records require
-  reconciliation rather than assumed profit. Simulation uses public market
-  results and is explicitly marked simulated.
-- Entry timing is rechecked after portfolio/balance reads, using the market's
-  actual close time. Live holdings and pending orders remain managed even
-  when new-entry mode is disabled or the market quote is unavailable.
-
-Settlement schema reference:
-https://docs.kalshi.com/api-reference/portfolio/get-settlements
-
-## Stronger scalp entry filters
-
-Scalp signals require at least a 2-cent midpoint move over a 5-to-10-second
-observation. Each of the last three elapsed one-second intervals must show
-positive movement in the chosen contract's direction, with timestamped
-samples covering those intervals (not merely three feed messages). Reject
-entry more than 1 cent below that contract's highest midpoint in the recent
-observation. NO signals use the mirrored `1 - YES midpoint` series. These
-filters do not change the late settlement entry or existing exit rules.
-
-Validate with:
-`node --test tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
-
-## Manual sales
-
-When a live holding is reduced outside the bot, poll account positions and
-match the reduction to closing fills since entry. Verify each external
-order is terminal, count/price/fee fields are valid, and the position is
-unchanged on a second read. An absent position alone never clears a trade.
-Full verified manual sales record net P&L and release the position lock;
-partial sales retain the remaining contracts, proportional entry fees, and
-realized net P&L. Persist before changing in-memory holdings. Remember
-manual fill IDs and bot exit order IDs to prevent duplicate accounting.
-The same path handles manual closure of late settlement holdings. Increased
-or reversed positions, missing fills, nonterminal orders, and invalid data
-remain blocked. Existing loss guards and cooldowns still apply after a
-verified manual close. No keys or journal deletion are needed.

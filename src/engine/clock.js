@@ -459,7 +459,7 @@ export async function startClock() {
   // Restore our journal before servicing scalp orders. Existing account holdings
   // block new entries; do not liquidate unrelated positions during scalp startup.
   restoreScalpExecution();
-  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; budget=$10 including fee reserve; one position across BTC/ETH; entries >180s; late >=97c at <=90s; scalp stop=$3');
+  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; budget=$10 including fee reserve; one position across BTC/ETH; entries >480s; late >=97c at <=90s; scalp stop=$5; scalp excludes 30-65c; contract-price profit targets');
   // Legacy startup handling applies only outside scalp mode.
   if (process.env.SCALP_ENABLED !== 'true') try {
     const positions = await getPositions();

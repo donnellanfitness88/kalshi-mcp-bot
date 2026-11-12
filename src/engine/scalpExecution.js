@@ -6,7 +6,7 @@ import { state } from './state.js';
 import { reconcileManualExit, remainingHeldContracts } from './manualExitReconciliation.js';
 import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
 import { buildBuyBody, buildSellBody } from '../kalshi/orders.js';
-import { SCALP_CONFIG, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
+import { SCALP_CONFIG, scalpEntryPriceAllowed, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
 import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
@@ -180,7 +180,13 @@ export function createScalpExecutor(deps = {}) {
     if (!Number.isFinite(s.lastQuoteMessageTs) || now - s.lastQuoteMessageTs > 2000 ||
         s.lastQuoteMessageTs > now || ![s.yesAsk, s.yesBid].every(Number.isFinite) ||
         s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid) return { shouldEnter: false };
-    if (mode === 'SCALP') return evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
+    if (mode === 'SCALP') {
+      const signal = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
+      if (!signal.shouldEnter) return signal;
+      const price = signal.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
+      if (!scalpEntryPriceAllowed(price)) return { shouldEnter: false, reason: 'ENTRY_PRICE_BAND' };
+      return signal;
+    }
     if (mode !== 'LATE_SETTLEMENT' || lateEntryTickers.includes(s.ticker)) return { shouldEnter: false };
     const candidates = [{ direction: 'UP', price: s.yesAsk }, { direction: 'DOWN', price: 1 - s.yesBid }]
       .filter(c => c.price >= SCALP_CONFIG.lateEntryMinPrice - 1e-9 && c.price < 1)
@@ -325,9 +331,9 @@ export function createScalpExecutor(deps = {}) {
     if ([ask, bid].every(Number.isFinite) && bid >= 0 && ask <= 1 && ask >= bid) {
       const profit = evaluateScalpProfit({ entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask,
         contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count) });
-      decision = evaluateScalpExit({ heldSeconds, netReturn: profit.netReturn });
+      decision = evaluateScalpExit({ heldSeconds, entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask });
       // Include already-realized partial exits so repeated partial sales cannot
-      // reset the per-trade $3 loss budget.
+      // reset the per-trade $5 loss budget.
       if ((trade.realizedNet ?? 0) + profit.netProfit <= -SCALP_CONFIG.maxLossUsd) {
         decision = { shouldExit: true, reason: 'MAX_DOLLAR_LOSS' };
       }
@@ -344,6 +350,10 @@ export function createScalpExecutor(deps = {}) {
       }
     }
     const body = buildSellBody(trade.ticker, trade.side, trade.count);
+    if (decision.reason === 'PRICE_TARGET') {
+      // A profit exit must not cross all the way down the book below its target.
+      body.price = (trade.side === 'yes' ? decision.targetPrice : 1 - decision.targetPrice).toFixed(4);
+    }
     await submit({ kind: 'exit', asset, side: trade.side, body, sim: trade.sim,
       simYesPrice: String(trade.side === 'yes' ? bid : ask), reason: decision.reason, startedAt: Date.now() });
   }
