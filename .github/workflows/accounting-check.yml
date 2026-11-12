@@ -26,5 +26,7 @@ jobs:
 
       - name: Run all accounting tests
         
-        run: node --test tests/unit/*.test.js
+        
+        run: node --test tests/unit/accounting.test.js tests/unit/combined-accounting.test.js tests/unit/fill-reconciliation.test.js tests/unit/normalize-fills.test.js tests/unit/settlement-reconciliation.test.js
+
 
