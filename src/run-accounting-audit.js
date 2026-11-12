@@ -1,95 +1,322 @@
 
 /**
- * Kalshi BTC/ETH 15-minute read-only accounting inventory.
- * No order placement, trading configuration changes, or speculative P&L.
- * Run: node src/run-accounting-audit.js
+ * Read-only BTC/ETH settlement reconciliation diagnostics.
+ * Does not place orders or change trading settings.
+ * Outputs candidate P&L only, never labels it verified.
  */
 import { getAllFills, getAllSettlements } from './kalshi/client.js';
 
 const SERIES = ['KXBTC15M', 'KXETH15M'];
-const round = (x) => Number(x.toFixed(6));
-const classify = (ticker) => SERIES.find(s => typeof ticker === 'string' && ticker.startsWith(s + '-')) || null;
-const validNumber = (v) => (v === undefined || v === null || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
 
-function summarize(series, fills, settlements) {
-  const f = fills.filter(x => classify(x.ticker) === series);
-  const s = settlements.filter(x => classify(x.ticker) === series);
-  const marketSet = new Set([...f, ...s].map(x => x.ticker));
-  const fillIds = new Set();
-  const issues = [];
-  let fees = 0;
-  let quantity = 0;
-  let notional = 0;
-  let knownFeeCount = 0;
-  let knownNotionalCount = 0;
-  const sides = {};
-  for (const x of f) {
-    if (!x.fill_id) issues.push({ticker:x.ticker, issue:'MISSING_FILL_ID'});
-    else if (fillIds.has(x.fill_id)) issues.push({ticker:x.ticker, issue:'DUPLICATE_FILL_ID'});
-    else fillIds.add(x.fill_id);
-    const side = x.outcome_side ?? x.side;
-    const key = `${x.action ?? 'missing'}:${side ?? 'missing'}`;
-    sides[key] = (sides[key] || 0) + 1;
-    const qty = validNumber(x.count_fp);
-    if (qty === null || qty <= 0) issues.push({ticker:x.ticker, issue:'INVALID_FILL_QUANTITY'});
-    else {
-      quantity += qty;
-      const price = validNumber(side === 'yes' ? x.yes_price_dollars : x.no_price_dollars);
-      if (price !== null && price >= 0 && price <= 1) {
-        notional += qty * price;
-        knownNotionalCount++;
-      } else issues.push({ticker:x.ticker, issue:'MISSING_OR_INVALID_PRICE'});
+const num = v =>
+  v === null || v === undefined || v === ''
+    ? null
+    : Number.isFinite(Number(v))
+      ? Number(v)
+      : null;
+
+const round = v => Math.round(v * 1e6) / 1e6;
+
+const seriesOf = t =>
+  SERIES.find(s =>
+    typeof t === 'string' && t.startsWith(s + '-')
+  );
+
+const EPS = 0.0001;
+
+function reconcile(ticker, fills, settlement) {
+  const problems = [];
+  const seen = new Set();
+
+  let cash = 0;
+  let fillFees = 0;
+  let yes = 0;
+  let no = 0;
+
+  const orderIds = new Set();
+
+  const counts = {
+    buyYes: 0,
+    buyNo: 0,
+    sellYes: 0,
+    sellNo: 0
+  };
+
+  for (const f of fills) {
+    if (!f.fill_id || seen.has(f.fill_id)) {
+      problems.push('MISSING_OR_DUPLICATE_FILL_ID');
     }
-    const fee = validNumber(x.fee_cost);
-    if (fee === null || fee < 0) issues.push({ticker:x.ticker, issue:'MISSING_OR_INVALID_FILL_FEE'});
-    else { fees += fee; knownFeeCount++; }
+
+    if (f.fill_id) seen.add(f.fill_id);
+    if (f.order_id) orderIds.add(f.order_id);
+
+    const side = f.outcome_side ?? f.side;
+    const action = f.action;
+    const q = num(f.count_fp);
+
+    const p = num(
+      side === 'yes'
+        ? f.yes_price_dollars
+        : f.no_price_dollars
+    );
+
+    const fee = num(f.fee_cost);
+
+    if (
+      !['yes', 'no'].includes(side) ||
+      !['buy', 'sell'].includes(action) ||
+      q === null ||
+      q <= 0 ||
+      p === null ||
+      p < 0 ||
+      p > 1 ||
+      fee === null ||
+      fee < 0
+    ) {
+      problems.push('INVALID_FILL_FIELD');
+      continue;
+    }
+
+    const sign = action === 'buy' ? 1 : -1;
+
+    cash -= sign * q * p;
+
+    if (side === 'yes') {
+      yes += sign * q;
+    } else {
+      no += sign * q;
+    }
+
+    fillFees += fee;
+
+    counts[
+      action + (side === 'yes' ? 'Yes' : 'No')
+    ]++;
   }
-  const settlementResults = {};
-  for (const x of s) {
-    const result = x.market_result ?? 'missing';
-    settlementResults[result] = (settlementResults[result] || 0) + 1;
+
+  if (!settlement) {
+    problems.push('MISSING_SETTLEMENT');
   }
-  const settledTickers = new Set(s.map(x => x.ticker));
-  const fillTickers = new Set(f.map(x => x.ticker));
+
+  const result = settlement?.market_result;
+
+  if (
+    settlement &&
+    !['yes', 'no', 'void'].includes(result)
+  ) {
+    problems.push('UNSUPPORTED_RESULT');
+  }
+
+  const settledYes = num(settlement?.yes_count_fp);
+  const settledNo = num(settlement?.no_count_fp);
+
+  if (
+    settlement &&
+    (settledYes === null || settledNo === null)
+  ) {
+    problems.push('SETTLEMENT_COUNTS_MISSING');
+  }
+
+  const countsMatch =
+    settledYes !== null &&
+    settledNo !== null &&
+    Math.abs(yes - settledYes) < EPS &&
+    Math.abs(no - settledNo) < EPS;
+
+  if (settlement && !countsMatch) {
+    problems.push('FILL_SETTLEMENT_POSITION_MISMATCH');
+  }
+
+  const payoutFromNetPosition =
+    result === 'yes'
+      ? yes
+      : result === 'no'
+        ? no
+        : null;
+
+  const candidate =
+    payoutFromNetPosition === null
+      ? null
+      : cash + payoutFromNetPosition - fillFees;
+
+  const revenue = num(settlement?.revenue);
+  const settlementFee = num(settlement?.fee_cost);
+
+  const yesCost = num(
+    settlement?.yes_total_cost_dollars
+  );
+
+  const noCost = num(
+    settlement?.no_total_cost_dollars
+  );
+
   return {
-    series,
-    fills: f.length,
-    settlements: s.length,
-    uniqueMarkets: marketSet.size,
-    fillMarketsWithoutSettlementRecord: [...fillTickers].filter(x => !settledTickers.has(x)).length,
-    settlementMarketsWithoutFillRecord: [...settledTickers].filter(x => !fillTickers.has(x)).length,
-    fillPatterns: sides,
-    settlementResults,
-    totalFilledContractsAcrossTransactions: round(quantity),
-    totalExecutedNotionalUsd: knownNotionalCount === f.length ? round(notional) : null,
-    observedFillFeesUsd: knownFeeCount === f.length ? round(fees) : null,
-    dataQuality: { issues: issues.length, examples: issues.slice(0, 10) },
-    pnl: {
-      status: 'NOT_VERIFIED',
-      realizedNetUsd: null,
-      winRate: null,
-      reason: 'Fill direction, position closure, settlement cash flows, and fee attribution are not yet reconciled. Notional and fill fees are not net profit.'
-    }
+    ticker,
+    fills: fills.length,
+    ordersWithId: orderIds.size,
+    fillPatterns: counts,
+    result,
+
+    netPositionFromFills: {
+      yes: round(yes),
+      no: round(no)
+    },
+
+    settlementPosition: {
+      yes: settledYes,
+      no: settledNo
+    },
+
+    countsMatch,
+
+    settlementFields: {
+      revenueRaw: revenue,
+      feeCostRaw: settlementFee,
+      yesTotalCostDollars: yesCost,
+      noTotalCostDollars: noCost
+    },
+
+    fillFeesUsd: round(fillFees),
+
+    candidateNetUsd:
+      candidate === null ? null : round(candidate),
+
+    problems: [...new Set(problems)]
   };
 }
 
 async function main() {
-  console.log('=== KALSHI BTC/ETH READ-ONLY ACCOUNTING REPORT ===');
-  const [fills, settlements] = await Promise.all([getAllFills(), getAllSettlements()]);
-  if (!Array.isArray(fills) || !Array.isArray(settlements)) throw new Error('Invalid API response arrays');
-  const report = {
-    generatedAtUtc: new Date().toISOString(),
-    scope: 'KXBTC15M and KXETH15M ticker prefixes only; account fills may include manual trading',
-    sourceTotals: {fills: fills.length, settlements: settlements.length},
-    markets: SERIES.map(s => summarize(s, fills, settlements)),
-    exclusions: {
-      otherMarketFills: fills.filter(x => !classify(x.ticker)).length,
-      otherMarketSettlements: settlements.filter(x => !classify(x.ticker)).length
-    },
-    auditConclusion: 'HISTORICAL_NET_PNL_UNVERIFIED',
-    nextEvidenceNeeded: 'Authoritative position-close and settlement cash-flow interpretation, plus bot order identifiers to distinguish bot trades from manual trades.'
-  };
-  console.log(JSON.stringify(report, null, 2));
-  console.log('STATUS: READ_ONLY_INVENTORY_COMPLETE_PNL_UNVERIFIED');
+  console.log(
+    '=== KALSHI BTC/ETH RECONCILIATION DIAGNOSTICS ==='
+  );
+
+  const [fills, settlements] = await Promise.all([
+    getAllFills(),
+    getAllSettlements()
+  ]);
+
+  const output = [];
+
+  for (const series of SERIES) {
+    const selected = fills.filter(
+      f => seriesOf(f.ticker) === series
+    );
+
+    const settled = settlements.filter(
+      s => seriesOf(s.ticker) === series
+    );
+
+    const byTicker = new Map();
+
+    for (const f of selected) {
+      if (!byTicker.has(f.ticker)) {
+        byTicker.set(f.ticker, []);
+      }
+
+      byTicker.get(f.ticker).push(f);
+    }
+
+    const settlementByTicker = new Map();
+
+    for (const s of settled) {
+      if (settlementByTicker.has(s.ticker)) {
+        throw new Error(
+          'Duplicate settlement for ' + s.ticker
+        );
+      }
+
+      settlementByTicker.set(s.ticker, s);
+    }
+
+    const tickers = new Set([
+      ...byTicker.keys(),
+      ...settlementByTicker.keys()
+    ]);
+
+    const rows = [...tickers].map(t =>
+      reconcile(
+        t,
+        byTicker.get(t) || [],
+        settlementByTicker.get(t)
+      )
+    );
+
+    const reasons = {};
+
+    for (const row of rows) {
+      for (const reason of row.problems) {
+        reasons[reason] = (reasons[reason] || 0) + 1;
+      }
+    }
+
+    const matched = rows.filter(
+      r => r.countsMatch && r.problems.length === 0
+    );
+
+    output.push({
+      series,
+      fills: selected.length,
+      settlementRecords: settled.length,
+      markets: rows.length,
+
+      exactPositionMatches: matched.length,
+
+      mismatchReasons: reasons,
+
+      knownFillFeesUsd: round(
+        rows.reduce(
+          (a, r) => a + r.fillFeesUsd,
+          0
+        )
+      ),
+
+      candidatePnlForMatchedMarketsUsd: round(
+        matched.reduce(
+          (a, r) => a + (r.candidateNetUsd || 0),
+          0
+        )
+      ),
+
+      candidatePnlStatus:
+        'DIAGNOSTIC_ONLY_NOT_VERIFIED',
+
+      examples: rows
+        .filter(r => r.problems.length)
+        .slice(0, 5),
+
+      matchedExamples: matched.slice(0, 2)
+    });
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        generatedAtUtc: new Date().toISOString(),
+
+        sourceTotals: {
+          fills: fills.length,
+          settlements: settlements.length
+        },
+
+        markets: output,
+
+        netPnlVerified: false,
+        winRateVerified: false,
+
+        warning:
+          'Do not interpret candidate P&L as actual account profit. Short-side settlement semantics, settlement fees, and bot/manual attribution remain unverified.'
+      },
+      null,
+      2
+    )
+  );
+
+  console.log(
+    'STATUS: RECONCILIATION_DIAGNOSTICS_COMPLETE_PNL_UNVERIFIED'
+  );
 }
-main().catch(error => { console.error('AUDIT FAILED:', error.message); process.exitCode = 1; });
+
+main().catch(e => {
+  console.error('AUDIT FAILED:', e.message);
+  process.exitCode = 1;
+});
