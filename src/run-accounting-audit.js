@@ -42,6 +42,39 @@ async function main() {
   console.log('=== FILL PATTERNS ===');
   console.log(JSON.stringify(patterns, null, 2));
 
+  const exposure = {
+    yes: { fills: 0, contracts: 0 },
+    no: { fills: 0, contracts: 0 },
+    unknown: { fills: 0, contracts: 0 }
+  };
+
+  for (const f of fills) {
+    const side = f.outcome_side || f.side;
+
+    let direction = 'unknown';
+
+    if (
+      (f.action === 'buy' && side === 'yes') ||
+      (f.action === 'sell' && side === 'no')
+    ) {
+      direction = 'yes';
+    }
+
+    if (
+      (f.action === 'buy' && side === 'no') ||
+      (f.action === 'sell' && side === 'yes')
+    ) {
+      direction = 'no';
+    }
+
+    exposure[direction].fills++;
+    exposure[direction].contracts +=
+      Number(f.count_fp || 0);
+  }
+
+  console.log('=== ECONOMIC DIRECTION ===');
+  console.log(JSON.stringify(exposure, null, 2));
+
   const target = fills.find(f =>
     f.ticker?.startsWith(
       'KXMVECROSSCATEGORY0-SHARD1-S202651C95801F1E-DB7CBCC8ECC'
