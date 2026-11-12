@@ -1,7 +1,8 @@
 import { normalizeFill } from './normalize-fills.js';
 import {
   getAllFills,
-  getAllSettlements
+  getAllSettlements,
+  getPositions
 } from './kalshi/client.js';
 
 import {
