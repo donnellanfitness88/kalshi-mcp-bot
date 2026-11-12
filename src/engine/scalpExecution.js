@@ -203,7 +203,7 @@ export function createScalpExecutor(deps = {}) {
     const ticker = s.ticker;
     const sim = simulated();
     s._simMode = sim;
-    if (checkRiskGuards(s, ctx.balance).blocked) return;
+    if (checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' }).blocked) return;
     const signal = entrySignal(s, mode);
     if (!signal.shouldEnter) return;
     lastAttempt = Date.now();
@@ -335,8 +335,8 @@ export function createScalpExecutor(deps = {}) {
         contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count) });
       decision = evaluateScalpExit({ heldSeconds, entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask });
       // Include already-realized partial exits so repeated partial sales cannot
-      // reset the per-trade $5 loss budget.
-      if ((trade.realizedNet ?? 0) + profit.netProfit <= -SCALP_CONFIG.maxLossUsd) {
+      // reset a configured per-trade loss budget (currently disabled).
+      if (Number.isFinite(SCALP_CONFIG.maxLossUsd) && (trade.realizedNet ?? 0) + profit.netProfit <= -SCALP_CONFIG.maxLossUsd) {
         decision = { shouldExit: true, reason: 'MAX_DOLLAR_LOSS' };
       }
     }

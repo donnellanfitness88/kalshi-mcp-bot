@@ -8,7 +8,7 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 - Entry budget: at most $10 including a fee reserve. One position or unresolved
   order across BTC and ETH. Entries require more than 480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
-  Exclude 30–65 cents inclusive. Allow below 30 cents or above 65 cents and
+  Exclude 40–60 cents inclusive. Allow below 40 cents or above 60 cents and
   below 97 cents. Prices >=97 cents are reserved for the separate late mode.
 - Require at least a 2-cent midpoint move over 5–10 seconds, positive movement
   in each of the last three elapsed one-second intervals, and no pullback
@@ -24,19 +24,18 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 - Profit targets can trigger immediately; no 15-second waiting period.
   Examples: 70→75, 80→90, 90→97. Fees reduce net profit from these moves.
-- No maximum scalp holding time. Trigger a loss exit at
-  estimated total trade net P&L <= -$5, including entry fees, reserved exit
-  fees and realized partial exits. The $5 threshold is an exit trigger, not a
-  guaranteed maximum loss when gaps or liquidity prevent a fill.
+- No maximum scalp holding time and no per-trade dollar-loss exit. A holding
+  stays open for its profit target or settlement unless manually closed.
+  It can lose its entire entry cost at settlement.
 - Profit exits use a reduce-only IOC limit at the target price; partial or
-  unfilled quantities remain managed. Loss exits retain the existing
-  aggressive reduce-only IOC behavior. A later loss trigger can exit
-  below an earlier unfilled profit target.
+  unfilled quantities remain managed. Unfilled profit orders are
+  retried only while the target remains executable; otherwise the position
+  stays managed until another target opportunity or settlement.
 - Existing scalps are not closed solely for passing the 480-second boundary.
-  Existing trades still receive the new $5/price-target rules after deploy;
+  Existing trades still receive the current price-target rules after deploy;
   entry-band restrictions apply to new orders, not forced liquidation.
 - An open scalp continues to block the late settlement entry. It exits at its
-  profit target or $5 loss trigger, or is reconciled against its actual
+  profit target, or is reconciled against its actual
   settlement if held through market expiry. After rollover, it retains its
   original ticker and cannot use the new market quote for its exit.
 
@@ -49,7 +48,7 @@ fees must fit within $10 and potential settlement gain must exceed estimated
 fees. This price is not an independent probability estimate or guarantee.
 
 Late positions use `LATE_SETTLEMENT` mode and hold through settlement; scalp
-profit targets, the $5 loss exit do not apply. Full
+profit targets do not apply. Full
 entry cost remains at risk. After rollover, query the original held ticker.
 Require a finalized binary outcome, a matching account settlement record
 and no remaining account position before clearing a live holding. Attribute
@@ -71,7 +70,7 @@ Full verified sales record net P&L and release the lock; partial sales retain
 remaining contracts, proportional fees and realized P&L. Persist before
 changing in-memory holdings. Remember manual fill IDs and bot exit order IDs
 against duplicate accounting. Missing fills, reversed/increased holdings or
-invalid data remain blocked. Risk guards and cooldowns still apply.
+invalid data remain blocked. Account-level risk guards still apply.
 
 Validate:
 `node --test tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
@@ -85,3 +84,13 @@ References:
 - https://docs.kalshi.com/api-reference/portfolio/get-fills
 - https://docs.kalshi.com/api-reference/portfolio/get-settlements
 - https://kalshi.com/docs/kalshi-fee-schedule.pdf
+
+## Reentry
+
+No fixed waiting period between scalp trades. The 8-second reentry delay and
+45-second after-loss entry cooldown do not apply to scalps. A fresh qualifying
+signal, valid quotes, a flat account and no unresolved order are still required.
+Consecutive-loss, session-loss and daily-loss guards remain in force; those
+can still prevent new entries. Other strategies retain their existing cooldowns.
+A 61-cent scalp entry targets 66 cents immediately when executable. The late
+settlement entry keeps its once-per-ticker reservation and existing risk guards.

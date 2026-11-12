@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createScalpExecutor, scalpSize, reserveFee, scalpAck, entryPhase, lateFee } from '../../src/engine/scalpExecution.js';
+import { checkRiskGuards } from '../../src/engine/riskManager.js';
 import { evaluateScalpExit, scalpEntryPriceAllowed, scalpTakeProfitPrice } from '../../src/engine/scalpStrategy.js';
 
 process.env.SCALP_ENABLED = 'true';
@@ -183,7 +184,7 @@ test('no scalp buys inside 8 minutes, including the 90-second buffer', async () 
     assert.equal(f.requests.length, 0);
   }
 });
-test('open scalp continues below 480 seconds; $5 net loss exits before 45 seconds', async () => {
+test('open scalp stays held below 480 seconds despite a loss greater than five dollars', async () => {
   const f = fixture();
   await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade;
@@ -194,8 +195,8 @@ test('open scalp continues below 480 seconds; $5 net loss exits before 45 second
   f.state.BTC.yesBid = 0.30; f.state.BTC.yesAsk = 0.31;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
   await f.executor.tick(f.ctx('BTC'));
-  assert.equal(f.requests.length, 2);
-  assert.equal(f.logs.find(log => log.event === 'CLOSED').reason, 'MAX_DOLLAR_LOSS');
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.state.BTC.activeTrade, t);
 });
 test('loss under $5 does not stop a young scalp and profit exits are retained', async () => {
   const f = fixture(); await f.executor.tick(f.ctx('BTC'));
@@ -285,6 +286,7 @@ test('settlement waits for account record then records win/loss once with origin
     const expected = (result === 'yes' ? t.count : 0) - t.amount - t.entryFees;
     assert.ok(Math.abs(f.state.BTC.totalPnL - expected) < 1e-9);
     assert.equal(f.state.BTC.activeTrade, null);
+    f.state.BTC.farmArmed = false;
     await restored.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.tradeCount, 1);
     assert.equal(f.requests.length, 1);
@@ -324,6 +326,7 @@ test('verified full manual sale clears YES or NO holding with actual net P&L; se
     assert.equal(f.logs.at(-1).event, 'MANUAL_CLOSE_RECONCILED');
     const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
     restored.restore(f.saved());
+    f.state.BTC.farmArmed = false;
     await restored.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.tradeCount, 1);
   }
@@ -404,9 +407,9 @@ test('an increased or opposite holding is not mistaken for a manual sale', async
     assert.equal(f.state.BTC.tradeCount, 0);
   }
 });
-test('entry-price exclusion includes 30 and 65 cents; late-only prices rejected for scalps', () => {
-  for (const price of [0.30,0.496,0.65,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
-  for (const price of [0.11,0.299,0.651,0.70,0.80,0.90,0.969]) assert.equal(scalpEntryPriceAllowed(price), true);
+test('entry-price exclusion includes 40 and 60 cents; late-only prices rejected for scalps', () => {
+  for (const price of [0.40,0.496,0.60,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
+  for (const price of [0.11,0.30,0.399,0.601,0.65,0.70,0.80,0.90,0.969]) assert.equal(scalpEntryPriceAllowed(price), true);
 });
 function setEntryBook(f, side, price) {
   const s = f.state.BTC, now = Date.now();
@@ -418,14 +421,14 @@ function setEntryBook(f, side, price) {
     price: mid + (side === 'yes' ? -1 : 1) * 0.03 * (1-i/60)}));
 }
 test('live entry path blocks the purchased YES or NO contract in the excluded band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.30,0.496,0.65]) {
+  for (const side of ['yes','no']) for (const price of [0.40,0.496,0.60]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,0);
   }
 });
 test('live entry path permits both sides outside the band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.11,0.70,0.80,0.90]) {
+  for (const side of ['yes','no']) for (const price of [0.11,0.30,0.61,0.70,0.80,0.90]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,1);
@@ -433,7 +436,7 @@ test('live entry path permits both sides outside the band', async () => {
   }
 });
 test('tiered targets match 70→75, 80→90 and 90→97 without a minimum hold', () => {
-  for (const [entry,target] of [[0.11,0.16],[0.70,0.75],[0.80,0.90],[0.90,0.97]]) {
+  for (const [entry,target] of [[0.11,0.16],[0.61,0.66],[0.70,0.75],[0.80,0.90],[0.90,0.97]]) {
     assert.equal(scalpTakeProfitPrice(entry),target);
     assert.equal(evaluateScalpExit({heldSeconds:1,entryPrice:entry,exitBid:target-0.001}).shouldExit,false);
     assert.equal(evaluateScalpExit({heldSeconds:1,entryPrice:entry,exitBid:target}).reason,'PRICE_TARGET');
@@ -452,18 +455,15 @@ test('profit exits set an executable-side limit on YES and NO orders', async () 
     assert.equal(f.requests[1].reduce_only,true);
   }
 });
-test('$5 loss trigger permits a smaller loss and exits when threshold is crossed', async () => {
+test('losses greater than $5 do not trigger a sale when the stop is disabled', async () => {
   const f=fixture(); await f.executor.tick(f.ctx('BTC'));
   const t=f.state.BTC.activeTrade;
-  const threshold=t.entrySidePrice-(5-t.entryFees-reserveFee(t.count))/t.count;
-  Object.assign(f.state.BTC,{yesBid:threshold+0.001,yesAsk:threshold+0.011});
+  Object.assign(f.state.BTC,{yesBid:0.10,yesAsk:0.11});
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,1);
-  Object.assign(f.state.BTC,{yesBid:threshold-0.001,yesAsk:threshold+0.009});
-  await f.executor.tick(f.ctx('BTC'));
-  assert.equal(f.requests.length,2);
-  assert.equal(f.logs.find(log=>log.event==='CLOSED').reason,'MAX_DOLLAR_LOSS');
+  assert.equal(f.state.BTC.activeTrade,t);
 });
+
 test('scalp can remain open past 45 seconds and into late-entry period without overlap', async () => {
   const f = fixture(); await f.executor.tick(f.ctx('BTC'));
   const trade = f.state.BTC.activeTrade;
@@ -501,4 +501,32 @@ test('scalp held across rollover reconciles settlement using its original ticker
   assert.equal(f.state.BTC.activeTrade,null);
   assert.ok(Math.abs(f.state.BTC.totalPnL-pnl)<1e-9);
   assert.equal(f.requests.length,1);
+});
+test('scalp can buy immediately after a completed profit exit when a dip qualifies again', async () => {
+  const f=fixture(); await f.executor.tick(f.ctx('BTC'));
+  const t=f.state.BTC.activeTrade, target=scalpTakeProfitPrice(t.entrySidePrice);
+  Object.assign(f.state.BTC,{yesBid:target,yesAsk:target+0.01});
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade,null);
+  setEntryBook(f,'yes',0.72);
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,3);
+  assert.equal(f.state.BTC.activeTrade.entrySidePrice,0.72);
+});
+test('fixed loss cooldown can be skipped for scalps while ordinary callers retain it', () => {
+  const f=fixture(), s=f.state.BTC;
+  Object.assign(s,{lastLossTime:Date.now(),consecutiveLosses:1});
+  assert.equal(checkRiskGuards(s,100).reason,'COOLDOWN');
+  assert.equal(checkRiskGuards(s,100,false,{skipLossCooldown:true}).blocked,false);
+});
+test('skipping fixed scalp cooldown does not bypass streak or account loss limits', () => {
+  for (const [change,reason] of [
+    [{consecutiveLosses:3,lastLossTime:Date.now()},'STREAK'],
+    [{dailyPnL:-9},'DAILYCAP'],
+    [{sessionPnL:-6},'SESSIONKILL']
+  ]) {
+    const f=fixture(),s=f.state.BTC;
+    Object.assign(s,change,{_simMode:false});
+    assert.equal(checkRiskGuards(s,100,false,{skipLossCooldown:true}).reason,reason);
+  }
 });

@@ -13,13 +13,13 @@ export const SCALP_CONFIG = {
   maxEntryPullback: 0.01,
   minHoldSeconds: 15,
   maxHoldSeconds: null, // No forced time-based scalp exit.
-  maxLossUsd: 5.00,
+  maxLossUsd: null, // No per-trade loss exit.
   entryMinSecondsRemaining: 480,
   lateEntryMaxSecondsRemaining: 90,
   lateEntryMinPrice: 0.97,
   minNetProfitPct: 0.05,
   preferredNetProfitPct: 0.10,
-  reentryCooldownMs: 8_000,
+  reentryCooldownMs: 0,
   maxEntryCostUsd: 10.00,
   maxConcurrentPositions: 1
 };
@@ -83,7 +83,7 @@ export function evaluateScalpProfit({
  */
 export function scalpEntryPriceAllowed(price) {
   return Number.isFinite(price) && price > 0 &&
-    (price < 0.30 - 1e-9 || (price > 0.65 + 1e-9 && price < 0.97 - 1e-9));
+    (price < 0.40 - 1e-9 || (price > 0.60 + 1e-9 && price < 0.97 - 1e-9));
 }
 
 // Targets are contract-price points, not percentage returns on the stake.

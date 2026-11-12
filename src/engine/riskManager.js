@@ -10,11 +10,11 @@ const RISK_STREAK_RESET_MS     = 30 * 60_000;  // auto-reset streak after 30 min
 // Fix 5: Shorter cooldown for high-confidence modes (DECAY, STRONG_CONVICTION)
 export const RISK_COOLDOWN_FAST_MS = 20_000;
 
-export function checkRiskGuards(s, balance, fastCooldown = false) {
+export function checkRiskGuards(s, balance, fastCooldown = false, { skipLossCooldown = false } = {}) {
   const now = Date.now();
   const cooldown = fastCooldown ? RISK_COOLDOWN_FAST_MS : RISK_COOLDOWN_MS;
 
-  if (now - s.lastLossTime < cooldown) {
+  if (!skipLossCooldown && now - s.lastLossTime < cooldown) {
     return { blocked: true, reason: 'COOLDOWN' };
   }
 
