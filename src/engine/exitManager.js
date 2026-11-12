@@ -88,17 +88,26 @@ if (trade.mode === 'SCALP') {
     netReturn: profit.netReturn
   });
 
-  if (decision.shouldExit) {
-    console.log(
-      `[SCALP] ${asset} exit signal: ` +
-      JSON.stringify({
-        reason: decision.reason,
-        heldSeconds,
-        netReturn: profit.netReturn,
-        netProfit: profit.netProfit
-      })
-    );
-  }
+  
+if (decision.shouldExit) {
+  console.log(
+    `[SCALP] ${asset} exit signal: ` +
+    JSON.stringify({
+      reason: decision.reason,
+      heldSeconds,
+      netReturn: profit.netReturn,
+      netProfit: profit.netProfit
+    })
+  );
+
+  await executeExit(
+    asset,
+    s,
+    `SCALP_${decision.reason}`,
+    unrealizedPnL
+  );
+}
+
 
   return;
 }
