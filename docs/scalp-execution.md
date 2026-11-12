@@ -6,10 +6,12 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 ## Current scalp rules
 
 - Entry budget: at most $10 including a fee reserve. One position or unresolved
-  order across BTC and ETH. Entries require more than 480 seconds remaining.
+  order across BTC and ETH. Early entries require more than 480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
-  Exclude 40–60 cents inclusive. Allow below 40 cents or above 60 cents and
-  below 97 cents. Prices >=97 cents are reserved for the separate late mode.
+  Early entries allow below 40 cents or 55–70 cents inclusive.
+  Higher-priced scalps (above 70 and below 97 cents) are allowed only with
+  strictly less than 120 seconds remaining. They retain momentum confirmation
+  and scalp profit targets. Prices >=97 cents remain reserved for late settlement.
 - Require at least a 2-cent midpoint move over 5–10 seconds, positive movement
   in each of the last three elapsed one-second intervals, and no pullback
   greater than 1 cent below the purchased contract's recent midpoint high.
@@ -41,7 +43,9 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 ## Late settlement entries
 
-Between 480 and 90 seconds remaining, open no new position. In the final
+Between 480 and 120 seconds remaining inclusive, open no new position.
+Higher-priced scalps can open below 120 seconds; in the final 90 seconds,
+qualifying settlement entries take priority. In the final
 90 seconds, when flat, allow one late entry per ticker on a YES or NO
 executable ask >=97 cents and <$1. Entry cost plus estimated standard taker
 fees must fit within $10 and potential settlement gain must exceed estimated

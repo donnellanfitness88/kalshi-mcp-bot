@@ -35,6 +35,7 @@ export function entryPhase(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return 'CLOSED';
   if (seconds > SCALP_CONFIG.entryMinSecondsRemaining) return 'SCALP';
   if (seconds <= SCALP_CONFIG.lateEntryMaxSecondsRemaining) return 'LATE_SETTLEMENT';
+  if (seconds < SCALP_CONFIG.highPriceEntryMaxSecondsRemaining) return 'SCALP';
   return 'BUFFER';
 }
 export function lateFee(count, price) {
@@ -231,7 +232,7 @@ export function createScalpExecutor(deps = {}) {
       const signal = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
       if (!signal.shouldEnter) return signal;
       const price = signal.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
-      if (!scalpEntryPriceAllowed(price)) return { shouldEnter: false, reason: 'ENTRY_PRICE_BAND' };
+      if (!scalpEntryPriceAllowed(price, remainingSeconds(s))) return { shouldEnter: false, reason: 'ENTRY_PRICE_BAND' };
       return signal;
     }
     if (mode !== 'LATE_SETTLEMENT' || lateEntryTickers.includes(s.ticker)) return { shouldEnter: false };
@@ -240,12 +241,19 @@ export function createScalpExecutor(deps = {}) {
       .sort((a, b) => b.price - a.price);
     return candidates.length ? { shouldEnter: true, direction: candidates[0].direction } : { shouldEnter: false };
   }
+  function selectedEntryMode(s) {
+    const phase = entryPhase(remainingSeconds(s));
+    // Preserve settlement priority, but permit a confirmed higher-priced scalp
+    // below 97 cents when no settlement entry qualifies in the last 90 seconds.
+    if (phase === 'LATE_SETTLEMENT' && !entrySignal(s, phase).shouldEnter) return 'SCALP';
+    return phase;
+  }
   async function enter(ctx) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
     if (assets().some(a => a.activeTrade) || Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
     if (Date.now() - Math.max(...assets().map(a => a.lastExitTime || 0)) < SCALP_CONFIG.reentryCooldownMs) return;
-    const mode = entryPhase(remainingSeconds(s));
+    const mode = selectedEntryMode(s);
     if (!['SCALP', 'LATE_SETTLEMENT'].includes(mode) || !s.ticker) return;
     const ticker = s.ticker;
     const sim = simulated();
@@ -257,7 +265,7 @@ export function createScalpExecutor(deps = {}) {
     if (!sim && !await accountFlat()) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
     // Revalidate the actual close time, ticker and quote after slow account reads.
-    if (assets().some(a => a.activeTrade) || s.ticker !== ticker || entryPhase(remainingSeconds(s)) !== mode) return;
+    if (assets().some(a => a.activeTrade) || s.ticker !== ticker || selectedEntryMode(s) !== mode) return;
     const fresh = entrySignal(s, mode);
     if (!fresh.shouldEnter || fresh.direction !== signal.direction) return;
     const price = fresh.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;

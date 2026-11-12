@@ -11,10 +11,10 @@ function fixture(direction = 'UP', sim = false) {
   const asset = () => ({ activeTrade: null, farmArmed: true, lastExitTime: 0, lastLossTime: 0,
     consecutiveLosses: 0, sessionStartBalance: 100, dailyStartBalance: 100,
     sessionPnL: 0, dailyPnL: 0, totalPnL: 0, tradeCount: 0, secsLeft: 600,
-    ticker: 'BTC-TEST', yesAsk: 0.72, yesBid: 0.71, lastQuoteMessageTs: now,
+    ticker: 'BTC-TEST', yesAsk: 0.67, yesBid: 0.66, lastQuoteMessageTs: now,
     yesPriceHistory: Array.from({ length: 61 }, (_, i) => ({
       ts: now - 6000 + i * 100,
-      price: direction === 'UP' ? 0.685 + 0.03 * i / 60 : 0.745 - 0.03 * i / 60
+      price: direction === 'UP' ? 0.635 + 0.03 * i / 60 : 0.695 - 0.03 * i / 60
     })) });
   const state = { BTC: asset(), ETH: { ...asset(), ticker: 'ETH-TEST' }, simMode: sim, paperBalance: 50, disabledAssets: [] };
   const requests = [], logs = [];
@@ -48,7 +48,7 @@ test('UP and DOWN use confirmed count and YES book price conversion', async () =
     assert.equal(f.requests.length, 1);
     const t = f.state.BTC.activeTrade;
     assert.equal(t.side, direction === 'UP' ? 'yes' : 'no');
-    assert.ok(Math.abs(t.entrySidePrice - (direction === 'UP' ? 0.72 : 0.29)) < 1e-9);
+    assert.ok(Math.abs(t.entrySidePrice - (direction === 'UP' ? 0.67 : 0.34)) < 1e-9);
     assert.ok(t.amount + t.entryFees <= 10);
     assert.equal(f.requests[0].time_in_force, 'fill_or_kill');
     assert.equal(f.saved().pending, null);
@@ -114,7 +114,7 @@ test('partial exits retain position and allocate actual fees; final close record
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade, null);
   assert.equal(f.state.BTC.tradeCount, 1);
-  assert.ok(Math.abs(f.state.BTC.totalPnL - originalCount * 0.08) < 1e-9);
+  assert.ok(Math.abs(f.state.BTC.totalPnL - originalCount * 0.13) < 1e-9);
   assert.equal(f.requests[1].reduce_only, true);
 });
 test('missing fill response never assumes success', () => {
@@ -172,8 +172,8 @@ test('missing exit fill data retains the holding and prevents duplicate sales', 
   assert.equal(f.state.BTC.activeTrade, t);
   assert.equal(f.executor.snapshot().pending.kind, 'exit');
 });
-test('time boundaries: >480 scalp, 480 to >90 buffer, 90 to >0 late', () => {
-  for (const [seconds, phase] of [[481,'SCALP'], [480.001,'SCALP'], [480,'BUFFER'], [300,'BUFFER'], [91,'BUFFER'], [90,'LATE_SETTLEMENT'], [1,'LATE_SETTLEMENT'], [0,'CLOSED'], [-1,'CLOSED'], [NaN,'CLOSED']]) {
+test('time boundaries: early scalp, middle buffer, final higher scalp and settlement', () => {
+  for (const [seconds, phase] of [[481,'SCALP'], [480.001,'SCALP'], [480,'BUFFER'], [300,'BUFFER'], [120,'BUFFER'], [119,'SCALP'], [91,'SCALP'], [90,'LATE_SETTLEMENT'], [1,'LATE_SETTLEMENT'], [0,'CLOSED'], [-1,'CLOSED'], [NaN,'CLOSED']]) {
     assert.equal(entryPhase(seconds), phase);
   }
 });
@@ -407,9 +407,9 @@ test('an increased or opposite holding is not mistaken for a manual sale', async
     assert.equal(f.state.BTC.tradeCount, 0);
   }
 });
-test('entry-price exclusion includes 40 and 60 cents; late-only prices rejected for scalps', () => {
-  for (const price of [0.40,0.496,0.60,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
-  for (const price of [0.11,0.30,0.399,0.601,0.65,0.70,0.80,0.90,0.969]) assert.equal(scalpEntryPriceAllowed(price), true);
+test('early price bands include 55 and 70 cents and reject expensive entries', () => {
+  for (const price of [0.40,0.496,0.549,0.701,0.78,0.80,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
+  for (const price of [0.11,0.30,0.399,0.55,0.60,0.65,0.70]) assert.equal(scalpEntryPriceAllowed(price), true);
 });
 function setEntryBook(f, side, price) {
   const s = f.state.BTC, now = Date.now();
@@ -421,14 +421,14 @@ function setEntryBook(f, side, price) {
     price: mid + (side === 'yes' ? -1 : 1) * 0.03 * (1-i/60)}));
 }
 test('live entry path blocks the purchased YES or NO contract in the excluded band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.40,0.496,0.60]) {
+  for (const side of ['yes','no']) for (const price of [0.40,0.496,0.549,0.701,0.78,0.80]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,0);
   }
 });
 test('live entry path permits both sides outside the band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.11,0.30,0.61,0.70,0.80,0.90]) {
+  for (const side of ['yes','no']) for (const price of [0.11,0.30,0.55,0.60,0.61,0.70]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,1);
@@ -508,10 +508,10 @@ test('scalp can buy immediately after a completed profit exit when a dip qualifi
   Object.assign(f.state.BTC,{yesBid:target,yesAsk:target+0.01});
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade,null);
-  setEntryBook(f,'yes',0.72);
+  setEntryBook(f,'yes',0.67);
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,3);
-  assert.equal(f.state.BTC.activeTrade.entrySidePrice,0.72);
+  assert.equal(f.state.BTC.activeTrade.entrySidePrice,0.67);
 });
 test('fixed loss cooldown can be skipped for scalps while ordinary callers retain it', () => {
   const f=fixture(), s=f.state.BTC;
@@ -612,4 +612,19 @@ test('journal failure during rejected-order recovery does not release in-memory 
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.ok(restored.snapshot().pending);
+});
+
+test('higher-priced scalps unlock strictly below two minutes on either side', async () => {
+  for (const side of ['yes','no']) for (const seconds of [600,480,121,120,119,91,90,30,0]) {
+    const f=fixture(); setEntryBook(f,side,0.80); f.state.BTC.secsLeft=seconds;
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests.length, seconds > 0 && seconds < 120 ? 1 : 0, `${side} ${seconds}`);
+    if (f.requests.length) assert.equal(f.state.BTC.activeTrade.mode,'SCALP');
+  }
+});
+test('account reads cannot carry an early entry into the buffer', async () => {
+  const f=fixture(); setEntryBook(f,'yes',0.55);
+  f.api.getBalance=async()=> { f.state.BTC.secsLeft=480; return 10000; };
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,0);
 });

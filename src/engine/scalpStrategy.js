@@ -15,6 +15,7 @@ export const SCALP_CONFIG = {
   maxHoldSeconds: null, // No forced time-based scalp exit.
   maxLossUsd: null, // No per-trade loss exit.
   entryMinSecondsRemaining: 480,
+  highPriceEntryMaxSecondsRemaining: 120,
   lateEntryMaxSecondsRemaining: 90,
   lateEntryMinPrice: 0.97,
   minNetProfitPct: 0.05,
@@ -81,9 +82,13 @@ export function evaluateScalpProfit({
  * Evaluate the holding window.
  * Returns a signal for simulation, not an order.
  */
-export function scalpEntryPriceAllowed(price) {
-  return Number.isFinite(price) && price > 0 &&
-    (price < 0.40 - 1e-9 || (price > 0.60 + 1e-9 && price < 0.97 - 1e-9));
+export function scalpEntryPriceAllowed(price, seconds = Infinity) {
+  if (!Number.isFinite(price) || price <= 0 || price >= 0.97 - 1e-9) return false;
+  const early = seconds > SCALP_CONFIG.entryMinSecondsRemaining;
+  const final = Number.isFinite(seconds) && seconds > 0 &&
+    seconds < SCALP_CONFIG.highPriceEntryMaxSecondsRemaining;
+  if (early) return price < 0.40 - 1e-9 || (price >= 0.55 - 1e-9 && price <= 0.70 + 1e-9);
+  return final && price > 0.70 + 1e-9;
 }
 
 // Targets are contract-price points, not percentage returns on the stake.
