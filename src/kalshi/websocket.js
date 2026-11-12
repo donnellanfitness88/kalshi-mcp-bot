@@ -495,16 +495,18 @@ _bestPrices() {
     if (p > bestNoBid) bestNoBid = p;
   }
 
-  if (bestYesBid === -Infinity) {
-    return invalid('EMPTY_YES_BOOK');
-  }
+  
+if (bestYesBid === -Infinity) {
+  return invalid('EMPTY_YES_BOOK');
+}
 
-  const yesBid = bestYesBid;
+if (bestNoBid === -Infinity) {
+  return invalid('EMPTY_NO_BOOK');
+}
 
-  const yesAsk =
-    bestNoBid !== -Infinity
-      ? 1 - bestNoBid
-      : Math.min(0.99, bestYesBid + 0.01);
+const yesBid = bestYesBid;
+const yesAsk = 1 - bestNoBid;
+
 
   if (!Number.isFinite(yesBid) ||
       !Number.isFinite(yesAsk)) {
