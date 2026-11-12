@@ -184,6 +184,42 @@ async function main() {
 
   console.log('STATUS: NORMALIZATION_PASSED');
 
+  console.log('=== KALSHI POSITION PNL CHECK ===');
+
+  const positions = await getPositions();
+
+  const summary = {
+    returnedPositions: positions.length,
+    withDollarPnl: 0,
+    missingDollarPnl: 0,
+    reportedRealizedPnlDollars: 0,
+    examples: []
+  };
+
+  for (const p of positions) {
+    const pnl = Number(p.realized_pnl_dollars);
+
+    if (
+      p.realized_pnl_dollars == null ||
+      !Number.isFinite(pnl)
+    ) {
+      summary.missingDollarPnl++;
+      continue;
+    }
+
+    summary.withDollarPnl++;
+    summary.reportedRealizedPnlDollars += pnl;
+
+    if (summary.examples.length < 5) {
+      summary.examples.push({
+        ticker: p.ticker,
+        realizedPnlDollars: pnl
+      });
+    }
+  }
+
+  console.log(JSON.stringify(summary, null, 2));
+
   console.log('=== SETTLEMENT VALUE CHECK ===');
 
   const examples = settlements
