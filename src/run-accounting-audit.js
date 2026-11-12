@@ -183,6 +183,30 @@ async function main() {
 
   console.log('STATUS: NORMALIZATION_PASSED');
 
+  console.log('=== SETTLEMENT VALUE CHECK ===');
+
+  const examples = settlements
+    .filter(s =>
+      Number(s.yes_count_fp || 0) > 0 ||
+      Number(s.no_count_fp || 0) > 0
+    )
+    .slice(0, 5);
+
+  for (const s of examples) {
+    console.log({
+      marketResult: s.market_result,
+      yesCount: s.yes_count_fp,
+      noCount: s.no_count_fp,
+      yesCost: s.yes_total_cost_dollars,
+      noCost: s.no_total_cost_dollars,
+      revenue: s.revenue,
+      value: s.value,
+      fee: s.fee_cost
+    });
+  }
+
+  console.log('Settlement examples:', examples.length);
+
   // Existing reconciliation remains unchanged
   // until position accounting is verified.
   return;
