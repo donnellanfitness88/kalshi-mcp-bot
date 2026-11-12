@@ -547,3 +547,66 @@ export async function verifyScalpOrderStatus({
     rawOrder: order
   };
 }
+
+/**
+ * Check whether a SCALP entry is fully reconciled.
+ * Read-only; does not place orders.
+ */
+export async function checkScalpEntryReadiness({
+  ticker,
+  orderId,
+  direction,
+  expectedContracts
+}) {
+  const order = await verifyScalpOrderStatus({
+    ticker,
+    orderId
+  });
+
+  if (!order.found || !order.verified) {
+    return {
+      ready: false,
+      reason: 'ORDER_NOT_VERIFIED'
+    };
+  }
+
+  if (!order.terminal) {
+    return {
+      ready: false,
+      reason: 'ORDER_NOT_TERMINAL',
+      status: order.status
+    };
+  }
+
+  let execution;
+
+  try {
+    execution = await reconcileScalpEntry({
+      ticker,
+      orderId,
+      direction,
+      expectedContracts
+    });
+  } catch (error) {
+    return {
+      ready: false,
+      reason: 'FILL_RECONCILIATION_FAILED',
+      error: error.message
+    };
+  }
+
+  if (!execution.fullyFilled) {
+    return {
+      ready: false,
+      reason: 'PARTIAL_FILL_REQUIRES_RECONCILIATION',
+      execution
+    };
+  }
+
+  return {
+    ready: true,
+    reason: 'ENTRY_RECONCILED',
+    status: order.status,
+    execution
+  };
+}
