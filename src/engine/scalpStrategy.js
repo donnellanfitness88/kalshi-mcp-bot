@@ -6,13 +6,17 @@ import { getAllFills, getOrders } from '../kalshi/client.js';
  * No live order placement.
  */
 
+
 export const SCALP_CONFIG = {
   minHoldSeconds: 15,
   maxHoldSeconds: 45,
   minNetProfitPct: 0.05,
   preferredNetProfitPct: 0.10,
-  reentryCooldownMs: 8_000
+  reentryCooldownMs: 8_000,
+  maxEntryCostUsd: 10.00,
+  maxConcurrentPositions: 1
 };
+
 
 export function evaluateScalpProfit({
   entryPrice,
