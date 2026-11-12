@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { state } from './state.js';
+import { definiteOrderRejection, historicalOrderRejection } from './orderRejections.js';
 import { reconcileManualExit, remainingHeldContracts } from './manualExitReconciliation.js';
 import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
 import { buildBuyBody, buildSellBody } from '../kalshi/orders.js';
@@ -122,9 +123,47 @@ export function createScalpExecutor(deps = {}) {
     persist();
     log({ event: p.kind.toUpperCase() + '_CONFIRMED', asset: p.asset, ...fill, sim: p.sim });
   }
+  async function recoverRejectedOrder(p, proof) {
+    if (p.orderId || p.response || proof?.httpStatus !== 400 || proof?.code !== 'insufficient_balance') {
+      throw new Error('Rejected-order recovery has conflicting execution evidence');
+    }
+    const orders = await api.getOrders({ ticker: p.body.ticker });
+    if (orders.some(order => order.client_order_id === p.body.client_order_id)) {
+      throw new Error('Rejected request has an order record; reconcile that order instead');
+    }
+    if (orders.some(order => order.status === 'resting')) {
+      throw new Error('Resting order on rejected ticker; retaining pending record');
+    }
+    if (p.kind === 'entry') {
+      const position = (await api.getPositions()).find(row => row.ticker === p.body.ticker);
+      if (position && (!['string','number'].includes(typeof position.position_fp) ||
+          String(position.position_fp).trim() === '' || !Number.isFinite(Number(position.position_fp)) ||
+          Number(position.position_fp) !== 0)) {
+        throw new Error('Position exists on rejected entry ticker; reconciliation required');
+      }
+      if (shared[p.asset].activeTrade) throw new Error('Tracked holding conflicts with rejected entry');
+    }
+    // Check again after account reads; a matching exchange record takes priority
+    // over migration evidence. API errors leave pending intact for later reads.
+    const confirmation = await api.getOrders({ ticker: p.body.ticker });
+    if (confirmation.some(order => order.client_order_id === p.body.client_order_id || order.status === 'resting')) {
+      throw new Error('Order state changed during rejected-order recovery');
+    }
+    const snapshotAfter = snapshot();
+    snapshotAfter.pending = null;
+    save(snapshotAfter); // Clear durably before releasing the in-memory lock.
+    pending = null;
+    log({ event: 'REJECTED_ORDER_RECONCILED', asset: p.asset, ticker: p.body.ticker,
+      kind: p.kind, clientOrderId: p.body.client_order_id, rejection: proof, pnlChanged: false });
+  }
   async function reconcile() {
     if (!pending) return;
     const p = pending;
+    const proof = p.rejection ?? historicalOrderRejection(p.body.client_order_id);
+    if (proof && !p.orderId && !p.response) {
+      await recoverRejectedOrder(p, proof);
+      return;
+    }
     let order;
     if (p.orderId) order = await api.getOrder(p.orderId);
     else order = (await api.getOrders({ ticker: p.body.ticker })).find(o => o.client_order_id === p.body.client_order_id);
@@ -161,7 +200,15 @@ export function createScalpExecutor(deps = {}) {
         average_fee_paid: String((p.mode === 'LATE_SETTLEMENT' ? lateFee(Number(p.body.count), p.side === 'yes' ? Number(p.body.price) : 1 - Number(p.body.price)) : reserveFee(Number(p.body.count))) / Number(p.body.count)) };
     } else {
       if (process.env.DRY_RUN === 'true') throw new Error('Live order blocked by DRY_RUN');
-      result = await api.placeOrder(p.body);
+      try { result = await api.placeOrder(p.body); }
+      catch (error) {
+        const proof = definiteOrderRejection(error);
+        if (!proof) throw error;
+        p.rejection = proof;
+        persist();
+        await recoverRejectedOrder(p, proof);
+        return;
+      }
     }
     pending.orderId = result.order_id;
     if (p.mode === 'LATE_SETTLEMENT' && !pending.orderId) throw new Error('Missing late-entry order id');

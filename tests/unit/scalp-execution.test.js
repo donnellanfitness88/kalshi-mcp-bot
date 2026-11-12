@@ -530,3 +530,86 @@ test('skipping fixed scalp cooldown does not bypass streak or account loss limit
     assert.equal(checkRiskGuards(s,100,false,{skipLossCooldown:true}).reason,reason);
   }
 });
+function insufficientBalanceError() {
+  return Object.assign(new Error('insufficient balance'), { httpStatus:400, kalshiCode:'insufficient_balance',
+    requestMethod:'POST', requestPath:'/portfolio/events/orders' });
+}
+test('explicit insufficient-balance rejection clears pending without recording a fill or P&L', async () => {
+  const f=fixture();
+  f.api.placeOrder=async body=>{f.requests.push(body);throw insufficientBalanceError();};
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.executor.snapshot().pending,null);
+  assert.equal(f.state.BTC.activeTrade,null);
+  assert.equal(f.state.BTC.tradeCount,0);
+  assert.equal(f.state.BTC.totalPnL,0);
+  assert.equal(f.logs.at(-1).event,'REJECTED_ORDER_RECONCILED');
+  assert.equal(f.requests.length,1);
+});
+test('exact historically rejected request can recover after restart without resubmission', async () => {
+  const f=fixture();
+  f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+  await f.executor.tick(f.ctx('BTC'));
+  const saved=f.saved();
+  saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
+  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  restored.restore(saved);
+  await restored.tick(f.ctx('BTC'));
+  assert.equal(restored.snapshot().pending,null);
+  assert.equal(f.requests.length,1);
+  assert.equal(f.state.BTC.tradeCount,0);
+});
+test('flat account never clears an unrelated timed-out request', async () => {
+  const f=fixture();
+  f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+  await f.executor.tick(f.ctx('BTC'));
+  await f.executor.tick(f.ctx('ETH'));
+  assert.ok(f.executor.snapshot().pending);
+  assert.equal(f.requests.length,1);
+});
+test('a matching exchange order takes priority over historical rejection evidence', async () => {
+  const f=fixture();
+  f.api.placeOrder=async()=>{throw new Error('timeout');};
+  await f.executor.tick(f.ctx('BTC'));
+  const saved=f.saved();
+  saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
+  f.api.getOrders=async()=>[{client_order_id:saved.pending.body.client_order_id,status:'resting'}];
+  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  restored.restore(saved);
+  await restored.tick(f.ctx('BTC'));
+  assert.ok(restored.snapshot().pending);
+});
+test('rejection recovery retains lock if position is nonzero or account lookup fails', async () => {
+  for(const reason of ['position','api']) {
+    const f=fixture();
+    f.api.placeOrder=async()=>{throw insufficientBalanceError();};
+    let reads=0;
+    f.api.getPositions=async()=>{
+      reads++;
+      if(reads===1)return [];
+      if(reason==='api')throw new Error('429');
+      return [{ticker:'BTC-TEST',position_fp:'1'}];
+    };
+    await f.executor.tick(f.ctx('BTC'));
+    assert.ok(f.executor.snapshot().pending);
+    assert.equal(f.state.BTC.tradeCount,0);
+  }
+});
+test('HTTP 429, server errors and duplicate-client-id conflicts remain uncertain', async () => {
+  for(const status of [429,500,409]) {
+    const f=fixture();
+    f.api.placeOrder=async()=>{throw Object.assign(insufficientBalanceError(),{httpStatus:status});};
+    await f.executor.tick(f.ctx('BTC'));
+    assert.ok(f.executor.snapshot().pending);
+  }
+});
+test('journal failure during rejected-order recovery does not release in-memory pending lock', async () => {
+  const f=fixture();
+  f.api.placeOrder=async()=>{throw new Error('timeout');};
+  await f.executor.tick(f.ctx('BTC'));
+  const saved=f.saved();
+  saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
+  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{throw new Error('disk full');},log:()=>{}});
+  restored.restore(saved);
+  await restored.tick(f.ctx('BTC'));
+  assert.ok(restored.snapshot().pending);
+});

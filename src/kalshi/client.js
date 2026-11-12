@@ -56,7 +56,12 @@ async function request(method, path, body = null) {
 
   if (!res.ok) {
     const raw = typeof data?.error === 'object' ? JSON.stringify(data.error) : (data?.error || data?.raw || res.statusText);
-    throw new Error(`Kalshi ${method} ${path} → ${res.status}: ${raw}`);
+    const error = new Error(`Kalshi ${method} ${path} → ${res.status}: ${raw}`);
+    error.httpStatus = res.status;
+    error.kalshiCode = data?.error?.code ?? data?.code;
+    error.requestMethod = method;
+    error.requestPath = path;
+    throw error;
   }
 
   return data;

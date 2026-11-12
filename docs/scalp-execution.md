@@ -94,3 +94,19 @@ Consecutive-loss, session-loss and daily-loss guards remain in force; those
 can still prevent new entries. Other strategies retain their existing cooldowns.
 A 61-cent scalp entry targets 66 cents immediately when executable. The late
 settlement entry keeps its once-per-ticker reservation and existing risk guards.
+
+## Explicitly rejected requests
+
+Preserve HTTP status, exchange error code, method and endpoint on API errors.
+An explicit HTTP 400 insufficient_balance from POST /portfolio/events/orders
+is a rejection, not an unknown fill. Before releasing its pending lock,
+verify no matching client-order record, no resting order on the ticker,
+and (for entries) no account position or tracked holding. Recheck order state
+and durably clear the pending record before releasing the memory lock. Do
+not record a trade or change P&L for the rejected request.
+
+One migration proof covers client id 777a5890-567c-4d8d-a124-f85bd8b834c5:
+the production log recorded HTTP 400 insufficient_balance at
+2026-11-12T20:44:26.002925153Z. Apply the same account checks to it. This
+proof is exact-id only and cannot clear other missing orders. Timeouts,
+429/5xx, conflicting exchange records and incomplete evidence remain blocked.
