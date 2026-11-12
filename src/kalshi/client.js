@@ -64,6 +64,11 @@ async function request(method, path, body = null) {
 
 // Portfolio
 
+export async function getBalance() {
+  const data = await request('GET', '/portfolio/balance');
+  return data.balance;
+}
+
 export async function getPositions() {
   const data = await request('GET', '/portfolio/positions');
 
