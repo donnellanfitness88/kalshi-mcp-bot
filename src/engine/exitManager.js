@@ -93,9 +93,10 @@ export async function checkExit(ctx) {
     const holdReady = !trade.canStopAfter || Date.now() >= trade.canStopAfter;
     if (holdReady && trade.entrySidePrice != null) {
       // YES price movement against our position in cents
-      const adverseCents = trade.side === 'yes'
-        ? (trade.entrySidePrice - currentSidePrice) * 100   // UP bet: price fell
-        : (currentSidePrice - trade.entrySidePrice) * 100;  // DOWN bet: price rose (NO price fell)
+      
+const adverseCents =
+  (trade.entrySidePrice - currentSidePrice) * 100;
+
       const regime = s.regime ?? 'NORMAL';
       const slCents = trade.lockedSLCents ?? { CALM: 8, NORMAL: 10, CHOPPY: 13 }[regime] ?? 10;
       if (adverseCents >= slCents) {
@@ -235,8 +236,25 @@ async function performExit(asset, s, reason, unrealizedPnL) {
   if (!state.simMode && process.env.DRY_RUN !== 'true') {
     try {
       const positions = await getPositions();
-      const position = positions.find(p => p.ticker === trade.ticker);
-      const held = Number(position?.position_fp ?? 0);
+const position = positions.find(p => p.ticker === trade.ticker);
+
+if (!position) {
+  console.warn('[Exit] Position not found:', {
+    ticker: trade.ticker,
+    expectedSide: trade.side,
+    availableTickers: positions.map(p => p.ticker)
+  });
+  return;
+}
+
+console.log('[Exit] Position reconciliation:', {
+  ticker: trade.ticker,
+  expectedSide: trade.side,
+  trackedCount: trade.count,
+  position
+});
+
+const held = Number(position.position_fp);
       const expectedSide = trade.side === 'yes' ? 1 : -1;
 
       if (!Number.isFinite(held)) {
