@@ -24,17 +24,21 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 - Profit targets can trigger immediately; no 15-second waiting period.
   Examples: 70→75, 80→90, 90→97. Fees reduce net profit from these moves.
-- Keep the 45-second maximum-hold exit attempt. Trigger a loss exit at
+- No maximum scalp holding time. Trigger a loss exit at
   estimated total trade net P&L <= -$5, including entry fees, reserved exit
-  fees and realized partial exits. Neither $5 nor 45 seconds guarantees a
-  completed exit at that loss/time when gaps or liquidity prevent a fill.
+  fees and realized partial exits. The $5 threshold is an exit trigger, not a
+  guaranteed maximum loss when gaps or liquidity prevent a fill.
 - Profit exits use a reduce-only IOC limit at the target price; partial or
-  unfilled quantities remain managed. Time/loss exits retain the existing
-  aggressive reduce-only IOC behavior. A later loss/time trigger can exit
+  unfilled quantities remain managed. Loss exits retain the existing
+  aggressive reduce-only IOC behavior. A later loss trigger can exit
   below an earlier unfilled profit target.
 - Existing scalps are not closed solely for passing the 480-second boundary.
   Existing trades still receive the new $5/price-target rules after deploy;
   entry-band restrictions apply to new orders, not forced liquidation.
+- An open scalp continues to block the late settlement entry. It exits at its
+  profit target or $5 loss trigger, or is reconciled against its actual
+  settlement if held through market expiry. After rollover, it retains its
+  original ticker and cannot use the new market quote for its exit.
 
 ## Late settlement entries
 
@@ -45,7 +49,7 @@ fees must fit within $10 and potential settlement gain must exceed estimated
 fees. This price is not an independent probability estimate or guarantee.
 
 Late positions use `LATE_SETTLEMENT` mode and hold through settlement; scalp
-profit targets, the $5 loss exit and the 45-second timer do not apply. Full
+profit targets, the $5 loss exit do not apply. Full
 entry cost remains at risk. After rollover, query the original held ticker.
 Require a finalized binary outcome, a matching account settlement record
 and no remaining account position before clearing a live holding. Attribute

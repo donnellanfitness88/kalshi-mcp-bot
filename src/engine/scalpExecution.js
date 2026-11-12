@@ -297,6 +297,7 @@ export function createScalpExecutor(deps = {}) {
       const fills = await api.getAllFills({ ticker: trade.ticker });
       if (!trade.entryOrderId || fills.some(fill => fill.order_id !== trade.entryOrderId &&
           !(trade.manualExitFillIds ?? []).includes(fill.fill_id ?? fill.trade_id) &&
+          !(trade.accountedExitOrderIds ?? []).includes(fill.order_id) &&
           Date.parse(fill.created_time) >= trade.startedAt - 1000)) {
         throw new Error('Other fills affected late holding; settlement reconciliation required');
       }
@@ -319,15 +320,16 @@ export function createScalpExecutor(deps = {}) {
     if (trade?.mode !== 'SCALP') return;
     let ask = s.yesAsk, bid = s.yesBid;
     const heldSeconds = (Date.now() - trade.startedAt) / 1000;
-    if (heldSeconds < SCALP_CONFIG.maxHoldSeconds && (s.ticker !== trade.ticker || !s.lastQuoteMessageTs || Date.now() - s.lastQuoteMessageTs > 2000)) {
+    const maxHoldReached = Number.isFinite(SCALP_CONFIG.maxHoldSeconds) && heldSeconds >= SCALP_CONFIG.maxHoldSeconds;
+    if (!maxHoldReached && (s.ticker !== trade.ticker || !s.lastQuoteMessageTs || Date.now() - s.lastQuoteMessageTs > 2000)) {
       const market = await api.getMarket(trade.ticker);
       if (market.status === 'finalized') {
-        log({ event: 'SETTLEMENT_RECONCILIATION_REQUIRED', ticker: trade.ticker });
-        return; // Never fabricate settlement P&L or clear an unverified holding.
+        await settle(ctx);
+        return; // Wait for actual account settlement; do not sell finalized contracts.
       }
       ask = Number(market.yes_ask_dollars); bid = Number(market.yes_bid_dollars);
     }
-    let decision = { shouldExit: heldSeconds >= SCALP_CONFIG.maxHoldSeconds, reason: 'MAX_HOLD_TIME' };
+    let decision = { shouldExit: maxHoldReached, reason: maxHoldReached ? 'MAX_HOLD_TIME' : 'HOLD' };
     if ([ask, bid].every(Number.isFinite) && bid >= 0 && ask <= 1 && ask >= bid) {
       const profit = evaluateScalpProfit({ entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask,
         contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count) });

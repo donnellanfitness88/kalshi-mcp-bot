@@ -99,6 +99,8 @@ test('partial exits retain position and allocate actual fees; final close record
   await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade, originalCount = t.count;
   t.startedAt = Date.now() - 46000;
+  f.state.BTC.yesBid = scalpTakeProfitPrice(t.entrySidePrice);
+  f.state.BTC.yesAsk = f.state.BTC.yesBid + 0.01;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
   f.api.placeOrder = async body => {
     f.requests.push(body);
@@ -124,11 +126,11 @@ test('simulation performs zero account/order API calls', async () => {
   assert.equal(f.state.BTC.activeTrade.sim, true);
   assert.equal(f.requests.length, 0);
 });
-test('price targets exit immediately and the 45-second limit remains', () => {
+test('price targets exit immediately without a forced holding-time exit', () => {
   assert.equal(evaluateScalpExit({ heldSeconds: 1, entryPrice: 0.70, exitBid: 0.74 }).shouldExit, false);
   assert.equal(evaluateScalpExit({ heldSeconds: 1, entryPrice: 0.70, exitBid: 0.75 }).shouldExit, true);
   assert.equal(evaluateScalpExit({ heldSeconds: 1, entryPrice: 0.80, exitBid: 0.90 }).shouldExit, true);
-  assert.equal(evaluateScalpExit({ heldSeconds: 45, entryPrice: 0.70, exitBid: 0.60 }).shouldExit, true);
+  assert.equal(evaluateScalpExit({ heldSeconds: 45, entryPrice: 0.70, exitBid: 0.60 }).shouldExit, false);
 });
 
 test('restored journal reconciles an interrupted buy without sending another order', async () => {
@@ -158,6 +160,8 @@ test('missing exit fill data retains the holding and prevents duplicate sales', 
   await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade;
   t.startedAt = Date.now() - 46000;
+  f.state.BTC.yesBid = scalpTakeProfitPrice(t.entrySidePrice);
+  f.state.BTC.yesAsk = f.state.BTC.yesBid + 0.01;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
   f.api.placeOrder = async body => { f.requests.push(body); return { order_id: 'uncertain-exit' }; };
   f.api.getOrder = async () => ({ status: 'resting' });
@@ -459,4 +463,42 @@ test('$5 loss trigger permits a smaller loss and exits when threshold is crossed
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,2);
   assert.equal(f.logs.find(log=>log.event==='CLOSED').reason,'MAX_DOLLAR_LOSS');
+});
+test('scalp can remain open past 45 seconds and into late-entry period without overlap', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const trade = f.state.BTC.activeTrade;
+  trade.startedAt = Date.now() - 120000;
+  f.state.BTC.secsLeft = 60;
+  Object.assign(f.state.ETH, { secsLeft: 60, yesAsk: 0.97, yesBid: 0.96 });
+  await f.executor.tick(f.ctx('BTC'));
+  await f.executor.tick(f.ctx('ETH'));
+  assert.equal(f.state.BTC.activeTrade, trade);
+  assert.equal(f.requests.length, 1);
+});
+test('long-held scalp still refreshes stale quotes instead of using the disabled timer', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const trade = f.state.BTC.activeTrade;
+  trade.startedAt = Date.now() - 120000;
+  f.state.BTC.lastQuoteMessageTs = Date.now() - 5000;
+  let reads = 0;
+  f.api.getMarket = async ticker => { reads++; assert.equal(ticker, trade.ticker);
+    return { status: 'open', yes_ask_dollars: '0.72', yes_bid_dollars: '0.71' }; };
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(reads, 1);
+  assert.equal(f.requests.length, 1);
+});
+test('scalp held across rollover reconciles settlement using its original ticker', async () => {
+  const f = fixture(); await f.executor.tick(f.ctx('BTC'));
+  const trade = f.state.BTC.activeTrade;
+  const pnl = trade.count - trade.amount - trade.entryFees;
+  trade.startedAt = Date.now() - 100000;
+  f.state.BTC.ticker = 'NEW-MARKET';
+  f.api.getPositions = async () => [];
+  f.api.getMarket = async ticker => { assert.equal(ticker, trade.ticker); return {status:'finalized',result:'yes'}; };
+  f.api.getAllFills = async () => [{ order_id:trade.entryOrderId, ticker:trade.ticker, created_time:new Date(trade.startedAt).toISOString() }];
+  f.api.getAllSettlements = async () => [{ticker:trade.ticker,settled_time:new Date().toISOString(),market_result:'yes'}];
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade,null);
+  assert.ok(Math.abs(f.state.BTC.totalPnL-pnl)<1e-9);
+  assert.equal(f.requests.length,1);
 });

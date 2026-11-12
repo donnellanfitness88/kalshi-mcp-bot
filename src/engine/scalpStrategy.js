@@ -12,7 +12,7 @@ export const SCALP_CONFIG = {
   confirmationSeconds: 3,
   maxEntryPullback: 0.01,
   minHoldSeconds: 15,
-  maxHoldSeconds: 45,
+  maxHoldSeconds: null, // No forced time-based scalp exit.
   maxLossUsd: 5.00,
   entryMinSecondsRemaining: 480,
   lateEntryMaxSecondsRemaining: 90,
@@ -102,7 +102,7 @@ export function evaluateScalpExit({ heldSeconds, entryPrice, exitBid }) {
     throw new Error('Invalid SCALP exit inputs');
   }
   const targetPrice = scalpTakeProfitPrice(entryPrice);
-  if (heldSeconds >= SCALP_CONFIG.maxHoldSeconds) {
+  if (Number.isFinite(SCALP_CONFIG.maxHoldSeconds) && heldSeconds >= SCALP_CONFIG.maxHoldSeconds) {
     return { shouldExit: true, reason: 'MAX_HOLD_TIME', targetPrice };
   }
   if (exitBid + 1e-9 >= targetPrice) {
