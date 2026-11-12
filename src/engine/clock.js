@@ -15,6 +15,7 @@ import { executeSell } from '../kalshi/orders.js';
 import { loadBrain } from '../nn/store.js';
 import { startOfflineTraining, stopOfflineTraining } from './offlineTrainer.js';
 import { notify } from '../notify.js';
+import { evaluateScalpEntry } from './scalpStrategy.js';
 
 // ── Offline-mode tracking ─────────────────────────────────────────────────────
 // After OFFLINE_THRESHOLD consecutive failed onWindowRoll calls, the bot stops
@@ -374,6 +375,36 @@ if (now % 60000 < 1000) {
       balance: state.balance ?? 0,
       pctAbove: s.ticksTotal > 0 ? s.ticksAbove / s.ticksTotal : 0.5,
     };
+
+// SCALP entry monitoring.
+// Disabled by default; does not place orders.
+if (
+  process.env.SCALP_ENABLED === 'true' &&
+  !s.activeTrade &&
+  s.farmArmed
+) {
+  const scalpSignal = evaluateScalpEntry({
+    priceHistory: s.yesPriceHistory,
+    yesAsk: s.yesAsk,
+    yesBid: s.yesBid
+  });
+
+  if (scalpSignal.shouldEnter) {
+    const now = Date.now();
+
+    if (
+      !s.lastScalpSignalLog ||
+      now - s.lastScalpSignalLog >= 10_000
+    ) {
+      console.log(
+        `[SCALP] ${asset} signal: ` +
+        JSON.stringify(scalpSignal)
+      );
+
+      s.lastScalpSignalLog = now;
+    }
+  }
+}
 
     // Exit check always runs first
     if (s.activeTrade) {
