@@ -11,11 +11,10 @@ function fixture(direction = 'UP', sim = false) {
     consecutiveLosses: 0, sessionStartBalance: 100, dailyStartBalance: 100,
     sessionPnL: 0, dailyPnL: 0, totalPnL: 0, tradeCount: 0, secsLeft: 300,
     ticker: 'BTC-TEST', yesAsk: 0.60, yesBid: 0.59, lastQuoteMessageTs: now,
-    yesPriceHistory: [
-      { ts: now - 6000, price: direction === 'UP' ? 0.57 : 0.62 },
-      { ts: now - 3000, price: direction === 'UP' ? 0.58 : 0.61 },
-      { ts: now, price: 0.595 }
-    ] });
+    yesPriceHistory: Array.from({ length: 61 }, (_, i) => ({
+      ts: now - 6000 + i * 100,
+      price: direction === 'UP' ? 0.565 + 0.03 * i / 60 : 0.625 - 0.03 * i / 60
+    })) });
   const state = { BTC: asset(), ETH: { ...asset(), ticker: 'ETH-TEST' }, simMode: sim, paperBalance: 50, disabledAssets: [] };
   const requests = [], logs = [];
   let saved;

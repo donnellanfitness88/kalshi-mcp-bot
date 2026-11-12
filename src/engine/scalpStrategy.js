@@ -8,6 +8,9 @@ import { getAllFills, getOrders } from '../kalshi/client.js';
 
 
 export const SCALP_CONFIG = {
+  entryMinMove: 0.02,
+  confirmationSeconds: 3,
+  maxEntryPullback: 0.01,
   minHoldSeconds: 15,
   maxHoldSeconds: 45,
   maxLossUsd: 3.00,
@@ -200,25 +203,41 @@ export function evaluateScalpEntry({
 
   const move = last.price - first.price;
 
-  // Require at least 1 cent of movement
-  // during the recent observation window.
-  if (Math.abs(move) < 0.01) {
+  // Require a 2-cent move over the existing 5-to-10-second observation.
+  if (Math.abs(move) + 1e-9 < SCALP_CONFIG.entryMinMove) {
     return reject('WEAK_MOMENTUM');
   }
 
   const direction = move > 0 ? 'UP' : 'DOWN';
+  const sign = direction === 'UP' ? 1 : -1;
 
-  // Require recent movement to confirm direction.
-  const recent = valid.slice(-3);
-  const recentMove =
-    recent[recent.length - 1].price -
-    recent[0].price;
+  // Measure three elapsed one-second intervals, not three WS messages.
+  // Every interval must advance in the direction of the held contract.
+  const checkpoints = [];
+  for (let secondsAgo = SCALP_CONFIG.confirmationSeconds; secondsAgo >= 0; secondsAgo--) {
+    const targetTs = last.ts - secondsAgo * 1000;
+    const point = valid.findLast(p => p.ts <= targetTs);
+    if (!point || targetTs - point.ts > 500) return reject('INSUFFICIENT_CONFIRMATION_HISTORY');
+    checkpoints.push(point);
+  }
+  const confirmationStart = checkpoints[0].ts;
+  const confirmationHistory = valid.filter(p => p.ts >= confirmationStart);
+  if (confirmationHistory.some((p, i) => i && p.ts - confirmationHistory[i - 1].ts > 1000)) {
+    return reject('GAPPED_CONFIRMATION_HISTORY');
+  }
+  for (let i = 1; i < checkpoints.length; i++) {
+    if (sign * (checkpoints[i].price - checkpoints[i - 1].price) <= 1e-9) {
+      return reject('MOMENTUM_NOT_CONFIRMED');
+    }
+  }
 
-  if (
-    recentMove === 0 ||
-    Math.sign(recentMove) !== Math.sign(move)
-  ) {
-    return reject('MOMENTUM_NOT_CONFIRMED');
+  // Mirror the price series for NO: a falling YES price is a rising NO price.
+  // Compare midpoints consistently so spread alone is not counted as a pullback.
+  const sidePrices = valid.map(p => direction === 'UP' ? p.price : 1 - p.price);
+  const currentSideMid = direction === 'UP' ? midpoint : 1 - midpoint;
+  const pullback = Math.max(...sidePrices) - currentSideMid;
+  if (pullback > SCALP_CONFIG.maxEntryPullback + 1e-9) {
+    return reject('ENTRY_PULLBACK_TOO_LARGE');
   }
 
   return {
@@ -226,7 +245,9 @@ export function evaluateScalpEntry({
     direction,
     reason: 'MOMENTUM_CONFIRMED',
     spreadCents: spread * 100,
-    moveCents: move * 100
+    moveCents: move * 100,
+    confirmationSeconds: SCALP_CONFIG.confirmationSeconds,
+    pullbackCents: Math.max(0, pullback) * 100
   };
 }
 

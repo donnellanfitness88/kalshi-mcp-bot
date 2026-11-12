@@ -71,3 +71,16 @@ API references:
 
 Settlement schema reference:
 https://docs.kalshi.com/api-reference/portfolio/get-settlements
+
+## Stronger scalp entry filters
+
+Scalp signals require at least a 2-cent midpoint move over a 5-to-10-second
+observation. Each of the last three elapsed one-second intervals must show
+positive movement in the chosen contract's direction, with timestamped
+samples covering those intervals (not merely three feed messages). Reject
+entry more than 1 cent below that contract's highest midpoint in the recent
+observation. NO signals use the mirrored `1 - YES midpoint` series. These
+filters do not change the late settlement entry or existing exit rules.
+
+Validate with:
+`node --test tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
