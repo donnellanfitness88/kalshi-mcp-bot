@@ -8,6 +8,7 @@ process.env.SCALP_ENABLED = 'true';
 process.env.DRY_RUN = 'false';
 function fixture(direction = 'UP', sim = false) {
   const now = Date.now();
+  let retryClock = now;
   const asset = () => ({ activeTrade: null, farmArmed: true, lastExitTime: 0, lastLossTime: 0,
     consecutiveLosses: 0, sessionStartBalance: 100, dailyStartBalance: 100,
     sessionPnL: 0, dailyPnL: 0, totalPnL: 0, tradeCount: 0, secsLeft: 600,
@@ -29,9 +30,9 @@ function fixture(direction = 'UP', sim = false) {
         average_fill_price: body.price, average_fee_paid: '0.0100' };
     } };
   const dynamicApi = Object.fromEntries(['getPositions', 'getOrders', 'getBalance', 'placeOrder', 'getOrder', 'getAllFills', 'getMarket', 'getAllSettlements'].map(key => [key, (...args) => api[key](...args)]));
-  const executor = createScalpExecutor({ state, api: dynamicApi, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
+  const executor = createScalpExecutor({ state, api: dynamicApi, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
   const ctx = asset => ({ asset, s: state[asset], balance: 100 });
-  return { state, api, executor, requests, logs, ctx, saved: () => saved };
+  return { advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
 }
 test('all entry sizes include fee reserve within $10, including low balances', () => {
   for (const balance of [0, 0.01, 0.5, 3, 10, 100]) {
@@ -803,7 +804,7 @@ test('late add-on rejected for insufficient balance releases only pending and co
   assert.equal(f.state.BTC.activeTrade,old); assert.equal(f.state.BTC.tradeCount,0);
   assert.ok(Math.abs(f.executor.snapshot().lateStages['BTC-TEST'].spent-.91)<1e-9);
 });
-test('zero-fill late add-on consumes its stage without replacing the original position',async()=>{
+test('zero-fill late add-on waits before retrying without replacing the original position',async()=>{
   const f=stagedFixture(); f.stage(179,.90); await f.executor.tick(f.ctx('BTC'));
   const old=f.state.BTC.activeTrade;
   f.stage(119,.94);
@@ -865,4 +866,82 @@ test('scalp holdings cannot receive late stages; simulation and live holdings ne
   assert.equal(g.state.BTC.activeTrade.sim,true);
   g.state.simMode=false; g.stage(119,.94); await g.executor.tick(g.ctx('BTC'));
   assert.equal(g.requests.length,0); assert.equal(g.state.BTC.activeTrade.count,1);
+});
+
+test('late entries use IOC; zero fills retry with a fresh client ID after three seconds',async()=>{
+  const f=stagedFixture(); f.stage(119,.94);
+  let attempts=0;
+  f.api.placeOrder=async body=>{
+    f.requests.push(body); attempts++;
+    assert.equal(body.time_in_force,'immediate_or_cancel');
+    return {order_id:`retry-${attempts}`,fill_count:attempts===1?'0':body.count,remaining_count:'0',
+      average_fill_price:body.price,average_fee_paid:'.01'};
+  };
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.state.BTC.activeTrade,null);
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
+  f.advanceRetry(2999); await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
+  f.advanceRetry(2); await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
+  assert.notEqual(f.requests[0].client_order_id,f.requests[1].client_order_id);
+  assert.equal(f.state.BTC.activeTrade.count,10);
+  assert.ok(Math.abs(f.executor.snapshot().lateStages['BTC-TEST'].records.under_120.spent-9.5)<1e-9);
+});
+test('partial YES and NO fills retry only remaining budget and keep every entry ID',async()=>{
+  for(const side of ['yes','no']) {
+    const f=stagedFixture(side); f.stage(119,.94);
+    let attempts=0;
+    f.api.placeOrder=async body=>{
+      f.requests.push(body); attempts++;
+      return {order_id:`partial-${attempts}`,fill_count:attempts===1?'4':body.count,remaining_count:'0',
+        average_fill_price:body.price,average_fee_paid:'.01'};
+    };
+    await f.executor.tick(f.ctx('BTC')); assert.equal(f.state.BTC.activeTrade.count,4);
+    await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
+    f.advanceRetry(); await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.requests[1].count,'6.00'); assert.equal(f.state.BTC.activeTrade.count,10);
+    assert.equal(f.state.BTC.activeTrade.side,side);
+    assert.deepEqual(f.state.BTC.activeTrade.entryOrderIds,['partial-1','partial-2']);
+    f.advanceRetry(); await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
+    assert.ok(Math.abs(f.executor.snapshot().lateStages['BTC-TEST'].spent-9.5)<1e-9);
+  }
+});
+test('retry waits and per-stage remaining budget survive restart',async()=>{
+  const f=stagedFixture(); f.stage(119,.94);
+  f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:'first-partial',fill_count:'4',remaining_count:'0',average_fill_price:body.price,average_fee_paid:'.01'};};
+  await f.executor.tick(f.ctx('BTC'));
+  const restored=createScalpExecutor({state:f.state,api:f.api,now:f.retryNow,save:()=>{},log:()=>{}});
+  restored.restore(structuredClone(f.executor.snapshot()));
+  await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
+  f.advanceRetry(); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
+  assert.equal(f.requests[1].count,'6.00');
+  assert.ok(restored.snapshot().lateStages['BTC-TEST'].records.under_120.spent<10);
+});
+test('zero-fill retries stop below threshold, on stale quotes, or after their time tier',async()=>{
+  for(const change of ['price','stale','time','side','cash']) {
+    const f=stagedFixture(); f.stage(119,.94);
+    f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:'empty',fill_count:'0',remaining_count:'0'};};
+    await f.executor.tick(f.ctx('BTC')); f.advanceRetry();
+    if(change==='price')f.stage(119,.93);
+    if(change==='stale')f.state.BTC.lastQuoteMessageTs-=5000;
+    if(change==='time')f.state.BTC.secsLeft=59;
+    if(change==='side')setEntryBook(f,'no',.97);
+    if(change==='cash')f.api.getBalance=async()=>50;
+    await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,1,change);
+  }
+});
+test('an uncertain partial order never retries even after the wait has passed',async()=>{
+  const f=stagedFixture(); f.stage(119,.94);
+  f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+  await f.executor.tick(f.ctx('BTC')); f.advanceRetry(10000);
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
+  assert.ok(f.executor.snapshot().pending);
+});
+test('reconciled zero fill releases a retry only after terminal confirmation',async()=>{
+  const f=stagedFixture(); f.stage(119,.94);
+  f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+  await f.executor.tick(f.ctx('BTC')); f.advanceRetry();
+  const p=f.executor.snapshot().pending;
+  f.api.getOrders=async()=>[{client_order_id:p.body.client_order_id,order_id:'empty',status:'canceled',fill_count_fp:'0'}];
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.executor.snapshot().pending,null);
+  f.api.getOrders=async()=>[];
+  await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
 });

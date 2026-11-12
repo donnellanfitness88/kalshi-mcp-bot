@@ -19,6 +19,7 @@ export const SCALP_CONFIG = {
   lateEntryMaxSecondsRemaining: 180,
   lateEntryMinPrice: 0.97, // Legacy single-stage threshold, retained for compatibility.
   lateMaxEntryCostUsd: 31,
+  lateRetryMs: 3000,
   lateStages: [
     { id: 'under_180', maxSeconds: 180, minPrice: 0.90, budget: 1 },
     { id: 'under_120', maxSeconds: 120, minPrice: 0.94, budget: 10 },

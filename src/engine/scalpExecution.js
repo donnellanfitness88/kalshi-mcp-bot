@@ -85,6 +85,8 @@ export function createScalpExecutor(deps = {}) {
   const shared = deps.state ?? state;
   const save = deps.save ?? saveJournal;
   const log = deps.log ?? (message => console.log('[SCALP] ' + JSON.stringify(message)));
+  const retryNow = deps.now ?? Date.now;
+  const lateChecks = new Map();
   let busy = false;
   let pending = null;
   let lastAttempt = 0;
@@ -135,7 +137,17 @@ export function createScalpExecutor(deps = {}) {
           mode: p.mode ?? 'SCALP', entryOrderId: p.orderId, entryOrderIds: p.orderId ? [p.orderId] : [],
           sim: p.sim, realizedNet: 0, originalCost: cost };
       }
-      const nextStages = p.stageId ? { ...lateStages, [p.body.ticker]: { ...ledger, spent: ledger.spent + cost } } : lateStages;
+      const stageRecord = ledger?.records?.[p.stageId];
+      const stageLimit = SCALP_CONFIG.lateStages.find(stage => stage.id === p.stageId)?.budget;
+      if (p.stageId && stageRecord && stageRecord.spent + cost > stageLimit + 1e-9) {
+        throw new Error('Late fill exceeds remaining stage budget');
+      }
+      const nextStages = p.stageId ? { ...lateStages, [p.body.ticker]: { ...ledger,
+        spent: ledger.spent + cost,
+        ...(stageRecord ? { records: { ...ledger.records, [p.stageId]: {
+          ...stageRecord, spent: stageRecord.spent + cost
+        } } } : {})
+      } } : lateStages;
       // Save aggregate and clear pending together, before changing memory. A failed
       // write can then reconcile this order again without adding its fills twice.
       const saved = snapshot();
@@ -144,6 +156,12 @@ export function createScalpExecutor(deps = {}) {
       s.activeTrade = next; lateStages = nextStages; pending = null;
       log({ event: 'ENTRY_CONFIRMED', asset: p.asset, ...fill, sim: p.sim, mode: p.mode,
         side: p.side, stage: p.stageId, totalContracts: next.count, totalCost: next.originalCost });
+      return;
+    } else if (p.kind === 'entry' && p.stageId && !fill.count) {
+      const saved = snapshot(); saved.pending = null;
+      save(saved); pending = null;
+      log({ event: 'LATE_ZERO_FILL', asset: p.asset, stage: p.stageId,
+        ticker: p.body.ticker, retryAfterMs: SCALP_CONFIG.lateRetryMs });
       return;
     } else if (p.kind === 'exit' && fill.count) {
       const trade = s.activeTrade;
@@ -199,7 +217,14 @@ export function createScalpExecutor(deps = {}) {
     }
     const snapshotAfter = snapshot();
     snapshotAfter.pending = null;
+    if (p.stageId && lateStages[p.body.ticker]?.records?.[p.stageId]) {
+      const ledger = lateStages[p.body.ticker];
+      snapshotAfter.lateStages = { ...lateStages, [p.body.ticker]: { ...ledger,
+        records: { ...ledger.records, [p.stageId]: { ...ledger.records[p.stageId], blocked: true } }
+      } };
+    }
     save(snapshotAfter); // Clear durably before releasing the in-memory lock.
+    lateStages = snapshotAfter.lateStages;
     pending = null;
     log({ event: 'REJECTED_ORDER_RECONCILED', asset: p.asset, ticker: p.body.ticker,
       kind: p.kind, clientOrderId: p.body.client_order_id, rejection: proof, pnlChanged: false });
@@ -242,12 +267,18 @@ export function createScalpExecutor(deps = {}) {
       lateEntryTickers = [...new Set([...lateEntryTickers, p.body.ticker])].slice(-500);
       if (p.stageId) {
         const ledger = lateStages[p.body.ticker] ?? { attempted: [], side: p.side, spent: 0 };
-        if (ledger.closed || ledger.side !== p.side || ledger.attempted.includes(p.stageId)) {
+        const previous = ledger.records?.[p.stageId];
+        if (ledger.closed || ledger.side !== p.side || previous?.blocked ||
+            (ledger.attempted.includes(p.stageId) && !previous)) {
           pending = null;
-          throw new Error('Late stage already reserved or side changed');
+          throw new Error('Late stage is closed or side changed');
         }
         lateStages = { ...lateStages, [p.body.ticker]: {
-          ...ledger, attempted: [...ledger.attempted, p.stageId]
+          ...ledger, attempted: [...new Set([...ledger.attempted, p.stageId])],
+          records: { ...ledger.records, [p.stageId]: {
+            spent: previous?.spent ?? 0, attempts: (previous?.attempts ?? 0) + 1,
+            lastAttemptAt: retryNow()
+          } }
         } };
       }
     }
@@ -307,8 +338,12 @@ export function createScalpExecutor(deps = {}) {
     const stage = lateStage(remainingSeconds(s));
     const ledger = lateStages[s.ticker];
     // Old journals reserved the entire ticker. Never infer missing stage history.
+    const record = ledger?.records?.[stage?.id];
     if (!stage || ledger?.closed || (lateEntryTickers.includes(s.ticker) && !ledger) ||
-        ledger?.attempted.includes(stage.id)) return { shouldEnter: false };
+        record?.blocked || (ledger?.attempted.includes(stage.id) && !record)) return { shouldEnter: false };
+    if (record && retryNow() - record.lastAttemptAt < SCALP_CONFIG.lateRetryMs) {
+      return { shouldEnter: false, reason: 'LATE_RETRY_WAIT' };
+    }
     const trade = s.activeTrade;
     const side = trade?.side ?? ledger?.side;
     const candidates = [{ direction: 'UP', side: 'yes', price: s.yesAsk },
@@ -321,7 +356,13 @@ export function createScalpExecutor(deps = {}) {
     const phase = entryPhase(remainingSeconds(s));
     // Preserve settlement priority, but permit a confirmed higher-priced scalp
     // below 97 cents when no settlement entry qualifies in the last 90 seconds.
-    if (phase === 'LATE_SETTLEMENT' && !entrySignal(s, phase).shouldEnter) return 'SCALP';
+    if (phase === 'LATE_SETTLEMENT') {
+      // Once a staged sequence starts, a failed or cooling-down stage must not
+      // fall through into a scalp or change sides, even after a zero fill.
+      if (lateStages[s.ticker] && !lateStages[s.ticker].closed) return phase;
+      const signal = entrySignal(s, phase);
+      if (!signal.shouldEnter && signal.reason !== 'LATE_RETRY_WAIT') return 'SCALP';
+    }
     return phase;
   }
   async function enter(ctx) {
@@ -341,6 +382,11 @@ export function createScalpExecutor(deps = {}) {
     if (checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' }).blocked) return;
     const signal = entrySignal(s, mode);
     if (!signal.shouldEnter) return;
+    if (mode === 'LATE_SETTLEMENT') {
+      const key = `${s.ticker}:${signal.stage.id}`;
+      if (retryNow() - (lateChecks.get(key) ?? -Infinity) < SCALP_CONFIG.lateRetryMs) return;
+      lateChecks.set(key, retryNow());
+    }
     lastAttempt = Date.now();
     if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
@@ -350,7 +396,7 @@ export function createScalpExecutor(deps = {}) {
     const fresh = entrySignal(s, mode);
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
     const price = fresh.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
-    const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget,
+    const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
       SCALP_CONFIG.lateMaxEntryCostUsd - (lateStages[ticker]?.spent ?? 0)) : null;
     const count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget) : scalpSize(price, balance, mode);
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) return;
@@ -362,6 +408,7 @@ export function createScalpExecutor(deps = {}) {
     if (!count || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price))) return;
     const body = buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
+    if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
       stageId: fresh.stage?.id, stageBudget, direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });

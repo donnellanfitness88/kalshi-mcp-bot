@@ -57,7 +57,8 @@ Late entries use three incremental budgets, including estimated entry fees:
 | Below 120 seconds, down to 60 seconds inclusive | 94 cents | $10 |
 | Below 60 seconds, above zero | 97 cents | $20 |
 
-Each stage may be attempted once per ticker. Missed earlier stages are skipped;
+Each stage has one budget per ticker, which may be filled through multiple
+IOC limit orders. Missed earlier stages are skipped;
 there is no catch-up buying. A higher price does not trigger several stages at
 once. Each budget buys whole contracts and is bounded by available cash and the
 remaining combined $31 cap. Potential payout must exceed estimated fees.
@@ -68,9 +69,19 @@ same ticker, side, and live/simulation mode. An open scalp, a different asset's
 holding, an unexpected account position, or a resting/uncertain order blocks
 additions. Existing risk guards continue to apply. The tracked weighted entry
 price, contract count, actual fees, total spend, and every entry order ID are
-persisted together. Partial fills consume that stage; unresolved orders are
-reconciled before any further purchase. Explicit rejections consume the stage
-without adding spend or P&L. A fully verified manual close ends further stages
+persisted together. Confirmed partial fills reduce both that stage's remaining
+budget and the combined remaining budget, including their actual fees. Confirmed
+zero fills consume no budget. Retry checks and submissions are spaced at least
+three seconds apart for the same stage, and the retry timestamp and spent amount
+survive restarts. Each retry uses a new client order ID, a fresh price/time check,
+and an account check. The limit stays at the current executable quote; there is
+no extra slippage allowance. Unfilled IOC quantities are canceled rather than
+left resting. Uncertain or nonterminal orders block all further purchases until
+reconciled; a terminal zero-fill result permits a retry. Explicit insufficient-
+balance rejections block that stage without adding spend or P&L. Once a late
+sequence starts, a nonqualifying stage cannot fall through into a scalp or switch
+sides. Older stage reservations without per-stage spend records remain blocked
+for the already-attempted stages rather than guessing how much was spent. A fully verified manual close ends further stages
 for that ticker. Partial manual sales do not reset the spend cap.
 
 Older journal holdings without staged reservation history are held and
@@ -124,7 +135,7 @@ signal, valid quotes, a flat account and no unresolved order are still required.
 Consecutive-loss, session-loss and daily-loss guards remain in force; those
 can still prevent new entries. Other strategies retain their existing cooldowns.
 A 61-cent scalp entry targets 66 cents immediately when executable. The late
-settlement entry keeps its once-per-stage reservation and existing risk guards.
+settlement entry keeps its per-stage budget reservation and existing risk guards.
 
 ## Explicitly rejected requests
 
@@ -141,3 +152,5 @@ the production log recorded HTTP 400 insufficient_balance at
 2026-11-12T20:44:26.002925153Z. Apply the same account checks to it. This
 proof is exact-id only and cannot clear other missing orders. Timeouts,
 429/5xx, conflicting exchange records and incomplete evidence remain blocked.
+
+Execution reference: https://docs.kalshi.com/api-reference/orders/create-order-v2
