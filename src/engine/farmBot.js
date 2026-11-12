@@ -243,7 +243,23 @@ function evaluateModes(s, regime, cycleDelta, pctAbove, adx, atrRatio, ind = nul
     return { shouldFarm: true, bet, target: TARGET[regime], stop: atrStop * stopMult, mode: 'MOMENTUM' };
   }
 
-  return { shouldFarm: false, reason: 'NO_MODE' };
+  
+return {
+  shouldFarm: false,
+  reason: 'NO_MODE',
+  diagnostics: {
+    secsLeft,
+    yesPrice: Number(yesPrice.toFixed(4)),
+    yesVel,
+    cycleDelta,
+    pctAbove,
+    adx,
+    liquidity,
+    spreadCents: Number(spread.toFixed(2)),
+    simMode: Boolean(s._simMode)
+  }
+};
+
 }
 
 
