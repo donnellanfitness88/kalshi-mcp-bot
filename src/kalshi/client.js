@@ -41,7 +41,7 @@ async function request(method, path, body = null) {
   const headers = buildHeaders(method, path);
   const url = BASE_URL + path;
 
-  const opts = { method, headers };
+  const opts = { method, headers, signal: AbortSignal.timeout(10_000) };
   if (body) opts.body = JSON.stringify(body);
 
   const res = await fetch(url, opts);
@@ -69,20 +69,27 @@ export async function getBalance() {
   return data.balance;
 }
 
-export async function getPositions() {
-  const data = await request('GET', '/portfolio/positions');
-
-  console.log('=== POSITIONS API METADATA ===');
-  console.log({
-    responseFields: Object.keys(data),
-    returnedPositions: data.market_positions?.length ?? 0,
-    hasCursor: Boolean(data.cursor),
-    hasEventPositions: Array.isArray(data.event_positions)
-  });
-
-  return data.market_positions || [];
+async function collectPortfolio(path, field, params = {}) {
+  const rows = [], seen = new Set();
+  let cursor;
+  for (let page = 0; page < 100; page++) {
+    const qs = new URLSearchParams({ ...params, limit: 200, ...(cursor ? { cursor } : {}) });
+    const data = await request('GET', path + '?' + qs);
+    if (!Array.isArray(data[field])) throw new Error('Invalid portfolio response');
+    rows.push(...data[field]);
+    if (!data.cursor) return rows;
+    if (seen.has(data.cursor)) throw new Error('Repeated portfolio cursor');
+    seen.add(data.cursor); cursor = data.cursor;
+  }
+  throw new Error('Portfolio pagination limit reached');
 }
-
+export async function getPositions() {
+  return collectPortfolio('/portfolio/positions', 'market_positions');
+}
+export async function getOrder(orderId) {
+  const data = await request('GET', '/portfolio/orders/' + encodeURIComponent(orderId));
+  return data.order;
+}
 
 export async function getFillPage(params = {}) {
   const qs = new URLSearchParams(params).toString();
@@ -180,10 +187,7 @@ export async function getAllSettlements(params = {}) {
   throw new Error('Settlement pagination limit reached');
 }
 export async function getOrders(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const path = '/portfolio/orders' + (qs ? '?' + qs : '');
-  const data = await request('GET', path);
-  return data.orders || [];
+  return collectPortfolio('/portfolio/orders', 'orders', params);
 }
 
 // Markets

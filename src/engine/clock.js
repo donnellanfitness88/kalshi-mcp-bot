@@ -15,7 +15,7 @@ import { executeSell } from '../kalshi/orders.js';
 import { loadBrain } from '../nn/store.js';
 import { startOfflineTraining, stopOfflineTraining } from './offlineTrainer.js';
 import { notify } from '../notify.js';
-import { evaluateScalpEntry } from './scalpStrategy.js';
+import { scalpExecutor, restoreScalpExecution } from './scalpExecution.js';
 
 // ── Offline-mode tracking ─────────────────────────────────────────────────────
 // After OFFLINE_THRESHOLD consecutive failed onWindowRoll calls, the bot stops
@@ -42,8 +42,10 @@ function updateYes(asset, yesAsk, yesBid) {
   const now = Date.now();
   const mid = (yesAsk + yesBid) / 2;
 
-  s.yesPriceHistory.push({ price: mid, ts: now });
-  if (s.yesPriceHistory.length > 30) s.yesPriceHistory.shift();
+  // Sample at 10 Hz so the momentum window spans ten seconds at any feed rate.
+  const last = s.yesPriceHistory.at(-1);
+  if (!last || now - last.ts >= 100) s.yesPriceHistory.push({ price: mid, ts: now });
+  s.yesPriceHistory = s.yesPriceHistory.filter(p => p.ts >= now - 10_000);
 
   // YES velocity in ¢/s over last 3 WS readings
   if (s.yesPriceHistory.length >= 3) {
@@ -123,6 +125,7 @@ async function onWindowRoll(asset) {
   // Clear stale prices so tick() skips this asset until fresh WS data arrives
   s.yesAsk = null;
   s.yesBid = null;
+  s.yesPriceHistory = [];
 s.lastQuoteMessageTs = null;
 s.lastQuoteChangeTs = null;
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -338,7 +341,8 @@ async function _tickBody() {
     } else if (s.windowId === null) {
       s.windowId = wid; // initial set on startup
     } else if (s.windowId !== wid || !s.ticker) {
-      const ok = await onWindowRoll(asset);
+      // Market lookups retry for up to 50s; keep the heartbeat available for exits.
+      void onWindowRoll(asset).then(ok => {
       if (ok === true) {
         s.windowId = wid;
         _marketFails[asset] = 0; // reset on success
@@ -350,6 +354,7 @@ async function _tickBody() {
         }
       }
       // ok === null → already in progress or offline, skip silently
+      }).catch(err => console.error('[Clock] market roll failed:', err.message));
     }
 if (now % 60000 < 1000) {
   console.log(
@@ -367,7 +372,12 @@ if (now % 60000 < 1000) {
 }
 
     // Skip if no market data
-    if (!s.ticker || s.yesAsk === null) continue;
+    if (!s.ticker || s.yesAsk === null) {
+      if (s.activeTrade?.mode === 'SCALP' || scalpExecutor.snapshot().pending) {
+        await scalpExecutor.tick({ asset, s, balance: state.balance ?? 0 });
+      }
+      continue;
+    }
 
     const ctx = {
       asset,
@@ -376,44 +386,13 @@ if (now % 60000 < 1000) {
       pctAbove: s.ticksTotal > 0 ? s.ticksAbove / s.ticksTotal : 0.5,
     };
 
-// SCALP entry monitoring.
-// Disabled by default; does not place orders.
-if (
-  process.env.SCALP_ENABLED === 'true' &&
-  !s.activeTrade &&
-  s.farmArmed
-) {
-  const scalpSignal = evaluateScalpEntry({
-    priceHistory: s.yesPriceHistory,
-    yesAsk: s.yesAsk,
-    yesBid: s.yesBid
-  });
-
-  
-if (
-  scalpSignal.shouldEnter &&
-  Date.now() - (s.lastExitTime || 0) >= 8_000 &&
-  s.secsLeft > 60
-) {
-
-    const now = Date.now();
-
-    if (
-      !s.lastScalpSignalLog ||
-      now - s.lastScalpSignalLog >= 10_000
-    ) {
-      console.log(
-        `[SCALP] ${asset} signal: ` +
-        JSON.stringify(scalpSignal)
-      );
-
-      s.lastScalpSignalLog = now;
+// Pending orders and held scalps are serviced even if the entry toggle is off.
+    if (process.env.SCALP_ENABLED === 'true' || s.activeTrade?.mode === 'SCALP' || scalpExecutor.snapshot().pending) {
+      await scalpExecutor.tick(ctx);
     }
-  }
-}
 
     // Exit check always runs first
-    if (s.activeTrade) {
+    if (s.activeTrade && s.activeTrade.mode !== 'SCALP') {
       await checkExit(ctx);
     }
 
@@ -433,12 +412,10 @@ if (
 
       
 // Keep SCALP monitoring separate from other entries.
-// SCALP order execution is not connected yet.
+// Only one strategy may open a new position per tick.
 if (!s.activeTrade) {
   if (process.env.SCALP_ENABLED === 'true') {
-    // SCALP signal monitoring only.
-    // Do not submit orders until entry execution
-    // and position reconciliation are tested.
+    // SCALP execution is serviced above; do not mix other entry strategies.
   } else if (s.farmArmed) {
     await checkFarmBot(ctx);
   } else if (s.autoBuyArmed) {
@@ -476,8 +453,12 @@ export async function startClock() {
   state.BTC.brain = await loadBrain('BTC');
   state.ETH.brain = await loadBrain('ETH');
 
-  // Close any orphaned positions from a previous session before initialising.
-  try {
+  // Restore our journal before servicing scalp orders. Existing account holdings
+  // block new entries; do not liquidate unrelated positions during scalp startup.
+  restoreScalpExecution();
+  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; budget=$10 including fee reserve; one position across BTC/ETH');
+  // Legacy startup handling applies only outside scalp mode.
+  if (process.env.SCALP_ENABLED !== 'true') try {
     const positions = await getPositions();
     for (const p of positions) {
       const fp = parseFloat(p.position_fp);
