@@ -1,5 +1,5 @@
 
-import { getAllFills } from '../kalshi/client.js';
+import { getAllFills, getOrders } from '../kalshi/client.js';
 
 /**
  * SCALP strategy — research and testing.
@@ -501,5 +501,49 @@ export async function reconcileScalpEntry({
     ...execution,
     fullyFilled:
       execution.confirmedContracts === expectedContracts
+  };
+}
+
+/**
+ * Read-only order status verification.
+ * Does not submit or cancel orders.
+ */
+export async function verifyScalpOrderStatus({
+  ticker,
+  orderId
+}) {
+  if (
+    typeof ticker !== 'string' ||
+    !ticker.trim() ||
+    typeof orderId !== 'string' ||
+    !orderId.trim()
+  ) {
+    throw new Error('Invalid SCALP order identifiers');
+  }
+
+  const orders = await getOrders({ ticker });
+
+  const order = orders.find(
+    item => item.order_id === orderId
+  );
+
+  if (!order) {
+    return {
+      found: false,
+      verified: false,
+      reason: 'ORDER_NOT_FOUND'
+    };
+  }
+
+  const status = order.status;
+
+  return {
+    found: true,
+    verified: true,
+    orderId,
+    ticker,
+    status,
+    terminal: ['executed', 'canceled'].includes(status),
+    rawOrder: order
   };
 }
