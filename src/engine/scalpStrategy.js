@@ -346,3 +346,52 @@ export async function getScalpOrderFills({
       : []
   };
 }
+
+/**
+ * Calculate entry execution from normalized fill data.
+ *
+ * Each record must contain:
+ * contracts: number of contracts filled
+ * price: execution price in dollars per contract
+ * fee: total fee for that fill in dollars
+ *
+ * The caller must verify the Kalshi API field names
+ * and units before constructing these records.
+ */
+export function calculateScalpExecution(fills) {
+  if (!Array.isArray(fills) || fills.length === 0) {
+    throw new Error('SCALP has no confirmed fills');
+  }
+
+  let contracts = 0;
+  let grossCost = 0;
+  let entryFees = 0;
+
+  for (const fill of fills) {
+    const { contracts: qty, price, fee } = fill;
+
+    if (
+      !Number.isInteger(qty) ||
+      qty <= 0 ||
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      price >= 1 ||
+      !Number.isFinite(fee) ||
+      fee < 0
+    ) {
+      throw new Error('Invalid SCALP execution record');
+    }
+
+    contracts += qty;
+    grossCost += qty * price;
+    entryFees += fee;
+  }
+
+  return {
+    confirmedContracts: contracts,
+    averageFillPrice: grossCost / contracts,
+    grossCost,
+    entryFees,
+    totalEntryCost: grossCost + entryFees
+  };
+}
