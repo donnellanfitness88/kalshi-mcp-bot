@@ -147,6 +147,46 @@ async function main() {
     return;
   }
 
+  console.log('=== NORMALIZATION VALIDATION ===');
+
+  const results = {
+    total: fills.length,
+    normalized: 0,
+    rejected: 0,
+    bySide: { yes: 0, no: 0 },
+    rejectionReasons: {}
+  };
+
+  for (const fill of fills) {
+    try {
+      const normalized = normalizeFill(fill);
+
+      results.normalized++;
+
+      results.bySide[normalized.economicSide]++;
+    } catch (error) {
+      results.rejected++;
+
+      const reason = error.message;
+
+      results.rejectionReasons[reason] =
+        (results.rejectionReasons[reason] || 0) + 1;
+    }
+  }
+
+  console.log(JSON.stringify(results, null, 2));
+
+  if (results.rejected > 0) {
+    console.log('STATUS: NORMALIZATION_REVIEW_REQUIRED');
+    return;
+  }
+
+  console.log('STATUS: NORMALIZATION_PASSED');
+
+  // Existing reconciliation remains unchanged
+  // until position accounting is verified.
+  return;
+
   const report = auditAccounting(fills, settlements);
 
   console.log('=== AUDIT SUMMARY ===');
