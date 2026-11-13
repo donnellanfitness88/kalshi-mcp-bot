@@ -1,4 +1,7 @@
 import { test } from 'node:test';
+import { buildSellBody } from '../../src/kalshi/orders.js';
+import { quantityUnits, contractQuantity, addQuantity, subtractQuantity } from '../../src/kalshi/quantity.js';
+import { remainingHeldContracts, reconcileManualExit } from '../../src/engine/manualExitReconciliation.js';
 import assert from 'node:assert/strict';
 import { createScalpExecutor, scalpEntryBudget, scalpSize, reserveFee, scalpAck, entryPhase, lateFee, lateStage, lateStageSize } from '../../src/engine/scalpExecution.js';
 import { checkRiskGuards } from '../../src/engine/riskManager.js';
@@ -1018,4 +1021,89 @@ test('larger late stages never spend beyond remaining exchange cash',async()=>{
   assert.equal(f.requests.length,3);
   assert.ok(Number(f.requests[2].count)<50);
   assert.ok(f.executor.snapshot().lateStages['BTC-TEST'].spent<=40+1e-9);
+});
+
+test('fixed-point contract quantities preserve hundredths and reject ambiguous values',()=>{
+  for(const [raw,units]of[['0',0],['0.01',1],['1.55',155],['25.50',2550],[2.55,255]]){
+    assert.equal(quantityUnits(raw),units);assert.equal(contractQuantity(raw),units/100);
+  }
+  assert.equal(contractQuantity('-1.55',true),-1.55);
+  for(const raw of [null,undefined,'',' ',true,'1e2','1.555','-0.01',NaN,Infinity,0.001,'900719925474099100']){
+    assert.throws(()=>quantityUnits(raw));
+  }
+  assert.equal(addQuantity(.1,.2),.3);assert.equal(subtractQuantity(.3,.2),.1);
+});
+test('acknowledgements accept fractional partial fills but never overfills or nonterminal responses',()=>{
+  const p={body:{count:'2.00'},side:'yes'};
+  const ack=scalpAck({fill_count:'1.55',remaining_count:'0.00',average_fill_price:'.97',average_fee_paid:'.002'},p);
+  assert.equal(ack.count,1.55);assert.equal(ack.price,.97);assert.ok(Math.abs(ack.fees-.0031)<1e-12);
+  assert.throws(()=>scalpAck({fill_count:'2.01',remaining_count:'0'},p));
+  assert.throws(()=>scalpAck({fill_count:'1.55',remaining_count:'.45'},p));
+});
+test('fractional late fill appends to the holding, preserves spend, and sells exact fractional quantity',async()=>{
+  for(const side of ['yes','no']){
+    const f=stagedFixture(side);f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));
+    f.stage(119,.95);
+    f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:'fractional',fill_count:'2.55',remaining_count:'0',average_fill_price:body.price,average_fee_paid:'.002'};};
+    await f.executor.tick(f.ctx('BTC'));
+    const t=f.state.BTC.activeTrade;
+    assert.equal(t.count,4.55);assert.ok(Math.abs(t.amount-(1.8+2.55*.95))<1e-9);
+    assert.ok(Math.abs(t.entryFees-(.02+2.55*.002))<1e-9);
+    assert.equal(buildSellBody(t.ticker,t.side,t.count).count,'4.55');
+    assert.equal(buildSellBody(t.ticker,t.side,.55).count,'0.55');
+    assert.throws(()=>buildSellBody(t.ticker,t.side,.001));
+  }
+});
+test('persisted uncertain fractional late fill reconciles all fills and settles without another buy',async()=>{
+  for(const side of ['yes','no']){
+    const f=stagedFixture(side);f.stage(119,.95);
+    f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+    await f.executor.tick(f.ctx('BTC'));
+    const saved=structuredClone(f.executor.snapshot()),p=saved.pending;
+    saved.pending.orderId='fractional-order';
+    f.api.getOrder=async()=>({order_id:'fractional-order',status:'canceled',fill_count_fp:'1.55'});
+    f.api.getAllFills=async()=>[.10,.20,1.25].map((qty,i)=>({fill_id:`f-${i}`,order_id:'fractional-order',book_side:p.body.side,
+      count_fp:qty.toFixed(2),yes_price_dollars:side==='yes'?'.95':'.05',no_price_dollars:side==='no'?'.95':'.05',fee_cost:'.001'}));
+    const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+    restored.restore(saved);await restored.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade.count,1.55);assert.equal(restored.snapshot().pending,null);
+    assert.equal(f.requests.length,1);
+    const t=f.state.BTC.activeTrade;
+    f.state.BTC.secsLeft=0;
+    f.api.getPositions=async()=>[];
+    f.api.getAllSettlements=async()=>[{ticker:t.ticker,settled_time:new Date(t.startedAt+1000).toISOString(),market_result:side}];
+    f.api.getMarket=async()=>({status:'finalized',result:side});
+    const settling=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+    settling.restore(structuredClone(restored.snapshot()));await settling.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.state.BTC.tradeCount,1);
+    assert.ok(Math.abs(f.state.BTC.totalPnL-(1.55-1.55*.95-.003))<1e-9);
+    assert.equal(f.requests.length,1);
+  }
+});
+test('fractional scalp exit and manual reductions preserve fractional remainders',async()=>{
+  const f=fixture();setEntryBook(f,'yes',.11);await f.executor.tick(f.ctx('BTC'));
+  const t=f.state.BTC.activeTrade;
+  f.state.BTC.yesAsk=.21;f.state.BTC.yesBid=.20;
+  f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:`exit-${f.requests.length}`,fill_count:f.requests.length===2?'0.55':body.count,
+    remaining_count:'0',average_fill_price:'.20',average_fee_paid:'.01'};};
+  await f.executor.tick(f.ctx('BTC'));assert.equal(t.count,6.45);
+  const body=buildSellBody(t.ticker,t.side,t.count);assert.equal(body.count,'6.45');
+  const held=remainingHeldContracts([{ticker:t.ticker,position_fp:'6.20'}],t);
+  assert.equal(held,6.2);
+  const reduction=reconcileManualExit(t,held,[manualFill(t,.25,.20,.001)]);
+  assert.equal(reduction.sold,.25);
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.state.BTC.tradeCount,1);
+});
+test('overfilled order counts and missing fractional fills keep the pending lock',async()=>{
+  for(const reason of ['overfill','missing']){
+    const f=stagedFixture();f.stage(179,.90);
+    f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+    await f.executor.tick(f.ctx('BTC'));
+    const p=f.executor.snapshot().pending;
+    f.api.getOrders=async()=>[{order_id:'bad',client_order_id:p.body.client_order_id,status:'canceled',fill_count_fp:reason==='overfill'?'2.01':'1.55'}];
+    f.api.getAllFills=async()=>[{fill_id:'short',order_id:'bad',book_side:p.body.side,count_fp:'1.50',yes_price_dollars:'.90',no_price_dollars:'.10',fee_cost:'.001'}];
+    await f.executor.tick(f.ctx('BTC'));
+    assert.ok(f.executor.snapshot().pending);assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.requests.length,1);
+  }
 });

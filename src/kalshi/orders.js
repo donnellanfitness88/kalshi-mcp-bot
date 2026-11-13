@@ -1,3 +1,4 @@
+import { contractQuantity } from './quantity.js';
 
 import crypto from 'node:crypto';
 import { placeOrder, cancelOrder, getOrders } from './client.js';
@@ -36,8 +37,8 @@ export function buildBuyBody(ticker, bet, amount, yesAsk, yesBid) {
 }
 
 export function buildSellBody(ticker, side, contractsHeld) {
-  const count = Math.floor(contractsHeld);
-  if (!Number.isFinite(contractsHeld) || count < 1) {
+  const count = contractQuantity(contractsHeld);
+  if (count <= 0) {
     throw new Error(`Invalid contracts held: ${contractsHeld}`);
   }
   if (side !== 'yes' && side !== 'no') {

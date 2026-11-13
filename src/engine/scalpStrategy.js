@@ -1,3 +1,4 @@
+import { validQuantity, addQuantity } from '../kalshi/quantity.js';
 
 import { getAllFills, getOrders } from '../kalshi/client.js';
 
@@ -56,7 +57,7 @@ export function evaluateScalpProfit({
     entryPrice >= 1 ||
     exitBid < 0 ||
     exitBid > 1 ||
-    !Number.isInteger(contracts) ||
+    !validQuantity(contracts) ||
     contracts <= 0 ||
     entryFees < 0 ||
     exitFees < 0 ||
@@ -260,7 +261,7 @@ export function validateScalpPosition(trade) {
   if (
     !trade.ticker ||
     !['yes', 'no'].includes(trade.side) ||
-    !Number.isInteger(trade.count) ||
+    !validQuantity(trade.count) ||
     trade.count <= 0
   ) {
     return { valid: false, reason: 'INVALID_POSITION' };
@@ -304,7 +305,7 @@ export function createScalpPosition({
   if (
     !ticker ||
     !['UP', 'DOWN'].includes(direction) ||
-    !Number.isInteger(confirmedContracts) ||
+    !validQuantity(confirmedContracts) ||
     confirmedContracts <= 0 ||
     !Number.isFinite(averageFillPrice) ||
     averageFillPrice <= 0 ||
@@ -402,7 +403,7 @@ export function calculateScalpExecution(fills) {
     const { contracts: qty, price, fee } = fill;
 
     if (
-      !Number.isInteger(qty) ||
+      !validQuantity(qty) ||
       qty <= 0 ||
       !Number.isFinite(price) ||
       price <= 0 ||
@@ -413,7 +414,7 @@ export function calculateScalpExecution(fills) {
       throw new Error('Invalid SCALP execution record');
     }
 
-    contracts += qty;
+    contracts = addQuantity(contracts, qty);
     grossCost += qty * price;
     entryFees += fee;
   }
@@ -467,7 +468,7 @@ export function normalizeKalshiScalpFills(fills, side) {
     const fee = Number(rawFee);
 
     if (
-      !Number.isSafeInteger(contracts) ||
+      !validQuantity(contracts) ||
       contracts <= 0 ||
       !Number.isFinite(price) ||
       price <= 0 ||
@@ -497,7 +498,7 @@ export async function reconcileScalpEntry({
   }
 
   if (
-    !Number.isSafeInteger(expectedContracts) ||
+    !validQuantity(expectedContracts) ||
     expectedContracts <= 0
   ) {
     throw new Error('Invalid expected contract count');

@@ -1,3 +1,4 @@
+import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -70,11 +71,15 @@ function decimal(raw, field) {
   }
   return Number(raw);
 }
+function counted(raw, field) {
+  try { return contractQuantity(raw); }
+  catch { throw new Error(`Invalid ${field}: ${String(raw)}`); }
+}
 // V2 prices refer to the YES book for both bid and ask orders.
 export function scalpAck(result, pending) {
-  const count = decimal(result?.fill_count, 'fill_count');
-  const remaining = decimal(result?.remaining_count, 'remaining_count');
-  if (!Number.isSafeInteger(count) || count > Number(pending.body.count) || remaining !== 0) {
+  const count = counted(result?.fill_count, 'fill_count');
+  const remaining = counted(result?.remaining_count, 'remaining_count');
+  if (quantityUnits(count) > quantityUnits(pending.body.count) || remaining !== 0) {
     throw new Error('Nonterminal or invalid SCALP response');
   }
   if (!count) return { count: 0, price: 0, fees: 0 };
@@ -94,6 +99,7 @@ export function createScalpExecutor(deps = {}) {
   let busy = false;
   let pending = null;
   let lastAttempt = 0;
+  let nextReconcileAt = 0;
   let lateEntryTickers = [];
   let lateStages = {};
   const settlementPolls = new Map();
@@ -128,7 +134,7 @@ export function createScalpExecutor(deps = {}) {
       }
       let next;
       if (old) {
-        const count = old.count + fill.count;
+        const count = addQuantity(old.count, fill.count);
         const amount = old.amount + fill.count * fill.price;
         next = { ...old, count, amount, entrySidePrice: amount / count,
           entryFees: old.entryFees + fill.fees, maxProfit: count - amount,
@@ -175,7 +181,7 @@ export function createScalpExecutor(deps = {}) {
       const net = fill.count * (fill.price - trade.entrySidePrice) - allocatedFees - fill.fees;
       trade.realizedNet += net;
       trade.entryFees -= allocatedFees;
-      trade.count -= fill.count;
+      trade.count = subtractQuantity(trade.count, fill.count);
       trade.amount = trade.count * trade.entrySidePrice;
       trade.maxProfit = trade.count * (1 - trade.entrySidePrice);
       if (trade.sim) shared.paperBalance += net;
@@ -245,9 +251,17 @@ export function createScalpExecutor(deps = {}) {
     if (p.orderId) order = await api.getOrder(p.orderId);
     else order = (await api.getOrders({ ticker: p.body.ticker })).find(o => o.client_order_id === p.body.client_order_id);
     if (!order || !['executed', 'canceled'].includes(order.status)) throw new Error('Order remains unverified; no retry');
+    if (!order.order_id || (p.orderId && order.order_id !== p.orderId) ||
+        (order.client_order_id && order.client_order_id !== p.body.client_order_id) ||
+        (order.ticker && order.ticker !== p.body.ticker) ||
+        (order.book_side && order.book_side !== p.body.side)) {
+      throw new Error('Reconciled order identity mismatch');
+    }
     p.orderId = order.order_id;
-    const count = decimal(order.fill_count_fp, 'fill_count_fp');
-    if (!Number.isSafeInteger(count) || count > Number(p.body.count)) throw new Error('Invalid reconciled count');
+    const count = counted(order.fill_count_fp, 'fill_count_fp');
+    if (quantityUnits(count) > quantityUnits(p.body.count)) {
+      throw new Error(`Invalid reconciled count: filled=${order.fill_count_fp}, requested=${p.body.count}, order=${order.order_id}`);
+    }
     if (!count) { applyFill(p, { count: 0, price: 0, fees: 0 }); return; }
     const fills = (await api.getAllFills({ ticker: p.body.ticker })).filter(f => f.order_id === order.order_id);
     const seen = new Set();
@@ -257,10 +271,10 @@ export function createScalpExecutor(deps = {}) {
       if (!id || seen.has(id)) throw new Error('Missing or duplicate fill identifier');
       seen.add(id);
       if (f.book_side !== p.body.side) throw new Error('Fill book side mismatch');
-      const qty = decimal(f.count_fp, 'count_fp');
+      const qty = counted(f.count_fp, 'count_fp');
       const price = decimal(p.side === 'yes' ? f.yes_price_dollars : f.no_price_dollars, 'fill price');
-      if (!Number.isSafeInteger(qty) || qty <= 0 || price <= 0 || price >= 1) throw new Error('Invalid fill');
-      quantity += qty; gross += qty * price; fees += decimal(f.fee_cost, 'fee_cost');
+      if (qty <= 0 || price <= 0 || price >= 1) throw new Error('Invalid fill');
+      quantity = addQuantity(quantity, qty); gross += qty * price; fees += decimal(f.fee_cost, 'fee_cost');
     }
     if (quantity !== count) throw new Error('Fills not fully available; no retry');
     applyFill(p, { count, price: gross / quantity, fees });
@@ -568,7 +582,11 @@ export function createScalpExecutor(deps = {}) {
     if (busy) return;
     busy = true;
     try {
-      if (pending) { await reconcile(); return; }
+      if (pending) {
+        if (Date.now() < nextReconcileAt) return;
+        nextReconcileAt = Date.now() + 3000;
+        await reconcile(); return;
+      }
       if (isManagedTrade(ctx.s.activeTrade) && !ctx.s.activeTrade.sim &&
           Date.now() - (manualPolls.get(ctx.asset) ?? 0) >= 5000) {
         manualPolls.set(ctx.asset, Date.now());
@@ -581,7 +599,10 @@ export function createScalpExecutor(deps = {}) {
       else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else await enter(ctx);
     } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', error: error.message,
-      clientOrderId: pending?.body.client_order_id }); }
+      clientOrderId: pending?.body.client_order_id,
+      ...(pending ? { orderId: pending.orderId, requested: pending.body.count,
+        responseFillCount: pending.response?.fill_count,
+        responseRemainingCount: pending.response?.remaining_count } : {}) }); }
     finally { busy = false; }
   }
   return { tick, restore, snapshot };

@@ -159,3 +159,21 @@ proof is exact-id only and cannot clear other missing orders. Timeouts,
 429/5xx, conflicting exchange records and incomplete evidence remain blocked.
 
 Execution reference: https://docs.kalshi.com/api-reference/orders/create-order-v2
+
+## Fractional fill reconciliation
+
+Entry sizing still requests whole contracts with the existing budgets. Exchange
+fills may nevertheless contain hundredths of a contract. Quantities are parsed
+as exact integer hundredths, and partial fills, holdings, manual reductions,
+exit orders and settlement preserve those quantities without flooring.
+
+On restart, the pending journal is reconciled against its terminal order and
+all uniquely identified fills. The fill sum must exactly match the order's
+filled quantity and cannot exceed the request. Missing fills, mismatched order
+identity, unsupported precision, or overfills retain the pending lock. No
+journal deletion or speculative clearing is performed. Pending reconciliation
+is polled at most once every three seconds; count errors include the requested
+and returned counts for diagnosis. Prices, budgets and strategy rules do not
+change.
+
+Reference: https://docs.kalshi.com/getting_started/fixed_point_migration.md
