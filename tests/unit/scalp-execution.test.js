@@ -472,7 +472,7 @@ test('losses greater than $5 do not trigger a sale when the stop is disabled', a
   assert.equal(f.state.BTC.activeTrade,t);
 });
 
-test('scalp can remain open past 45 seconds and into late-entry period without overlap', async () => {
+test('early scalp can coexist with opposite-coin late entry past 45 seconds', async () => {
   const f = fixture(); await f.executor.tick(f.ctx('BTC'));
   const trade = f.state.BTC.activeTrade;
   trade.startedAt = Date.now() - 120000;
@@ -481,7 +481,8 @@ test('scalp can remain open past 45 seconds and into late-entry period without o
   await f.executor.tick(f.ctx('BTC'));
   await f.executor.tick(f.ctx('ETH'));
   assert.equal(f.state.BTC.activeTrade, trade);
-  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.state.ETH.activeTrade.mode, 'LATE_SETTLEMENT');
 });
 test('long-held scalp still refreshes stale quotes instead of using the disabled timer', async () => {
   const f = fixture(); await f.executor.tick(f.ctx('BTC'));
@@ -1148,4 +1149,71 @@ test('partial exits retain the original net profit goal rather than resetting it
   const net=accounting.realizedNet+3*(target-.20)-accounting.entryFees-accounting.exitFees;
   assert.ok(net+1e-9>=.50*accounting.originalCost);
   assert.ok(net-.03<.50*accounting.originalCost);
+});
+
+function lateOther(f, asset, seconds=179, price=.90, side='yes') {
+  Object.assign(f.state[asset], {secsLeft:seconds, yesAsk:side==='yes'?price:1-price+.01,
+    yesBid:side==='yes'?price-.01:1-price,lastQuoteMessageTs:Date.now()});
+}
+test('either coin early scalp permits the other coin late stages and survives journal restore',async()=>{
+  for(const scalpAsset of ['BTC','ETH']) for(const side of ['yes','no']) {
+    const f=stagedFixture(); const lateAsset=scalpAsset==='BTC'?'ETH':'BTC';
+    await f.executor.tick(f.ctx(scalpAsset)); const scalp=f.state[scalpAsset].activeTrade;
+    for(const [seconds,price] of [[179,.90],[119,.95],[59,.97]]) {
+      f.advanceRetry(); lateOther(f,lateAsset,seconds,price,side);
+      await f.executor.tick(f.ctx(lateAsset));
+    }
+    assert.equal(f.requests.length,4);
+    assert.equal(f.state[scalpAsset].activeTrade,scalp);
+    assert.equal(f.state[lateAsset].activeTrade.count,79);
+    assert.equal(f.state[lateAsset].activeTrade.side,side);
+    assert.ok(f.executor.snapshot().lateStages[f.state[lateAsset].ticker].spent<=77);
+    const saved=structuredClone(f.executor.snapshot());
+    f.state.BTC.activeTrade=null;f.state.ETH.activeTrade=null;
+    f.executor.restore(saved);
+    assert.equal(f.state[scalpAsset].activeTrade.mode,'SCALP');
+    assert.equal(f.state[lateAsset].activeTrade.mode,'LATE_SETTLEMENT');
+    assert.ok(f.state[scalpAsset].activeTrade.originalCost<=1);
+  }
+});
+test('opposite-coin late entry rejects unexpected, mismatched or resting account exposure',async()=>{
+  for(const issue of ['unexpected','missing','reversed','increased','malformed','resting']) {
+    const f=stagedFixture();await f.executor.tick(f.ctx('BTC'));
+    const t=f.state.BTC.activeTrade;
+    f.api.getPositions=async()=>issue==='missing'?[]:[{ticker:t.ticker,position_fp:
+      issue==='reversed'?String(-t.count):issue==='increased'?String(t.count+1):issue==='malformed'?'':String(t.count)},
+      ...(issue==='unexpected'?[{ticker:'UNKNOWN',position_fp:'1'}]:[])];
+    if(issue==='resting')f.api.getOrders=async()=>[{ticker:t.ticker,status:'resting'}];
+    lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
+    assert.equal(f.requests.length,1,issue);
+  }
+});
+test('late scalp and mixed simulation holdings do not qualify for cross-coin exception',async()=>{
+  for(const issue of ['lateScalp','mixedSim']){
+    const f=stagedFixture(); await f.executor.tick(f.ctx('BTC'));
+    if(issue==='lateScalp')f.state.BTC.activeTrade.entrySecondsRemaining=100;
+    else f.state.BTC.activeTrade.sim=true;
+    lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
+    assert.equal(f.requests.length,1);
+  }
+});
+test('early scalp profit exit preserves opposite late holding and its stage ledger',async()=>{
+  const f=stagedFixture();await f.executor.tick(f.ctx('BTC'));
+  lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
+  const late=f.state.ETH.activeTrade;const ledger=structuredClone(f.executor.snapshot().lateStages);
+  const t=f.state.BTC.activeTrade;
+  Object.assign(f.state.BTC,{yesBid:targetFor(t),yesAsk:targetFor(t)+.01,lastQuoteMessageTs:Date.now()});
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade,null);
+  assert.equal(f.state.ETH.activeTrade,late);
+  assert.deepEqual(f.executor.snapshot().lateStages,ledger);
+  // A new scalp cannot start alongside the existing late holding.
+  setEntryBook(f,'yes',.21);await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,3);
+});
+test('legacy early scalp qualifies without rewriting its holding',async()=>{
+  const f=stagedFixture();await f.executor.tick(f.ctx('BTC'));
+  delete f.state.BTC.activeTrade.entrySecondsRemaining;
+  lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
+  assert.equal(f.requests.length,2);
 });

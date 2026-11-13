@@ -145,7 +145,7 @@ export function createScalpExecutor(deps = {}) {
           confirmedContracts: fill.count, averageFillPrice: fill.price, entryFees: fill.fees,
           estimatedExitFees: reserveFee(fill.count), startedAt: p.startedAt }),
           mode: p.mode ?? 'SCALP', entryOrderId: p.orderId, entryOrderIds: p.orderId ? [p.orderId] : [],
-          sim: p.sim, realizedNet: 0, originalCost: cost };
+          sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
       const stageLimit = SCALP_CONFIG.lateStages.find(stage => stage.id === p.stageId)?.budget;
@@ -329,15 +329,29 @@ export function createScalpExecutor(deps = {}) {
         !Number.isFinite(Number(p.position_fp)) || Number(p.position_fp) !== 0)) return false;
     return (await api.getOrders({ status: 'resting' })).length === 0;
   }
+  // The sole cross-coin exception is a late position alongside an early scalp.
+  function compatibleHoldings(s, mode, sim) {
+    const held = s.activeTrade;
+    if (held && (mode !== 'LATE_SETTLEMENT' || held.mode !== mode ||
+        held.ticker !== s.ticker || held.sim !== sim)) return false;
+    return assets().every(a => !a.activeTrade || a === s ||
+      (mode === 'LATE_SETTLEMENT' && a.activeTrade.mode === 'SCALP' &&
+       a.activeTrade.sim === sim &&
+       (a.activeTrade.entrySecondsRemaining > 480 ||
+        // Legacy early holdings lack the timestamp field. Their price band
+        // distinguishes them from final-minute scalps, which enter above 70c.
+        (a.activeTrade.entrySecondsRemaining == null && a.activeTrade.entrySidePrice <= .70))));
+  }
   async function accountMatches(trade, sim) {
     if (sim) return true;
     const positions = await api.getPositions();
-    if (!trade) return positions.every(p => ['string','number'].includes(typeof p.position_fp) &&
-      String(p.position_fp).trim() !== '' && Number(p.position_fp) === 0) &&
-      (await api.getOrders({ status: 'resting' })).length === 0;
-    if (remainingHeldContracts(positions, trade) !== trade.count || positions.some(p =>
-        p.ticker !== trade.ticker && (!['string','number'].includes(typeof p.position_fp) ||
-          String(p.position_fp).trim() === '' || Number(p.position_fp) !== 0))) return false;
+    const tracked = assets().map(a => a.activeTrade).filter(Boolean);
+    if (trade && !tracked.includes(trade)) return false;
+    if (tracked.some(t => !isManagedTrade(t) || t.sim !== sim ||
+        remainingHeldContracts(positions, t) !== t.count)) return false;
+    if (positions.some(p => !['string','number'].includes(typeof p.position_fp) ||
+        String(p.position_fp).trim() === '' || !Number.isFinite(Number(p.position_fp)) ||
+        (Number(p.position_fp) !== 0 && !tracked.some(t => t.ticker === p.ticker)))) return false;
     return (await api.getOrders({ status: 'resting' })).length === 0;
   }
   function entrySignal(s, mode) {
@@ -387,15 +401,13 @@ export function createScalpExecutor(deps = {}) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
     const held = s.activeTrade;
-    if (assets().some(a => a.activeTrade && a.activeTrade !== held) ||
-        (held && (held.mode !== 'LATE_SETTLEMENT' || held.ticker !== s.ticker)) ||
-        Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
+    if (Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
     if (Date.now() - Math.max(...assets().map(a => a.lastExitTime || 0)) < SCALP_CONFIG.reentryCooldownMs) return;
     const mode = selectedEntryMode(s);
     if (!['SCALP', 'LATE_SETTLEMENT'].includes(mode) || !s.ticker || (held && mode !== 'LATE_SETTLEMENT')) return;
     const ticker = s.ticker;
     const sim = simulated();
-    if (held && held.sim !== sim) return;
+    if (!compatibleHoldings(s, mode, sim)) return;
     s._simMode = sim;
     if (checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' }).blocked) return;
     const signal = entrySignal(s, mode);
@@ -409,7 +421,7 @@ export function createScalpExecutor(deps = {}) {
     if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
     // Revalidate the actual close time, ticker and quote after slow account reads.
-    if (s.activeTrade !== held || assets().some(a => a.activeTrade && a.activeTrade !== held) ||
+    if (s.activeTrade !== held || !compatibleHoldings(s, mode, sim) ||
         s.ticker !== ticker || selectedEntryMode(s) !== mode) return;
     const fresh = entrySignal(s, mode);
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
@@ -420,7 +432,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) return;
     // The final account check may cross a time tier or receive a changed quote.
     const final = entrySignal(s, mode);
-    if (s.ticker !== ticker || s.activeTrade !== held || !final.shouldEnter ||
+    if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
         (final.direction === 'UP' ? s.yesAsk : 1 - s.yesBid) !== price) return;
     if (!count || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price))) return;
@@ -429,7 +441,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
-      stageId: fresh.stage?.id, stageBudget, direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+      stageId: fresh.stage?.id, stageBudget, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
   async function reconcileExternal(ctx, suppliedPositions) {
     const { asset, s } = ctx;

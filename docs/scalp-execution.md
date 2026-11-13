@@ -8,8 +8,13 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 - Every scalp entry has a maximum $1 budget including the fee reserve,
   limited by available cash and whole contracts. The existing timing and momentum checks stay in place. There is still no
   per-trade stop or maximum hold. Existing holdings are not resized.
-  One position or unresolved order is allowed across BTC and ETH, with additions
-  allowed only to the same late holding. Early entries require more than
+  An early scalp may coexist with a late settlement position on the other coin.
+  New scalps remain blocked while any other position is open; two late positions
+  are not allowed. Additions remain restricted to the same late holding.
+  One unresolved order blocks all new submissions until reconciled.
+  The combined entry budgets can reach $78 ($1 scalp plus $77 late stages),
+  bounded by available cash. All live account holdings must match both tracked
+  positions exactly; unexpected holdings or resting orders still block entries. Early entries require more than
   480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
   Early entries allow either side at 16–25 cents inclusive, plus the existing
@@ -52,7 +57,8 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 - Existing scalps are not closed solely for passing the 480-second boundary.
   Existing trades receive the current fee-aware profit rules after deploy;
   entry-band restrictions apply to new orders, not forced liquidation.
-- An open scalp continues to block the late settlement entry. It exits at its
+- An open scalp blocks late entries on its own coin. An early scalp permits
+  late settlement entries on the other coin only. It exits at its
   profit target, or is reconciled against its actual
   settlement if held through market expiry. After rollover, it retains its
   original ticker and cannot use the new market quote for its exit.
