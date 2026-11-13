@@ -459,7 +459,7 @@ export async function startClock() {
   // Restore our journal before servicing scalp orders. Existing account holdings
   // block new entries; do not liquidate unrelated positions during scalp startup.
   restoreScalpExecution();
-  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; scalp budget=$1 including fee reserve; one position across BTC/ETH except same-side late stages; early entries >480s YES<15c targeting20c or either55-70c; higher scalps >70c and <97c only <120s; late stages: $2>=90c/<180s, $25>=95c/<120s, $50>=97c/<60s; combined cap=$77 including fees; late IOC partial fills with remaining-budget retries >=3s; scalp stop=disabled; reentry wait=0; contract-price profit targets');
+  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; scalp budget=$1 including fee reserve; one position across BTC/ETH except same-side late stages; early entries >480s YES<15c or either16-25c; entries<=20c target 50% net return after entry fees and reserved exit fees; higher scalps >70c and <97c only <120s; late stages: $2>=90c/<180s, $25>=95c/<120s, $50>=97c/<60s; combined cap=$77 including fees; late IOC partial fills with remaining-budget retries >=3s; scalp stop=disabled; reentry wait=0; fee-aware low-price targets and existing higher-price targets');
   // Legacy startup handling applies only outside scalp mode.
   if (process.env.SCALP_ENABLED !== 'true') try {
     const positions = await getPositions();

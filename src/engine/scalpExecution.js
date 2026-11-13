@@ -552,7 +552,9 @@ export function createScalpExecutor(deps = {}) {
     if ([ask, bid].every(Number.isFinite) && bid >= 0 && ask <= 1 && ask >= bid) {
       const profit = evaluateScalpProfit({ entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask,
         contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count) });
-      decision = evaluateScalpExit({ heldSeconds, side: trade.side, entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask });
+      decision = evaluateScalpExit({ heldSeconds, side: trade.side, entryPrice: trade.entrySidePrice, exitBid: trade.side === 'yes' ? bid : 1 - ask,
+        accounting: { contracts: trade.count, entryFees: trade.entryFees, exitFees: reserveFee(trade.count),
+          originalCost: trade.originalCost ?? trade.amount + trade.entryFees, realizedNet: trade.realizedNet ?? 0 } });
       // Include already-realized partial exits so repeated partial sales cannot
       // reset a configured per-trade loss budget (currently disabled).
       if (Number.isFinite(SCALP_CONFIG.maxLossUsd) && (trade.realizedNet ?? 0) + profit.netProfit <= -SCALP_CONFIG.maxLossUsd) {

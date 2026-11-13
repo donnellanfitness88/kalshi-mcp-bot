@@ -6,18 +6,23 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 ## Current scalp rules
 
 - Every scalp entry has a maximum $1 budget including the fee reserve,
-  limited by available cash and whole contracts. All existing entry eligibility,
-  timing, momentum checks and price targets stay in place. There is still no
+  limited by available cash and whole contracts. The existing timing and momentum checks stay in place. There is still no
   per-trade stop or maximum hold. Existing holdings are not resized.
   One position or unresolved order is allowed across BTC and ETH, with additions
   allowed only to the same late holding. Early entries require more than
   480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
-  Early entries allow YES below 15 cents, or either side at 55–70 cents inclusive.
-  Cheap NO entries are blocked. When YES is below 40 cents and falling,
-  the existing downward momentum signal can buy NO, subject to its own
-  executable 55–70-cent purchase price and the existing timing gates.
-  A YES purchase below 15 cents targets a 20-cent executable bid.
+  Early entries allow either side at 16–25 cents inclusive, plus the existing
+  YES-only exception below 15 cents. The former 55–70-cent band is removed.
+  NO entries below 15 cents remain blocked. Both sides still require positive
+  momentum in the purchased contract, measured with the existing signal checks.
+  Scalp entries at or below 20 cents target 50% net profit on actual original
+  entry cost including actual entry fees; they do not simply multiply the
+  displayed purchase price by 1.5. The exit price includes remaining entry cost,
+  remaining entry fees, a conservative exit-fee reserve, and previously realized
+  net partial-sale results. It rounds upward to the next whole-cent price.
+  For example, an actual total $1 entry cost targets at least $0.50 estimated
+  net trade profit after the exit fee reserve. Actual fills/fees determine P&L.
   Higher-priced scalps (above 70 and below 97 cents) are allowed only with
   strictly less than 120 seconds remaining. They retain momentum confirmation
   and scalp profit targets. Prices >=97 cents remain reserved for late settlement. Qualifying staged
@@ -30,8 +35,8 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 | Actual entry price | Target contract bid |
 | --- | --- |
-| YES below 15 cents | 20 cents |
-| Other entries below 80 cents | Entry plus 5 cents |
+| Entry at or below 20 cents | Fee-aware price for 50% net return on original cost |
+| Entries above 20 and below 80 cents | Entry plus 5 cents |
 | 80 to below 90 cents | 90 cents |
 | 90 to below 97 cents | 97 cents |
 
@@ -45,7 +50,7 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
   retried only while the target remains executable; otherwise the position
   stays managed until another target opportunity or settlement.
 - Existing scalps are not closed solely for passing the 480-second boundary.
-  Existing trades still receive the current price-target rules after deploy;
+  Existing trades receive the current fee-aware profit rules after deploy;
   entry-band restrictions apply to new orders, not forced liquidation.
 - An open scalp continues to block the late settlement entry. It exits at its
   profit target, or is reconciled against its actual

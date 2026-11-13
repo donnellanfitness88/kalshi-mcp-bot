@@ -15,10 +15,10 @@ function fixture(direction = 'UP', sim = false) {
   const asset = () => ({ activeTrade: null, farmArmed: true, lastExitTime: 0, lastLossTime: 0,
     consecutiveLosses: 0, sessionStartBalance: 100, dailyStartBalance: 100,
     sessionPnL: 0, dailyPnL: 0, totalPnL: 0, tradeCount: 0, secsLeft: 600,
-    ticker: 'BTC-TEST', yesAsk: direction === 'UP' ? 0.67 : 0.39, yesBid: direction === 'UP' ? 0.66 : 0.38, lastQuoteMessageTs: now,
+    ticker: 'BTC-TEST', yesAsk: direction === 'UP' ? 0.21 : 0.81, yesBid: direction === 'UP' ? 0.20 : 0.80, lastQuoteMessageTs: now,
     yesPriceHistory: Array.from({ length: 61 }, (_, i) => ({
       ts: now - 6000 + i * 100,
-      price: direction === 'UP' ? 0.635 + 0.03 * i / 60 : 0.415 - 0.03 * i / 60
+      price: direction === 'UP' ? 0.175 + 0.03 * i / 60 : 0.835 - 0.03 * i / 60
     })) });
   const state = { BTC: asset(), ETH: { ...asset(), ticker: 'ETH-TEST' }, simMode: sim, paperBalance: 50, disabledAssets: [] };
   const requests = [], logs = [];
@@ -37,6 +37,10 @@ function fixture(direction = 'UP', sim = false) {
   const ctx = asset => ({ asset, s: state[asset], balance: 100 });
   return { advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
 }
+function targetFor(t) {
+  return scalpTakeProfitPrice(t.entrySidePrice,t.side,{contracts:t.count,entryFees:t.entryFees,
+    exitFees:reserveFee(t.count),originalCost:t.originalCost,realizedNet:t.realizedNet??0});
+}
 test('all entry sizes include fee reserve within $10, including low balances', () => {
   for (const balance of [0, 0.01, 0.5, 3, 10, 100]) {
     for (let cents = 1; cents < 100; cents++) {
@@ -52,7 +56,7 @@ test('UP and DOWN use confirmed count and YES book price conversion', async () =
     assert.equal(f.requests.length, 1);
     const t = f.state.BTC.activeTrade;
     assert.equal(t.side, direction === 'UP' ? 'yes' : 'no');
-    assert.ok(Math.abs(t.entrySidePrice - (direction === 'UP' ? 0.67 : 0.62)) < 1e-9);
+    assert.ok(Math.abs(t.entrySidePrice - (direction === 'UP' ? 0.21 : 0.20)) < 1e-9);
     assert.ok(t.amount + t.entryFees <= 10);
     assert.equal(f.requests[0].time_in_force, 'fill_or_kill');
     assert.equal(f.saved().pending, null);
@@ -104,7 +108,7 @@ test('partial exits retain position and allocate actual fees; final close record
   await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade, originalCount = t.count;
   t.startedAt = Date.now() - 46000;
-  f.state.BTC.yesBid = scalpTakeProfitPrice(t.entrySidePrice,t.side);
+  f.state.BTC.yesBid = targetFor(t);
   f.state.BTC.yesAsk = f.state.BTC.yesBid + 0.01;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
   f.api.placeOrder = async body => {
@@ -165,7 +169,7 @@ test('missing exit fill data retains the holding and prevents duplicate sales', 
   await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade;
   t.startedAt = Date.now() - 46000;
-  f.state.BTC.yesBid = scalpTakeProfitPrice(t.entrySidePrice,t.side);
+  f.state.BTC.yesBid = targetFor(t);
   f.state.BTC.yesAsk = f.state.BTC.yesBid + 0.01;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
   f.api.placeOrder = async body => { f.requests.push(body); return { order_id: 'uncertain-exit' }; };
@@ -188,7 +192,7 @@ test('no scalp buys inside 8 minutes, including the 90-second buffer', async () 
     assert.equal(f.requests.length, 0);
   }
 });
-test('open scalp stays held below 480 seconds despite a loss greater than five dollars', async () => {
+test('open scalp stays held below 480 seconds while losing', async () => {
   const f = fixture();
   await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade;
@@ -196,7 +200,7 @@ test('open scalp stays held below 480 seconds despite a loss greater than five d
   f.state.BTC.secsLeft = 170;
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 1);
-  f.state.BTC.yesBid = 0.30; f.state.BTC.yesAsk = 0.31;
+  f.state.BTC.yesBid = 0.10; f.state.BTC.yesAsk = 0.11;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(t.count) }];
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 1);
@@ -205,7 +209,7 @@ test('open scalp stays held below 480 seconds despite a loss greater than five d
 test('loss under $5 does not stop a young scalp and profit exits are retained', async () => {
   const f = fixture(); await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade;
-  f.state.BTC.yesBid = 0.46; f.state.BTC.yesAsk = 0.47;
+  f.state.BTC.yesBid = 0.10; f.state.BTC.yesAsk = 0.11;
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 1);
   assert.equal(f.state.BTC.activeTrade, t);
@@ -339,14 +343,14 @@ test('partial manual sale preserves remaining position, fees and previously real
   const f = fixture(); setEntryBook(f,'yes',.11); await f.executor.tick(f.ctx('BTC'));
   const t = f.state.BTC.activeTrade, n = t.count, fees = t.entryFees;
   f.api.getPositions = async () => [{ ticker: t.ticker, position_fp: String(n - 3) }];
-  f.api.getAllFills = async () => [manualFill(t, 3)];
+  f.api.getAllFills = async () => [manualFill(t, 3, .13)];
   f.api.getOrder = async () => manualOrder(t, 3);
   await f.executor.tick(f.ctx('BTC'));
   const remaining = f.state.BTC.activeTrade;
   assert.equal(remaining.count, n - 3);
   assert.ok(Math.abs(remaining.entryFees - fees * (n - 3) / n) < 1e-9);
   assert.equal(f.state.BTC.tradeCount, 0);
-  assert.ok(Math.abs(remaining.realizedNet - (3 * (0.50 - t.entrySidePrice) - fees * 3 / n - 0.05)) < 1e-9);
+  assert.ok(Math.abs(remaining.realizedNet - (3 * (0.13 - t.entrySidePrice) - fees * 3 / n - 0.05)) < 1e-9);
   const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
   restored.restore(f.saved());
   await restored.tick(f.ctx('BTC'));
@@ -413,7 +417,7 @@ test('an increased or opposite holding is not mistaken for a manual sale', async
 });
 test('early price bands include 55 and 70 cents and reject expensive entries', () => {
   for (const price of [0.11,0.30,0.399,0.40,0.496,0.549,0.701,0.78,0.80,0.97,0.99,0,NaN]) assert.equal(scalpEntryPriceAllowed(price), false);
-  for (const price of [0.55,0.60,0.65,0.70]) assert.equal(scalpEntryPriceAllowed(price), true);
+  for (const price of [0.16,0.20,0.21,0.25]) assert.equal(scalpEntryPriceAllowed(price), true);
 });
 function setEntryBook(f, side, price) {
   const s = f.state.BTC, now = Date.now();
@@ -425,14 +429,14 @@ function setEntryBook(f, side, price) {
     price: mid + (side === 'yes' ? -1 : 1) * 0.03 * (1-i/60)}));
 }
 test('live entry path blocks the purchased YES or NO contract in the excluded band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.15,0.30,0.39,0.40,0.496,0.549,0.701,0.78,0.80]) {
+  for (const side of ['yes','no']) for (const price of [0.15,0.155,0.251,0.30,0.39,0.40,0.55,0.60,0.69,0.70,0.701,0.78,0.80]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,0);
   }
 });
 test('live entry path permits both sides outside the band', async () => {
-  for (const side of ['yes','no']) for (const price of [0.55,0.60,0.61,0.70]) {
+  for (const side of ['yes','no']) for (const price of [0.16,0.20,0.21,0.25]) {
     const f = fixture(); setEntryBook(f, side, price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,1);
@@ -440,7 +444,7 @@ test('live entry path permits both sides outside the band', async () => {
   }
 });
 test('tiered targets match 70→75, 80→90 and 90→97 without a minimum hold', () => {
-  for (const [entry,target] of [[0.11,0.16],[0.61,0.66],[0.70,0.75],[0.80,0.90],[0.90,0.97]]) {
+  for (const [entry,target] of [[0.21,0.26],[0.61,0.66],[0.70,0.75],[0.80,0.90],[0.90,0.97]]) {
     assert.equal(scalpTakeProfitPrice(entry),target);
     assert.equal(evaluateScalpExit({heldSeconds:1,entryPrice:entry,exitBid:target-0.001}).shouldExit,false);
     assert.equal(evaluateScalpExit({heldSeconds:1,entryPrice:entry,exitBid:target}).reason,'PRICE_TARGET');
@@ -448,10 +452,10 @@ test('tiered targets match 70→75, 80→90 and 90→97 without a minimum hold',
 });
 test('profit exits set an executable-side limit on YES and NO orders', async () => {
   for (const side of ['yes','no']) {
-    const f=fixture(); setEntryBook(f,side,0.70);
+    const f=fixture(); setEntryBook(f,side,0.21);
     await f.executor.tick(f.ctx('BTC'));
     const t=f.state.BTC.activeTrade;
-    const target=scalpTakeProfitPrice(t.entrySidePrice,t.side);
+    const target=targetFor(t);
     Object.assign(f.state.BTC, side==='yes' ? {yesBid:target,yesAsk:target+0.01} : {yesAsk:1-target,yesBid:1-target-0.01});
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,2);
@@ -486,7 +490,7 @@ test('long-held scalp still refreshes stale quotes instead of using the disabled
   f.state.BTC.lastQuoteMessageTs = Date.now() - 5000;
   let reads = 0;
   f.api.getMarket = async ticker => { reads++; assert.equal(ticker, trade.ticker);
-    return { status: 'open', yes_ask_dollars: '0.72', yes_bid_dollars: '0.71' }; };
+    return { status: 'open', yes_ask_dollars: '0.20', yes_bid_dollars: '0.19' }; };
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(reads, 1);
   assert.equal(f.requests.length, 1);
@@ -508,14 +512,14 @@ test('scalp held across rollover reconciles settlement using its original ticker
 });
 test('scalp can buy immediately after a completed profit exit when a dip qualifies again', async () => {
   const f=fixture(); await f.executor.tick(f.ctx('BTC'));
-  const t=f.state.BTC.activeTrade, target=scalpTakeProfitPrice(t.entrySidePrice,t.side);
+  const t=f.state.BTC.activeTrade, target=targetFor(t);
   Object.assign(f.state.BTC,{yesBid:target,yesAsk:target+0.01});
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade,null);
-  setEntryBook(f,'yes',0.67);
+  setEntryBook(f,'yes',0.21);
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,3);
-  assert.equal(f.state.BTC.activeTrade.entrySidePrice,0.67);
+  assert.equal(f.state.BTC.activeTrade.entrySidePrice,0.21);
 });
 test('fixed loss cooldown can be skipped for scalps while ordinary callers retain it', () => {
   const f=fixture(), s=f.state.BTC;
@@ -627,37 +631,33 @@ test('higher-priced scalps unlock strictly below two minutes on either side', as
   }
 });
 test('account reads cannot carry an early entry into the buffer', async () => {
-  const f=fixture(); setEntryBook(f,'yes',0.55);
+  const f=fixture(); setEntryBook(f,'yes',0.21);
   f.api.getBalance=async()=> { f.state.BTC.secsLeft=480; return 10000; };
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,0);
 });
 
-test('cheap YES needs upward momentum and exits at 20 cents rather than entry plus five', async () => {
-  for (const price of [0.05,0.11,0.149]) {
+test('cheap YES waits for fifty percent net profit rather than a fixed twenty-cent exit', async () => {
+  for (const price of [0.04,0.08,0.11,0.149]) {
     const f=fixture(); setEntryBook(f,'yes',price);
     await f.executor.tick(f.ctx('BTC'));
-    assert.equal(f.requests.length,1);
-    assert.equal(f.state.BTC.activeTrade.side,'yes');
-    Object.assign(f.state.BTC,{yesBid:0.19,yesAsk:0.20});
-    await f.executor.tick(f.ctx('BTC'));
-    assert.equal(f.requests.length,1);
-    Object.assign(f.state.BTC,{yesBid:0.20,yesAsk:0.21});
-    await f.executor.tick(f.ctx('BTC'));
-    assert.equal(f.requests.length,2);
-    assert.equal(f.requests[1].price,'0.2000');
-    assert.equal(f.requests[1].reduce_only,true);
+    const t=f.state.BTC.activeTrade,target=targetFor(t);
+    assert.ok(t); assert.ok(target>price*1.5);
+    Object.assign(f.state.BTC,{yesBid:target-.01,yesAsk:target});
+    await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+    Object.assign(f.state.BTC,{yesBid:target,yesAsk:target+.01});
+    await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,2);
+    assert.equal(f.requests[1].price,target.toFixed(4));assert.equal(f.requests[1].reduce_only,true);
+    assert.ok(f.state.BTC.totalPnL+1e-9 >= .5*t.originalCost);
   }
 });
-test('falling YES below 40 cents buys NO at 62 and takes profit at 67', async () => {
-  const f=fixture('DOWN');
-  await f.executor.tick(f.ctx('BTC'));
-  assert.equal(f.state.BTC.activeTrade.side,'no');
-  assert.ok(Math.abs(f.state.BTC.activeTrade.entrySidePrice-0.62)<1e-9);
-  Object.assign(f.state.BTC,{yesAsk:0.33,yesBid:0.32});
-  await f.executor.tick(f.ctx('BTC'));
-  assert.equal(f.requests.length,2);
-  assert.equal(f.requests[1].price,'0.3300');
+test('falling YES permits a lower-priced NO scalp with a net profit target',async()=>{
+  const f=fixture('DOWN');await f.executor.tick(f.ctx('BTC'));
+  const t=f.state.BTC.activeTrade,target=targetFor(t);
+  assert.equal(t.side,'no');assert.ok(Math.abs(t.entrySidePrice-.20)<1e-9);
+  Object.assign(f.state.BTC,{yesAsk:1-target,yesBid:1-target-.01});
+  await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,2);
+  assert.equal(f.requests[1].price,(1-target).toFixed(4));
 });
 test('cheap NO is blocked and a cheap YES without rising momentum cannot enter', async () => {
   const f=fixture(); setEntryBook(f,'no',0.11);
@@ -862,7 +862,7 @@ test('partial manual sale retains stage spend cap and remaining cost before addi
   assert.ok(Math.abs(restored.snapshot().lateStages[t.ticker].spent-74.94)<1e-9);
 });
 test('scalp holdings cannot receive late stages; simulation and live holdings never mix',async()=>{
-  const f=stagedFixture(); setEntryBook(f,'yes',.67); f.state.BTC.secsLeft=600;
+  const f=stagedFixture(); setEntryBook(f,'yes',.21); f.state.BTC.secsLeft=600;
   await f.executor.tick(f.ctx('BTC')); f.stage(179,.10); await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,1); assert.equal(f.state.BTC.activeTrade.mode,'SCALP');
   const g=stagedFixture('yes',true); g.stage(179,.90); await g.executor.tick(g.ctx('BTC'));
@@ -960,14 +960,14 @@ test('all scalp prices use a one-dollar cap including fees and available balance
   }
   for(const price of [NaN,0,-1,1,Infinity])assert.equal(scalpEntryBudget(price),0);
 });
-test('live and simulated cheap YES buys use one dollar with the same twenty-cent target',async()=>{
+test('live and simulated cheap YES buys use one dollar with a fee-aware net target',async()=>{
   for(const sim of [false,true]) for(const [price,budget]of[[.08,1],[.10,1],[.11,1],[.12,1]]) {
     const f=fixture('UP',sim); setEntryBook(f,'yes',price);
     await f.executor.tick(f.ctx('BTC'));
     const t=f.state.BTC.activeTrade;
     assert.ok(t); assert.equal(t.count,scalpSize(price,100));
     assert.ok(t.amount+reserveFee(t.count)<=budget+1e-9);
-    assert.equal(scalpTakeProfitPrice(t.entrySidePrice,t.side),.20);
+    assert.ok(targetFor(t)>t.entrySidePrice*1.5);
   }
 });
 test('scalp sizing uses the revalidated quote when it crosses a cheap-price boundary',async()=>{
@@ -987,8 +987,8 @@ test('late stage sizing supports the new two, twenty-five and fifty dollar budge
 });
 
 test('live scalp entries at low and standard eligible prices never reserve more than one dollar',async()=>{
-  for(const side of ['yes','no'])for(const price of [.08,.11,.12,.55,.61,.70]){
-    if(side==='no' && price<.55)continue;
+  for(const side of ['yes','no'])for(const price of [.08,.11,.12,.16,.20,.21,.25]){
+    if(side==='no' && price<.16)continue;
     const f=fixture();setEntryBook(f,side,price);
     await f.executor.tick(f.ctx('BTC'));
     assert.equal(f.requests.length,1);
@@ -1083,9 +1083,9 @@ test('persisted uncertain fractional late fill reconciles all fills and settles 
 test('fractional scalp exit and manual reductions preserve fractional remainders',async()=>{
   const f=fixture();setEntryBook(f,'yes',.11);await f.executor.tick(f.ctx('BTC'));
   const t=f.state.BTC.activeTrade;
-  f.state.BTC.yesAsk=.21;f.state.BTC.yesBid=.20;
+  const target=targetFor(t);f.state.BTC.yesAsk=target+.01;f.state.BTC.yesBid=target;
   f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:`exit-${f.requests.length}`,fill_count:f.requests.length===2?'0.55':body.count,
-    remaining_count:'0',average_fill_price:'.20',average_fee_paid:'.01'};};
+    remaining_count:'0',average_fill_price:String(target),average_fee_paid:'.01'};};
   await f.executor.tick(f.ctx('BTC'));assert.equal(t.count,6.45);
   const body=buildSellBody(t.ticker,t.side,t.count);assert.equal(body.count,'6.45');
   const held=remainingHeldContracts([{ticker:t.ticker,position_fp:'6.20'}],t);
@@ -1106,4 +1106,46 @@ test('overfilled order counts and missing fractional fills keep the pending lock
     await f.executor.tick(f.ctx('BTC'));
     assert.ok(f.executor.snapshot().pending);assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.requests.length,1);
   }
+});
+
+test('early scalp entry boundaries focus on 16 through 25 cents and keep the cheap YES exception',()=>{
+  for(const side of ['yes','no']) {
+    for(const price of [.16,.18,.20,.21,.25])assert.equal(scalpEntryPriceAllowed(price,600,side),true);
+    for(const price of [.15,.155,.2501,.31,.55,.61,.69,.70])assert.equal(scalpEntryPriceAllowed(price,600,side),false);
+  }
+  assert.equal(scalpEntryPriceAllowed(.04,600,'yes'),true);
+  assert.equal(scalpEntryPriceAllowed(.04,600,'no'),false);
+});
+test('low scalp target is fifty percent of total invested dollars after both sides of fees',()=>{
+  for(const entry of [.04,.08,.16,.18,.20]) {
+    const contracts=4,entryFees=.04,exitFees=.09,originalCost=contracts*entry+entryFees;
+    const accounting={contracts,entryFees,exitFees,originalCost,realizedNet:0};
+    const target=scalpTakeProfitPrice(entry,'yes',accounting);
+    const net=contracts*(target-entry)-entryFees-exitFees;
+    assert.ok(net+1e-9>=.5*originalCost);
+    assert.ok(contracts*(target-.01-entry)-entryFees-exitFees<.5*originalCost);
+    assert.equal(evaluateScalpExit({heldSeconds:1,entryPrice:entry,side:'yes',exitBid:target,accounting}).shouldExit,true);
+    assert.equal(evaluateScalpExit({heldSeconds:1,entryPrice:entry,side:'yes',exitBid:target-.01,accounting}).shouldExit,false);
+    assert.equal(scalpTakeProfitPrice(entry,'no',accounting),target);
+  }
+  assert.throws(()=>scalpTakeProfitPrice(.16),/accounting/);
+  assert.equal(scalpTakeProfitPrice(.21),.26);
+});
+test('16 through 20 cent YES and NO entries exit with at least fifty percent net profit',async()=>{
+  for(const side of ['yes','no'])for(const price of [.16,.18,.20]) {
+    const f=fixture();setEntryBook(f,side,price);await f.executor.tick(f.ctx('BTC'));
+    const t=f.state.BTC.activeTrade,originalCost=t.originalCost,target=targetFor(t);
+    Object.assign(f.state.BTC,side==='yes'?{yesBid:target,yesAsk:target+.01}:{yesAsk:1-target,yesBid:1-target-.01});
+    await f.executor.tick(f.ctx('BTC'));
+    assert.equal(f.state.BTC.activeTrade,null);
+    assert.ok(f.state.BTC.totalPnL+1e-9>=.5*originalCost);
+    assert.equal(f.requests[1].price,(side==='yes'?target:1-target).toFixed(4));
+  }
+});
+test('partial exits retain the original net profit goal rather than resetting it on the remainder',()=>{
+  const accounting={contracts:3,entryFees:.03,exitFees:.07,originalCost:.84,realizedNet:.15};
+  const target=scalpTakeProfitPrice(.20,'yes',accounting);
+  const net=accounting.realizedNet+3*(target-.20)-accounting.entryFees-accounting.exitFees;
+  assert.ok(net+1e-9>=.50*accounting.originalCost);
+  assert.ok(net-.03<.50*accounting.originalCost);
 });
