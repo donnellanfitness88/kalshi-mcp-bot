@@ -54,8 +54,6 @@ export function lateFee(count, price) {
 }
 export function scalpEntryBudget(price) {
   if (!Number.isFinite(price) || price <= 0 || price >= 1) return 0;
-  if (price < 0.10 - 1e-9) return 1;
-  if (price < 0.12 - 1e-9) return 2;
   return SCALP_CONFIG.maxEntryCostUsd;
 }
 export function scalpSize(price, balance, mode = 'SCALP') {

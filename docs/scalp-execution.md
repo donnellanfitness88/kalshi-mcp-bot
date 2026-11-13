@@ -5,13 +5,13 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 ## Current scalp rules
 
-- Scalp entry budgets include the fee reserve: below 10 cents, at most $1;
-  from 10 cents to below 12 cents, at most $2; at 12 cents or above, at most $10.
-  Sizing uses the current executable purchase price after account checks,
-  is limited by available cash, and buys whole contracts. Entry eligibility,
-  the 20-cent target for YES below 15 cents, and late-stage budgets are unchanged.
-  Existing holdings are not resized by this update. One position or unresolved
-  order across BTC and ETH, with additions allowed only to the same late holding. Early entries require more than 480 seconds remaining.
+- Every scalp entry has a maximum $1 budget including the fee reserve,
+  limited by available cash and whole contracts. All existing entry eligibility,
+  timing, momentum checks and price targets stay in place. There is still no
+  per-trade stop or maximum hold. Existing holdings are not resized.
+  One position or unresolved order is allowed across BTC and ETH, with additions
+  allowed only to the same late holding. Early entries require more than
+  480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
   Early entries allow YES below 15 cents, or either side at 55–70 cents inclusive.
   Cheap NO entries are blocked. When YES is below 40 cents and falling,
@@ -58,15 +58,15 @@ Late entries use three incremental budgets, including estimated entry fees:
 
 | Time remaining | Minimum executable contract ask | Additional budget |
 | --- | --- | --- |
-| Below 180 seconds, down to 120 seconds inclusive | 90 cents | $1 |
-| Below 120 seconds, down to 60 seconds inclusive | 94 cents | $10 |
-| Below 60 seconds, above zero | 97 cents | $20 |
+| Below 180 seconds, down to 120 seconds inclusive | 90 cents | $2 |
+| Below 120 seconds, down to 60 seconds inclusive | 95 cents | $25 |
+| Below 60 seconds, above zero | 97 cents | $50 |
 
 Each stage has one budget per ticker, which may be filled through multiple
 IOC limit orders. Missed earlier stages are skipped;
 there is no catch-up buying. A higher price does not trigger several stages at
 once. Each budget buys whole contracts and is bounded by available cash and the
-remaining combined $31 cap. Potential payout must exceed estimated fees.
+remaining combined $77 cap. Potential payout must exceed estimated fees.
 Market price is not an independent probability estimate or a guarantee.
 
 The first purchase requires a flat account. Later stages may add only to the

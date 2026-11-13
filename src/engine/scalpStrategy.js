@@ -18,17 +18,17 @@ export const SCALP_CONFIG = {
   highPriceEntryMaxSecondsRemaining: 120,
   lateEntryMaxSecondsRemaining: 180,
   lateEntryMinPrice: 0.97, // Legacy single-stage threshold, retained for compatibility.
-  lateMaxEntryCostUsd: 31,
+  lateMaxEntryCostUsd: 77,
   lateRetryMs: 3000,
   lateStages: [
-    { id: 'under_180', maxSeconds: 180, minPrice: 0.90, budget: 1 },
-    { id: 'under_120', maxSeconds: 120, minPrice: 0.94, budget: 10 },
-    { id: 'under_60', maxSeconds: 60, minPrice: 0.97, budget: 20 }
+    { id: 'under_180', maxSeconds: 180, minPrice: 0.90, budget: 2 },
+    { id: 'under_120', maxSeconds: 120, minPrice: 0.95, budget: 25 },
+    { id: 'under_60', maxSeconds: 60, minPrice: 0.97, budget: 50 }
   ],
   minNetProfitPct: 0.05,
   preferredNetProfitPct: 0.10,
   reentryCooldownMs: 0,
-  maxEntryCostUsd: 10.00,
+  maxEntryCostUsd: 1.00,
   maxConcurrentPositions: 1
 };
 
