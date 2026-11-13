@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createScalpExecutor, scalpSize, reserveFee, scalpAck, entryPhase, lateFee, lateStage, lateStageSize } from '../../src/engine/scalpExecution.js';
+import { createScalpExecutor, scalpEntryBudget, scalpSize, reserveFee, scalpAck, entryPhase, lateFee, lateStage, lateStageSize } from '../../src/engine/scalpExecution.js';
 import { checkRiskGuards } from '../../src/engine/riskManager.js';
 import { evaluateScalpExit, scalpEntryPriceAllowed, scalpTakeProfitPrice } from '../../src/engine/scalpStrategy.js';
 
@@ -944,4 +944,41 @@ test('reconciled zero fill releases a retry only after terminal confirmation',as
   await f.executor.tick(f.ctx('BTC')); assert.equal(f.executor.snapshot().pending,null);
   f.api.getOrders=async()=>[];
   await f.executor.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
+});
+
+test('low-price scalp budget boundaries include fees and respect available balance',()=>{
+  for(const [price,budget]of[[.01,1],[.08,1],[.0999,1],[.10,2],[.11,2],[.1199,2],[.12,10],[.149,10],[.55,10],[.70,10]]) {
+    assert.equal(scalpEntryBudget(price),budget);
+    for(const balance of [.05,.75,1,2,10,100]) {
+      const n=scalpSize(price,balance);
+      assert.ok(n===0 || n*price+reserveFee(n)<=Math.min(budget,balance)+1e-9);
+      assert.ok((n+1)*price+reserveFee(n+1)>Math.min(budget,balance)-1e-9);
+    }
+  }
+  for(const price of [NaN,0,-1,1,Infinity])assert.equal(scalpEntryBudget(price),0);
+});
+test('live and simulated cheap YES buys use reduced budgets with the same twenty-cent target',async()=>{
+  for(const sim of [false,true]) for(const [price,budget]of[[.08,1],[.10,2],[.11,2],[.12,10]]) {
+    const f=fixture('UP',sim); setEntryBook(f,'yes',price);
+    await f.executor.tick(f.ctx('BTC'));
+    const t=f.state.BTC.activeTrade;
+    assert.ok(t); assert.equal(t.count,scalpSize(price,100));
+    assert.ok(t.amount+reserveFee(t.count)<=budget+1e-9);
+    assert.equal(scalpTakeProfitPrice(t.entrySidePrice,t.side),.20);
+  }
+});
+test('scalp sizing uses the revalidated quote when it crosses a cheap-price boundary',async()=>{
+  const f=fixture(); setEntryBook(f,'yes',.12);
+  f.api.getBalance=async()=>{setEntryBook(f,'yes',.08); return 10000;};
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,1);
+  const t=f.state.BTC.activeTrade;
+  assert.ok(t.amount+reserveFee(t.count)<=1+1e-9);
+});
+test('reduced scalp budgets leave the three late-stage budgets unchanged',()=>{
+  for(const [price,budget]of[[.90,1],[.94,10],[.97,20]]) {
+    const n=lateStageSize(price,100,budget);
+    assert.ok(n*price+lateFee(n,price)<=budget+1e-9);
+    assert.ok((n+1)*price+lateFee(n+1,price)>budget);
+  }
 });

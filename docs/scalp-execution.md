@@ -5,7 +5,12 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 ## Current scalp rules
 
-- Entry budget: at most $10 including a fee reserve. One position or unresolved
+- Scalp entry budgets include the fee reserve: below 10 cents, at most $1;
+  from 10 cents to below 12 cents, at most $2; at 12 cents or above, at most $10.
+  Sizing uses the current executable purchase price after account checks,
+  is limited by available cash, and buys whole contracts. Entry eligibility,
+  the 20-cent target for YES below 15 cents, and late-stage budgets are unchanged.
+  Existing holdings are not resized by this update. One position or unresolved
   order across BTC and ETH, with additions allowed only to the same late holding. Early entries require more than 480 seconds remaining.
 - Filter the executable ask of the contract being purchased, YES or NO.
   Early entries allow YES below 15 cents, or either side at 55–70 cents inclusive.

@@ -52,9 +52,15 @@ export function lateStageSize(price, balance, budget) {
 export function lateFee(count, price) {
   return Math.ceil((0.07 * count * price * (1 - price) + 1e-9) * 100) / 100;
 }
+export function scalpEntryBudget(price) {
+  if (!Number.isFinite(price) || price <= 0 || price >= 1) return 0;
+  if (price < 0.10 - 1e-9) return 1;
+  if (price < 0.12 - 1e-9) return 2;
+  return SCALP_CONFIG.maxEntryCostUsd;
+}
 export function scalpSize(price, balance, mode = 'SCALP') {
   if (!Number.isFinite(price) || price <= 0 || price >= 1 || !Number.isFinite(balance)) return 0;
-  const budget = Math.min(SCALP_CONFIG.maxEntryCostUsd, balance);
+  const budget = Math.min(mode === 'SCALP' ? scalpEntryBudget(price) : SCALP_CONFIG.maxEntryCostUsd, balance);
   const fee = mode === 'LATE_SETTLEMENT' ? n => lateFee(n, price) : reserveFee;
   let count = Math.max(0, Math.floor(budget / price));
   while (count && count * price + fee(count) > budget + 1e-9) count--;
