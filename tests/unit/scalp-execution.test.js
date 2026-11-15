@@ -1190,7 +1190,7 @@ test('opposite-coin late entry rejects unexpected, mismatched or resting account
     const t=f.state.BTC.activeTrade;
     f.api.getPositions=async()=>issue==='missing'?[]:[{ticker:t.ticker,position_fp:
       issue==='reversed'?String(-t.count):issue==='increased'?String(t.count+1):issue==='malformed'?'':String(t.count)},
-      ...(issue==='unexpected'?[{ticker:'UNKNOWN',position_fp:'1'}]:[])];
+      ...(issue==='unexpected'?[{ticker:'KXBTC15M-UNTRACKED',position_fp:'1'}]:[])];
     if(issue==='resting')f.api.getOrders=async()=>[{ticker:t.ticker,status:'resting'}];
     lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
     assert.equal(f.requests.length,1,issue);
@@ -1428,4 +1428,76 @@ test('a shrinking-guard journal write failure prevents the additional order',asy
  const restored=createScalpExecutor({state:f.state,api:f.api,getReferenceQuote:f.referenceQuote,getReferenceHistory:f.referenceHistory,
   save:()=>{throw new Error('disk full');},log:()=>{}});
  restored.restore(f.executor.snapshot());await restored.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+});
+
+test('open sports bets and combo resting orders do not block first late entry or staged additions',async()=>{
+ for(const asset of ['BTC','ETH']) {
+  const f=stagedFixture();const positions=f.api.getPositions;
+  f.api.getPositions=async()=>[...await positions(),
+   {ticker:'KXNFLGAME-26NOV15NE-NYJ',position_fp:'10.00'},
+   {ticker:'KXMULTIGAME-SPORTS-COMBO-KXBTC15M-LEG',position_fp:'-3.50'}];
+  f.api.getOrders=async()=>[{ticker:'KXMULTIGAME-SPORTS-COMBO',status:'resting',order_id:'sports-order'}];
+  for(const [secs,price]of [[179,.90],[119,.95],[59,.97]]) {
+   f.advanceRetry();lateOther(f,asset,secs,price);await f.executor.tick(f.ctx(asset));
+  }
+  assert.equal(f.requests.length,3,asset);
+  assert.equal(f.state[asset].activeTrade.mode,'LATE_SETTLEMENT');
+  assert.ok(f.state[asset].activeTrade.originalCost<=77);
+  assert.ok(f.requests.every(r=>r.ticker===f.state[asset].ticker&&r.side==='bid'));
+ }
+});
+test('simultaneous BTC and ETH late positions coexist with unrelated sports holdings',async()=>{
+ const f=stagedFixture();const positions=f.api.getPositions;
+ f.api.getPositions=async()=>[...await positions(),{ticker:'KXSPORTS-OPEN-BET',position_fp:'100'}];
+ f.api.getOrders=async()=>[{market_ticker:'KXMULTIGAME-COMBO',status:'resting'}];
+ f.api.getBalance=async()=>Math.floor((200-['BTC','ETH'].reduce((sum,a)=>sum+(f.state[a].activeTrade?.originalCost??0),0))*100);
+ for(const [secs,price]of [[179,.90],[119,.95],[59,.97]])for(const asset of ['BTC','ETH']){
+  f.advanceRetry();lateOther(f,asset,secs,price,asset==='BTC'?'yes':'no');await f.executor.tick(f.ctx(asset));
+ }
+ assert.equal(f.requests.length,6);
+ assert.equal(f.state.BTC.activeTrade.mode,'LATE_SETTLEMENT');assert.equal(f.state.ETH.activeTrade.mode,'LATE_SETTLEMENT');
+ assert.ok(f.state.BTC.activeTrade.originalCost+f.state.ETH.activeTrade.originalCost<=154);
+});
+test('scalp flat-account check also ignores unrelated sports while preserving crypto isolation',async()=>{
+ const f=fixture();f.api.getPositions=async()=>[{ticker:'KXNFLGAME-OPEN',position_fp:'2'}];
+ f.api.getOrders=async()=>[{ticker:'KXMULTIGAME-COMBO',status:'resting'}];
+ await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ const g=fixture();g.api.getPositions=async()=>[{ticker:'KXETH15M-UNTRACKED',position_fp:'2'}];
+ await g.executor.tick(g.ctx('BTC'));assert.equal(g.requests.length,0);
+});
+test('untracked crypto positions and crypto resting orders still block with sports present',async()=>{
+ for(const ticker of ['KXBTC15M-OTHER-WINDOW','KXETH15M-OTHER-WINDOW','BTC-TEST','ETH-TEST'])for(const kind of ['position','order']){
+  const f=stagedFixture();f.stage(119,.95);
+  f.api.getPositions=async()=>[{ticker:'KXSPORTS-OPEN',position_fp:'10'},...(kind==='position'?[{ticker,position_fp:'2'}]:[])];
+  f.api.getOrders=async()=>[{ticker:'KXMULTIGAME-COMBO',status:'resting'},...(kind==='order'?[{ticker,status:'resting'}]:[])];
+  await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0,`${ticker} ${kind}`);
+ }
+});
+test('malformed market identities do not get silently classified as unrelated sports',async()=>{
+ for(const row of [{position_fp:'1'},{ticker:'',position_fp:'1'},
+  {ticker:123,position_fp:'1'},{ticker:' KXBTC15M-OTHER',position_fp:'1'},
+  {ticker:'KXSPORTS-OPEN',market_ticker:'KXBTC15M-OTHER',position_fp:'1'}]){
+  const f=stagedFixture();f.stage(119,.95);f.api.getPositions=async()=>[row];
+  await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0);
+ }
+ const f=stagedFixture();f.stage(119,.95);f.api.getOrders=async()=>[{status:'resting'}];
+ await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0);
+});
+test('sports filtering never increases the spendable exchange cash used for sizing',async()=>{
+ const f=stagedFixture();f.stage(119,.95);
+ f.api.getPositions=async()=>[{ticker:'KXNFLGAME-OPEN',position_fp:'200'}];
+ f.api.getOrders=async()=>[{ticker:'KXMULTIGAME-COMBO',status:'resting'}];
+ f.api.getBalance=async()=>1000;
+ await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ assert.ok(f.state.BTC.activeTrade.originalCost<=10);
+ assert.ok(f.state.BTC.activeTrade.originalCost<25);
+});
+test('a pending uncertain bot order still blocks both coins when sports positions are open',async()=>{
+ const f=stagedFixture();lateOther(f,'BTC');
+ f.api.getPositions=async()=>[{ticker:'KXSPORTS-OPEN',position_fp:'1'}];
+ f.api.getOrders=async()=>[{ticker:'KXSPORTS-OPEN',status:'resting'}];
+ f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+ await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));assert.equal(f.requests.length,1);
+ assert.equal(f.executor.snapshot().pending.asset,'BTC');
 });

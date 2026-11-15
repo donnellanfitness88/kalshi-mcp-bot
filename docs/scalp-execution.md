@@ -141,7 +141,7 @@ remaining $77 cap for that coin. Potential payout must exceed estimated fees.
 Market price is not an independent probability estimate or a guarantee.
 
 The first purchase requires no holding on that coin. A tracked late holding
-on the other coin (or a legacy early scalp there) is allowed. All live account
+on the other coin (or a legacy early scalp there) is allowed. All in-scope live account
 positions must exactly match both tracked holdings; unexpected, increased,
 reversed or malformed positions and resting/uncertain orders still block entry.
 Later stages may add only to the same ticker, side, and live/simulation mode. Existing risk guards continue to apply. The tracked weighted entry
@@ -173,6 +173,29 @@ Require a finalized binary outcome, a matching account settlement record
 and no remaining account position before clearing a live holding. Attribute
 only this tracked lot's payout/cost/entry fee, not cumulative prior scalp
 activity in the same ticker. Void or ambiguous outcomes require reconciliation.
+
+## Account scope and unrelated sports bets
+
+Portfolio entry checks consider `KXBTC15M-` and `KXETH15M-` markets across all
+windows, plus exact current, tracked and pending tickers. Unrelated sports,
+combo and other series holdings or resting orders are excluded from these
+exposure checks; no orders or positions outside the bot are canceled or sold.
+A combo that merely mentions a crypto ticker in its own name is not a standalone
+crypto position and is excluded unless its own ticker is explicitly tracked.
+
+The bot still verifies every tracked live holding's exact signed quantity and
+blocks unexpected BTC/ETH 15-minute positions or resting crypto orders. Missing
+or conflicting market identities cannot be silently treated as sports and fail
+closed. Both `ticker` and `market_ticker` response keys are supported when they
+agree. Existing pending bot orders still block new submissions on both coins.
+Manual-sale and settlement reconciliation remain specific to the held ticker.
+
+Position scoping does not change exchange selection or balance accounting.
+Available exchange cash is fetched as before and bounds each purchase; sports
+stakes and reserved funds are never added back to available cash. Existing
+risk limits, prices, stage budgets, proximity and shrinking guards remain in
+force. Account mismatch logs now identify the entry coin and use
+`CRYPTO_ACCOUNT_MISMATCH`, throttled to one per coin/reason per minute.
 
 ## Order and manual-sale reconciliation
 

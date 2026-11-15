@@ -375,11 +375,28 @@ export function createScalpExecutor(deps = {}) {
     persist();
     applyFill(p, scalpAck(result, p));
   }
+  // Restrict exposure checks to the strategy's two 15-minute series, plus
+  // exact current/tracked/pending tickers. Sports and combo positions/orders
+  // stay untouched; the exchange balance still limits every new purchase.
+  function scopedAccountRows(rows) {
+    if (!Array.isArray(rows)) throw new Error('Invalid account response');
+    const known = new Set(assets().flatMap(a => [a.ticker, a.activeTrade?.ticker]).filter(Boolean));
+    if (pending?.body?.ticker) known.add(pending.body.ticker);
+    return rows.flatMap(row => {
+      const ticker = row?.ticker ?? row?.market_ticker;
+      if (typeof ticker !== 'string' || !ticker.trim() || ticker !== ticker.trim() ||
+          (row.ticker != null && row.market_ticker != null && row.ticker !== row.market_ticker)) {
+        throw new Error('Account row has missing or conflicting market identity');
+      }
+      if (!/^(KXBTC15M|KXETH15M)-/.test(ticker) && !known.has(ticker)) return [];
+      return [{ ...row, ticker }];
+    });
+  }
   async function accountFlat() {
-    const positions = await api.getPositions();
+    const positions = scopedAccountRows(await api.getPositions());
     if (positions.some(p => !['string', 'number'].includes(typeof p.position_fp) ||
-        !Number.isFinite(Number(p.position_fp)) || Number(p.position_fp) !== 0)) return false;
-    return (await api.getOrders({ status: 'resting' })).length === 0;
+        String(p.position_fp).trim() === '' || !Number.isFinite(Number(p.position_fp)) || Number(p.position_fp) !== 0)) return false;
+    return scopedAccountRows(await api.getOrders({ status: 'resting' })).length === 0;
   }
   // Late settlement positions may coexist across coins; scalps remain exclusive.
   function compatibleHoldings(s, mode, sim) {
@@ -399,7 +416,7 @@ export function createScalpExecutor(deps = {}) {
   }
   async function accountMatches(trade, sim) {
     if (sim) return true;
-    const positions = await api.getPositions();
+    const positions = scopedAccountRows(await api.getPositions());
     const tracked = assets().map(a => a.activeTrade).filter(Boolean);
     if (trade && !tracked.includes(trade)) return false;
     if (tracked.some(t => !isManagedTrade(t) || t.sim !== sim ||
@@ -407,7 +424,7 @@ export function createScalpExecutor(deps = {}) {
     if (positions.some(p => !['string','number'].includes(typeof p.position_fp) ||
         String(p.position_fp).trim() === '' || !Number.isFinite(Number(p.position_fp)) ||
         (Number(p.position_fp) !== 0 && !tracked.some(t => t.ticker === p.ticker)))) return false;
-    return (await api.getOrders({ status: 'resting' })).length === 0;
+    return scopedAccountRows(await api.getOrders({ status: 'resting' })).length === 0;
   }
   function entrySignal(s, mode) {
     const now = Date.now();
@@ -483,7 +500,7 @@ export function createScalpExecutor(deps = {}) {
       if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
     lastAttempt = Date.now();
-    if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
+    if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
     // Revalidate the actual close time, ticker and quote after slow account reads.
     if (s.activeTrade !== held || !compatibleHoldings(s, mode, sim) ||
@@ -494,7 +511,9 @@ export function createScalpExecutor(deps = {}) {
     const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
       SCALP_CONFIG.lateMaxEntryCostUsd - (lateStages[ticker]?.spent ?? 0)) : null;
     const count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget) : scalpSize(price, balance, mode);
-    if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) return;
+    if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
+      entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
+    }
     // The final account check may cross a time tier or receive a changed quote.
     const distanceCheck = mode === 'LATE_SETTLEMENT' ? await proximity(ctx, fresh) : null;
     if (distanceCheck && !distanceCheck.allowed) {
