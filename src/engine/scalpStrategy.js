@@ -19,12 +19,14 @@ export const SCALP_CONFIG = {
   highPriceEntryMaxSecondsRemaining: 120,
   lateEntryMaxSecondsRemaining: 180,
   lateEntryMinPrice: 0.97, // Legacy single-stage threshold, retained for compatibility.
-  lateMaxEntryCostUsd: 77,
+  lateMaxEntryCostUsd: 182,
   lateRetryMs: 3000,
   lateStages: [
     { id: 'under_180', maxSeconds: 180, minPrice: 0.90, budget: 2 },
+    { id: 'under_150', maxSeconds: 150, minPrice: 0.93, budget: 5 },
     { id: 'under_120', maxSeconds: 120, minPrice: 0.95, budget: 25 },
-    { id: 'under_60', maxSeconds: 60, minPrice: 0.97, budget: 50 }
+    { id: 'under_60', maxSeconds: 60, minPrice: 0.97, budget: 50 },
+    { id: 'under_45', maxSeconds: 45, minPrice: 0.98, budget: 100 }
   ],
   minNetProfitPct: 0.05,
   preferredNetProfitPct: 0.10,
@@ -32,6 +34,15 @@ export const SCALP_CONFIG = {
   maxEntryCostUsd: 1.00,
   maxConcurrentPositions: 1
 };
+
+
+// ETH retains its previous schedule if explicitly re-enabled later.
+export function lateStagesFor(asset = 'BTC') {
+  return asset === 'ETH' ? SCALP_CONFIG.lateStages.filter(stage => !['under_150', 'under_45'].includes(stage.id)) : SCALP_CONFIG.lateStages;
+}
+export function lateBudgetFor(asset = 'BTC') {
+  return lateStagesFor(asset).reduce((sum, stage) => sum + stage.budget, 0);
+}
 
 
 export function evaluateScalpProfit({

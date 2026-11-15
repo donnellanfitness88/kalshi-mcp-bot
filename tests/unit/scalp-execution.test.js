@@ -691,8 +691,8 @@ function stagedFixture(side='yes', sim=false) {
   return f;
 }
 test('strict stage boundaries and each stage budget include fees',()=>{
-  for (const [secs,id] of [[181,null],[180,null],[179,'under_180'],[120,'under_180'],
-      [119,'under_120'],[60,'under_120'],[59,'under_60'],[0,null],[NaN,null]]) {
+  for (const [secs,id] of [[181,null],[180,null],[179,'under_180'],[150,'under_180'],[149,'under_150'],[120,'under_150'],
+      [119,'under_120'],[60,'under_120'],[59,'under_60'],[45,'under_60'],[44,'under_45'],[0,null],[NaN,null]]) {
     assert.equal(lateStage(secs)?.id??null,id);
   }
   for (const budget of [1,10,20,0.5]) for (const price of [.90,.95,.97,.99]) {
@@ -1500,4 +1500,30 @@ test('a pending uncertain bot order still blocks both coins when sports position
  await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
  lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));assert.equal(f.requests.length,1);
  assert.equal(f.executor.snapshot().pending.asset,'BTC');
+});
+
+
+test('BTC five stages aggregate incremental budgets and preserve the $182 fee-inclusive cap',async()=>{
+ for(const side of ['yes','no']) {
+  const f=stagedFixture(side); f.api.getBalance=async()=>100000;
+  for(const [seconds,price] of [[179,.90],[149,.93],[119,.95],[59,.97],[44,.98]]) {
+   f.stage(seconds,price); await f.executor.tick(f.ctx('BTC'));
+  }
+  assert.equal(f.requests.length,5);
+  const ledger=f.executor.snapshot().lateStages['BTC-TEST'];
+  assert.deepEqual(ledger.attempted,['under_180','under_150','under_120','under_60','under_45']);
+  assert.ok(ledger.spent<=182+1e-9);
+  assert.ok(ledger.records.under_150.spent<=5+1e-9);
+  assert.ok(ledger.records.under_45.spent<=100+1e-9);
+  assert.ok(ledger.spent>175);
+  f.advanceRetry(); await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,5);
+ }
+});
+test('ETH keeps its prior stages; disabled ETH cannot submit an initial purchase',async()=>{
+ assert.equal(lateStage(149,'ETH').id,'under_180');
+ assert.equal(lateStage(44,'ETH').id,'under_60');
+ const f=stagedFixture(); f.state.disabledAssets=['ETH'];
+ f.state.ETH.secsLeft=44; f.state.ETH.yesAsk=.98; f.state.ETH.yesBid=.97; await f.executor.tick(f.ctx('ETH'));
+ assert.equal(f.requests.length,0);
 });

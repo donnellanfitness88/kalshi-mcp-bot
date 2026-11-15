@@ -1,7 +1,7 @@
 import { BENCHMARK_MAX_AGE_MS } from '../prices/cfBenchmarks.js';
 
 export const LATE_MIN_DISTANCE_USD = {
-  BTC: { under_180: 50, under_120: 50, under_60: 50 },
+  BTC: { under_180: 50, under_150: 50, under_120: 50, under_60: 50, under_45: 50 },
   ETH: { under_180: 1, under_120: 0.75, under_60: 0.50 }
 };
 

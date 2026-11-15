@@ -279,3 +279,32 @@ change.
 Reference: https://docs.kalshi.com/getting_started/fixed_point_migration.md
 
 Proximity feed reference: https://docs.kalshi.com/websockets/cfbenchmarks-value-5hz
+
+
+## BTC five-stage update
+
+ETH remains disabled in Railway via `ETH_TRADING_DISABLED=true`; existing holdings
+continue to reconcile. The setting blocks new purchases and add-ons.
+
+BTC uses the current exclusive time tier; budgets are incremental, include fees,
+and remain subject to available cash and whole-contract sizing:
+
+| Seconds remaining | Minimum executable contract ask | Additional budget |
+| --- | --- | --- |
+| 150 <= seconds < 180 | 90 cents | $2 |
+| 120 <= seconds < 150 | 93 cents | $5 |
+| 60 <= seconds < 120 | 95 cents | $25 |
+| 45 <= seconds < 60 | 97 cents | $50 |
+| 0 < seconds < 45 | 98 cents | $100 |
+
+Maximum combined BTC cost is $182 per ticker including fees. Existing stage IDs
+and recorded spending are retained across deployment; completed stages cannot
+be bought again, and missed stages are not backfilled. Existing positions are
+not resized. ETH retains its previous $77, three-stage schedule if re-enabled.
+
+Every BTC stage requires a fresh CF Benchmarks reference at least $50 onto the
+winning side of the official target, including equality. The existing shrinking
+cushion guard applies to add-ons only, including partial-fill retries. Initial
+purchases remain subject to proximity but not the shrinking-cushion guard.
+Account reconciliation, sports exclusions, risk limits, IOC retry rules,
+settlement holding and existing scalp behavior remain unchanged.

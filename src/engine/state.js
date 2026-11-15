@@ -82,5 +82,5 @@ export const state = {
   SIM_LIVE_THRESHOLD:    1.00,
   simTradesTarget: 200,        // min sim trades before considering live again
   simWinRateTarget: 0.55,      // min win rate before considering live again
-  disabledAssets: [],          // assets skipped in sim (e.g. ["ETH"]) — set from sim_override.json
+  disabledAssets: process.env.ETH_TRADING_DISABLED === 'true' ? ['ETH'] : [],          // assets skipped in sim (e.g. ["ETH"]) — set from sim_override.json
 };

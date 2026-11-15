@@ -11,7 +11,7 @@ import { definiteOrderRejection, historicalOrderRejection } from './orderRejecti
 import { reconcileManualExit, remainingHeldContracts } from './manualExitReconciliation.js';
 import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
 import { buildBuyBody, buildSellBody } from '../kalshi/orders.js';
-import { SCALP_CONFIG, scalpEntryPriceAllowed, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
+import { SCALP_CONFIG, lateStagesFor, lateBudgetFor, scalpEntryPriceAllowed, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
 import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
@@ -42,9 +42,9 @@ export function entryPhase(seconds) {
   return 'BUFFER';
 }
 // Only the current time tier is eligible; missed earlier tiers are not backfilled.
-export function lateStage(seconds) {
+export function lateStage(seconds, asset = 'BTC') {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return SCALP_CONFIG.lateStages.findLast(stage => seconds < stage.maxSeconds) ?? null;
+  return lateStagesFor(asset).findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
 export function lateStageSize(price, balance, budget) {
   if (![price,balance,budget].every(Number.isFinite) || price <= 0 || price >= 1) return 0;
@@ -181,7 +181,7 @@ export function createScalpExecutor(deps = {}) {
       const cost = fill.count * fill.price + fill.fees;
       const ledger = lateStages[p.body.ticker];
       if (p.stageId && (!ledger || cost > p.stageBudget + 1e-9 ||
-          ledger.spent + cost > SCALP_CONFIG.lateMaxEntryCostUsd + 1e-9)) {
+          ledger.spent + cost > lateBudgetFor(p.asset) + 1e-9)) {
         throw new Error('Late fill exceeds reserved budget; reconciliation required');
       }
       let next;
@@ -200,7 +200,7 @@ export function createScalpExecutor(deps = {}) {
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
-      const stageLimit = SCALP_CONFIG.lateStages.find(stage => stage.id === p.stageId)?.budget;
+      const stageLimit = lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget;
       if (p.stageId && stageRecord && stageRecord.spent + cost > stageLimit + 1e-9) {
         throw new Error('Late fill exceeds remaining stage budget');
       }
@@ -442,7 +442,7 @@ export function createScalpExecutor(deps = {}) {
       return signal;
     }
     if (mode !== 'LATE_SETTLEMENT') return { shouldEnter: false };
-    const stage = lateStage(remainingSeconds(s));
+    const stage = lateStage(remainingSeconds(s), s === shared.ETH ? 'ETH' : 'BTC');
     const ledger = lateStages[s.ticker];
     // Old journals reserved the entire ticker. Never infer missing stage history.
     const record = ledger?.records?.[stage?.id];
@@ -509,7 +509,7 @@ export function createScalpExecutor(deps = {}) {
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
     const price = fresh.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
     const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
-      SCALP_CONFIG.lateMaxEntryCostUsd - (lateStages[ticker]?.spent ?? 0)) : null;
+      lateBudgetFor(asset) - (lateStages[ticker]?.spent ?? 0)) : null;
     const count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget) : scalpSize(price, balance, mode);
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;

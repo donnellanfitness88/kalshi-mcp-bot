@@ -449,7 +449,7 @@ export async function startClock() {
       console.log(`[Clock] SIM OVERRIDE active — paper balance $${state.paperBalance.toFixed(2)}`);
     }
     if (Array.isArray(override.disabledAssets) && override.disabledAssets.length) {
-      state.disabledAssets = override.disabledAssets.map(a => a.toUpperCase());
+      state.disabledAssets = [...new Set([...state.disabledAssets, ...override.disabledAssets.map(a => a.toUpperCase())])];
       console.log(`[Clock] Disabled assets: ${state.disabledAssets.join(', ')}`);
     }
   } catch {}
@@ -461,7 +461,7 @@ export async function startClock() {
   // Restore our journal before servicing scalp orders. Existing account holdings
   // block new entries; do not liquidate unrelated positions during scalp startup.
   restoreScalpExecution();
-  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; scalp budget=$1 including fee reserve; one late position per coin; account checks scoped to BTC/ETH 15-minute markets; unrelated sports/combo holdings and orders ignored; simultaneous BTC/ETH late stages allowed; new early/low-price scalps disabled; entries<=20c target 50% net return after entry fees and reserved exit fees; higher scalps >70c and <97c only <120s; late stages: $2>=90c/<180s, $25>=95c/<120s, $50>=97c/<60s; late cap=$77 per coin, $154 across BTC/ETH including fees and limited by available cash; late distance gates: BTC=$50/$50/$50, ETH=$1/$0.75/$0.50 using fresh CF Benchmarks; late add-on shrinking guard: 30%/15s plus stage-distance drop while approaching, projected crossing before expiry, 10s stabilization; late IOC partial fills with remaining-budget retries >=3s; scalp stop=disabled; reentry wait=0; fee-aware low-price targets and existing higher-price targets');
+  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; scalp budget=$1 including fee reserve; one late position per coin; account checks scoped to BTC/ETH 15-minute markets; unrelated sports/combo holdings and orders ignored; simultaneous BTC/ETH late stages allowed; new early/low-price scalps disabled; entries<=20c target 50% net return after entry fees and reserved exit fees; higher scalps >70c and <97c only <120s; BTC late stages: $2>=90c/<180s, $5>=93c/<150s, $25>=95c/<120s, $50>=97c/<60s, $100>=98c/<45s; BTC late cap=$182; ETH retains $77 schedule if re-enabled; combined cap=$259 including fees and limited by available cash; late distance gates: BTC=$50 at all five stages, ETH=$1/$0.75/$0.50 using fresh CF Benchmarks; late add-on shrinking guard: 30%/15s plus stage-distance drop while approaching, projected crossing before expiry, 10s stabilization; late IOC partial fills with remaining-budget retries >=3s; scalp stop=disabled; reentry wait=0; fee-aware low-price targets and existing higher-price targets');
   // Legacy startup handling applies only outside scalp mode.
   if (process.env.SCALP_ENABLED !== 'true') try {
     const positions = await getPositions();
