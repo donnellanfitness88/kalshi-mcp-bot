@@ -1,3 +1,5 @@
+const STABILIZATION_SECONDS = 2;
+
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
   minimumDistance, secondsRemaining, previous = null, now = Date.now() }) {
@@ -46,7 +48,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     const m=point && measure(point);
     if(m?.rapid || m?.projection){trigger={...m,at:point.sourceTs};break;}
   }
-  const checkpoints=Array.from({length:11},(_,i)=>at(last.sourceTs-(10-i)*1000));
+  const checkpoints=Array.from({length:STABILIZATION_SECONDS+1},(_,i)=>at(last.sourceTs-(STABILIZATION_SECONDS-i)*1000));
   const stabilized=checkpoints.every(Boolean) &&
     complete(checkpoints[0].sourceTs,last.sourceTs) &&
     checkpoints.every((p,i)=>!i || cushion(p)+1e-9>=cushion(checkpoints[i-1]));
@@ -58,5 +60,5 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     triggeredAt:trigger?.at ?? prior?.triggeredAt ?? null,
     triggerReason:trigger ? reason : prior?.triggerReason ?? null};
   return { allowed:!blocked,reason,guardState,...current,stabilized,
-    sourceTs:last.sourceTs,checkedAt:now,lookbackSeconds:15,stabilizationSeconds:10 };
+    sourceTs:last.sourceTs,checkedAt:now,lookbackSeconds:15,stabilizationSeconds:STABILIZATION_SECONDS };
 }

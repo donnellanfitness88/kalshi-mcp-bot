@@ -27,11 +27,11 @@ test('missing, stale and gapped history cannot authorize an add-on',()=>{
   assert.equal(run(rows).reason,'SHRINK_HISTORY_UNAVAILABLE');
  }
 });
-test('ten continuous stable seconds clear a latch; nine do not',()=>{
+test('two continuous stable seconds clear a latch; one does not',()=>{
  const rows=history(200,140),first=run(rows);
  const expanded=n=>[...rows,...Array.from({length:n},(_,i)=>({sourceTs:now+(i+1)*1000,price:target+140}))];
- assert.equal(run(expanded(9),{now:now+9000,previous:first.guardState}).allowed,false);
- const stable=run(expanded(10),{now:now+10000,previous:first.guardState});
+ assert.equal(run(expanded(1),{now:now+1000,previous:first.guardState}).allowed,false);
+ const stable=run(expanded(2),{now:now+2000,previous:first.guardState});
  assert.equal(stable.allowed,true);assert.equal(stable.guardState.blocked,false);
 });
 test('a persisted latch stays blocked during continued slow shrink, even after its original trigger ages out',()=>{
@@ -45,6 +45,32 @@ test('a latch from a different ticker or side is not transferred to a new positi
  assert.equal(run(history(200,199),{previous:{...previous,ticker:'BTC-T',side:'no'},secondsRemaining:1}).allowed,true);
 });
 test('recent rapid shrink is detected even if no add-on check ran at the instant of the drop',()=>{
- const rows=[...history(200,140),...Array.from({length:5},(_,i)=>({sourceTs:now+(i+1)*1000,price:target+140}))];
- assert.equal(run(rows,{now:now+5000}).allowed,false);
+ const rows=[...history(200,140),...Array.from({length:1},(_,i)=>({sourceTs:now+(i+1)*1000,price:target+140}))];
+ assert.equal(run(rows,{now:now+1000}).allowed,false);
+});
+
+
+test('two-second recovery works for YES and NO and still requires the distance minimum',()=>{
+ for(const side of ['yes','no']) {
+  const sign=side==='yes'?1:-1, rows=history(200,140,side),first=run(rows,{side});
+  const recover=[...rows,{sourceTs:now+1000,price:target+sign*140},
+    {sourceTs:now+2000,price:target+sign*141}];
+  const result=run(recover,{side,now:now+2000,previous:first.guardState});
+  assert.equal(result.allowed,true);assert.equal(result.stabilizationSeconds,2);
+  assert.equal(run(recover,{side,now:now+2000,previous:first.guardState,minimumDistance:150}).allowed,false);
+ }
+});
+test('a decrease interrupts recovery; two full elapsed seconds are required again',()=>{
+ const rows=history(200,140),first=run(rows);
+ const recovery=[...rows,{sourceTs:now+1000,price:target+141},{sourceTs:now+2000,price:target+140}];
+ assert.equal(run(recovery,{now:now+2000,previous:first.guardState}).allowed,false);
+ recovery.push({sourceTs:now+3000,price:target+140});
+ assert.equal(run(recovery,{now:now+3000,previous:first.guardState}).allowed,false);
+ recovery.push({sourceTs:now+4000,price:target+141});
+ assert.equal(run(recovery,{now:now+4000,previous:first.guardState}).allowed,true);
+});
+test('three quick feed messages do not substitute for two seconds of recovery',()=>{
+ const rows=history(200,140),first=run(rows);
+ const short=[...rows,...[200,400,600].map(dt=>({sourceTs:now+dt,price:target+140}))];
+ assert.equal(run(short,{now:now+600,previous:first.guardState}).allowed,false);
 });

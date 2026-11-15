@@ -118,8 +118,8 @@ block while still approaching if the fifteen-second average approach speed
 would consume the remaining cushion before expiry. This linear projection is a
 risk heuristic, not a prediction of settlement or its final-minute average.
 
-A trigger latches by coin, ticker and side. Resume only after ten consecutive
-elapsed one-second checkpoints show a flat or improving cushion, with valid
+A trigger latches by coin, ticker and side. Resume only after two consecutive elapsed seconds show a flat or improving
+cushion (three one-second checkpoints spanning two full seconds), with valid
 continuous data and all original distance/price/time/risk requirements met.
 The last ten seconds are scanned for recent triggers even if no order check ran
 at the exact drop. Missing fifteen-second history, stale prices, or gaps over
