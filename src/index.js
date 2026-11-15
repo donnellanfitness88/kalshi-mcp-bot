@@ -31,6 +31,12 @@ import { startClock } from './engine/clock.js';
 async function main() {
   await startClock();
 
+  // Independent, public-data-only observer; errors cannot stop BTC execution.
+  if (process.env.METALS_OBSERVER_ENABLED !== 'false') {
+    import('./research/metalsObserver.js').then(({ startMetalsObserver }) => startMetalsObserver())
+      .catch(e => console.error('[METALS_OBSERVER] Startup failed:', e.message));
+  }
+
   // Research loop — always runs regardless of mode.
   // Records live ticks to data/snapshots/ and runs coordinate-descent optimizer every 5m.
   const { ResearchLoop } = await import('./research/loop.js');
