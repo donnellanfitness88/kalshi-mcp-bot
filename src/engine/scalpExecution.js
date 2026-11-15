@@ -95,6 +95,15 @@ export function createScalpExecutor(deps = {}) {
   const save = deps.save ?? saveJournal;
   const log = deps.log ?? (message => console.log('[SCALP] ' + JSON.stringify(message)));
   const retryNow = deps.now ?? Date.now;
+  // New early/low-price entries are disabled; existing holdings still receive exits.
+  const earlyScalpsEnabled = deps.earlyScalpsEnabled ?? false;
+  const entryBlockLogs = new Map();
+  function entryBlocked(asset, reason) {
+    const key = `${asset}:${reason}`;
+    if (retryNow() - (entryBlockLogs.get(key) ?? -Infinity) < 60000) return;
+    entryBlockLogs.set(key, retryNow());
+    log({ event: 'ENTRY_BLOCKED', asset, reason });
+  }
   const lateChecks = new Map();
   let busy = false;
   let pending = null;
@@ -329,18 +338,21 @@ export function createScalpExecutor(deps = {}) {
         !Number.isFinite(Number(p.position_fp)) || Number(p.position_fp) !== 0)) return false;
     return (await api.getOrders({ status: 'resting' })).length === 0;
   }
-  // The sole cross-coin exception is a late position alongside an early scalp.
+  // Late settlement positions may coexist across coins; scalps remain exclusive.
   function compatibleHoldings(s, mode, sim) {
     const held = s.activeTrade;
     if (held && (mode !== 'LATE_SETTLEMENT' || held.mode !== mode ||
         held.ticker !== s.ticker || held.sim !== sim)) return false;
-    return assets().every(a => !a.activeTrade || a === s ||
-      (mode === 'LATE_SETTLEMENT' && a.activeTrade.mode === 'SCALP' &&
-       a.activeTrade.sim === sim &&
-       (a.activeTrade.entrySecondsRemaining > 480 ||
-        // Legacy early holdings lack the timestamp field. Their price band
-        // distinguishes them from final-minute scalps, which enter above 70c.
-        (a.activeTrade.entrySecondsRemaining == null && a.activeTrade.entrySidePrice <= .70))));
+    return assets().every(a => {
+      const other = a.activeTrade;
+      if (!other || a === s) return true;
+      if (mode !== 'LATE_SETTLEMENT' || other.sim !== sim) return false;
+      if (other.mode === 'LATE_SETTLEMENT') return true;
+      // Legacy early holdings lack the timestamp field. Their price band
+      // distinguishes them from final-minute scalps, which enter above 70c.
+      return other.mode === 'SCALP' && (other.entrySecondsRemaining > 480 ||
+        (other.entrySecondsRemaining == null && other.entrySidePrice <= .70));
+    });
   }
   async function accountMatches(trade, sim) {
     if (sim) return true;
@@ -360,6 +372,9 @@ export function createScalpExecutor(deps = {}) {
         s.lastQuoteMessageTs > now || ![s.yesAsk, s.yesBid].every(Number.isFinite) ||
         s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid) return { shouldEnter: false };
     if (mode === 'SCALP') {
+      if (!earlyScalpsEnabled && remainingSeconds(s) > SCALP_CONFIG.entryMinSecondsRemaining) {
+        return { shouldEnter: false, reason: 'EARLY_SCALPS_DISABLED' };
+      }
       const signal = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
       if (!signal.shouldEnter) return signal;
       const price = signal.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
@@ -409,7 +424,8 @@ export function createScalpExecutor(deps = {}) {
     const sim = simulated();
     if (!compatibleHoldings(s, mode, sim)) return;
     s._simMode = sim;
-    if (checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' }).blocked) return;
+    const risk = checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' });
+    if (risk.blocked) { entryBlocked(asset, risk.reason); return; }
     const signal = entrySignal(s, mode);
     if (!signal.shouldEnter) return;
     if (mode === 'LATE_SETTLEMENT') {
@@ -612,7 +628,7 @@ export function createScalpExecutor(deps = {}) {
       }
       else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else await enter(ctx);
-    } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', error: error.message,
+    } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', asset: ctx.asset, ticker: ctx.s.activeTrade?.ticker ?? ctx.s.ticker, error: error.message,
       clientOrderId: pending?.body.client_order_id,
       ...(pending ? { orderId: pending.orderId, requested: pending.body.count,
         responseFillCount: pending.response?.fill_count,

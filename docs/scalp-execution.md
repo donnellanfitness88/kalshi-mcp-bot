@@ -5,29 +5,21 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
 
 ## Current scalp rules
 
-- Every scalp entry has a maximum $1 budget including the fee reserve,
-  limited by available cash and whole contracts. The existing timing and momentum checks stay in place. There is still no
-  per-trade stop or maximum hold. Existing holdings are not resized.
-  An early scalp may coexist with a late settlement position on the other coin.
-  New scalps remain blocked while any other position is open; two late positions
-  are not allowed. Additions remain restricted to the same late holding.
-  One unresolved order blocks all new submissions until reconciled.
-  The combined entry budgets can reach $78 ($1 scalp plus $77 late stages),
-  bounded by available cash. All live account holdings must match both tracked
-  positions exactly; unexpected holdings or resting orders still block entries. Early entries require more than
-  480 seconds remaining.
-- Filter the executable ask of the contract being purchased, YES or NO.
-  Early entries allow either side at 16–25 cents inclusive, plus the existing
-  YES-only exception below 15 cents. The former 55–70-cent band is removed.
-  NO entries below 15 cents remain blocked. Both sides still require positive
-  momentum in the purchased contract, measured with the existing signal checks.
-  Scalp entries at or below 20 cents target 50% net profit on actual original
-  entry cost including actual entry fees; they do not simply multiply the
-  displayed purchase price by 1.5. The exit price includes remaining entry cost,
-  remaining entry fees, a conservative exit-fee reserve, and previously realized
-  net partial-sale results. It rounds upward to the next whole-cent price.
-  For example, an actual total $1 entry cost targets at least $0.50 estimated
-  net trade profit after the exit fee reserve. Actual fills/fees determine P&L.
+- New early/low-price scalp entries are disabled in the production executor,
+  including the former below-15-cent YES exception and 16–25-cent band.
+  The `earlyScalpsEnabled` dependency is used only by regression tests to
+  exercise management of legacy entries; production defaults to false.
+- Existing low-price holdings remain managed for their fee-aware profit target,
+  verified manual sale, or settlement. No forced liquidation or journal deletion.
+  Their existing <=20-cent target remains 50% estimated net return on original
+  invested dollars including actual entry fees and reserved exit fees.
+- A BTC late holding and an ETH late holding may coexist. Stage additions
+  remain restricted to the same ticker, side and live/simulation mode per coin.
+  Each coin retains its $77 cap, so combined late entry costs can reach $154,
+  including fees and bounded by available exchange cash. Two new scalps remain
+  prohibited. Existing early holdings may coexist with the other coin's late
+  position while they finish. An unresolved order blocks all submissions.
+- Any remaining higher-price scalp has at most a $1 entry budget including fees.
   Higher-priced scalps (above 70 and below 97 cents) are allowed only with
   strictly less than 120 seconds remaining. They retain momentum confirmation
   and scalp profit targets. Prices >=97 cents remain reserved for late settlement. Qualifying staged
@@ -36,7 +28,8 @@ DRY_RUN, simulation, risk guards and disabled-asset controls still apply.
   in each of the last three elapsed one-second intervals, and no pullback
   greater than 1 cent below the purchased contract's recent midpoint high.
   NO signals use 1 minus YES midpoint. Existing spread/freshness gates apply.
-- Profit exits use contract-price points, not a percent return on the stake:
+- Existing low-price holdings retain fee-aware targets; higher-price scalp
+  exits use contract-price points:
 
 | Actual entry price | Target contract bid |
 | --- | --- |
@@ -77,13 +70,14 @@ Each stage has one budget per ticker, which may be filled through multiple
 IOC limit orders. Missed earlier stages are skipped;
 there is no catch-up buying. A higher price does not trigger several stages at
 once. Each budget buys whole contracts and is bounded by available cash and the
-remaining combined $77 cap. Potential payout must exceed estimated fees.
+remaining $77 cap for that coin. Potential payout must exceed estimated fees.
 Market price is not an independent probability estimate or a guarantee.
 
-The first purchase requires a flat account. Later stages may add only to the
-same ticker, side, and live/simulation mode. An open scalp, a different asset's
-holding, an unexpected account position, or a resting/uncertain order blocks
-additions. Existing risk guards continue to apply. The tracked weighted entry
+The first purchase requires no holding on that coin. A tracked late holding
+on the other coin (or a legacy early scalp there) is allowed. All live account
+positions must exactly match both tracked holdings; unexpected, increased,
+reversed or malformed positions and resting/uncertain orders still block entry.
+Later stages may add only to the same ticker, side, and live/simulation mode. Existing risk guards continue to apply. The tracked weighted entry
 price, contract count, actual fees, total spend, and every entry order ID are
 persisted together. Confirmed partial fills reduce both that stage's remaining
 budget and the combined remaining budget, including their actual fees. Confirmed
@@ -103,7 +97,7 @@ for that ticker. Partial manual sales do not reset the spend cap.
 Older journal holdings without staged reservation history are held and
 reconciled normally but cannot receive additions. Higher-priced scalp entries
 retain their existing below-two-minute timing and profit targets if no staged
-settlement entry qualifies. Early scalp rules are unchanged.
+settlement entry qualifies. New early/low-price scalps are disabled.
 
 Late positions use `LATE_SETTLEMENT` mode and hold through settlement; scalp
 profit targets do not apply. Full
@@ -149,8 +143,13 @@ No fixed waiting period between scalp trades. The 8-second reentry delay and
 45-second after-loss entry cooldown do not apply to scalps. A fresh qualifying
 signal, valid quotes, a flat account and no unresolved order are still required.
 Consecutive-loss, session-loss and daily-loss guards remain in force; those
-can still prevent new entries. Other strategies retain their existing cooldowns.
-A 61-cent scalp entry targets 66 cents immediately when executable. The late
+can still prevent new entries. The 8% daily-loss cap resets at midnight
+America/New_York on the next entry check, independently of process restarts.
+The 5% session-loss pause and three-loss streak brake retain their existing
+behavior and are not cleared by a daily reset. Entry-block logs identify the
+coin and risk reason, at most once per minute for each coin/reason pair.
+Other strategies retain their existing cooldowns.
+The late
 settlement entry keeps its per-stage budget reservation and existing risk guards.
 
 ## Explicitly rejected requests

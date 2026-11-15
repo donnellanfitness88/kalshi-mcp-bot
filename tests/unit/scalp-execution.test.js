@@ -4,12 +4,12 @@ import { quantityUnits, contractQuantity, addQuantity, subtractQuantity } from '
 import { remainingHeldContracts, reconcileManualExit } from '../../src/engine/manualExitReconciliation.js';
 import assert from 'node:assert/strict';
 import { createScalpExecutor, scalpEntryBudget, scalpSize, reserveFee, scalpAck, entryPhase, lateFee, lateStage, lateStageSize } from '../../src/engine/scalpExecution.js';
-import { checkRiskGuards } from '../../src/engine/riskManager.js';
+import { checkRiskGuards, startDay } from '../../src/engine/riskManager.js';
 import { evaluateScalpExit, scalpEntryPriceAllowed, scalpTakeProfitPrice } from '../../src/engine/scalpStrategy.js';
 
 process.env.SCALP_ENABLED = 'true';
 process.env.DRY_RUN = 'false';
-function fixture(direction = 'UP', sim = false) {
+function fixture(direction = 'UP', sim = false, earlyScalpsEnabled = true) {
   const now = Date.now();
   let retryClock = now;
   const asset = () => ({ activeTrade: null, farmArmed: true, lastExitTime: 0, lastLossTime: 0,
@@ -33,7 +33,7 @@ function fixture(direction = 'UP', sim = false) {
         average_fill_price: body.price, average_fee_paid: '0.0100' };
     } };
   const dynamicApi = Object.fromEntries(['getPositions', 'getOrders', 'getBalance', 'placeOrder', 'getOrder', 'getAllFills', 'getMarket', 'getAllSettlements'].map(key => [key, (...args) => api[key](...args)]));
-  const executor = createScalpExecutor({ state, api: dynamicApi, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
+  const executor = createScalpExecutor({ state, api: dynamicApi, earlyScalpsEnabled, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
   const ctx = asset => ({ asset, s: state[asset], balance: 100 });
   return { advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
 }
@@ -1216,4 +1216,109 @@ test('legacy early scalp qualifies without rewriting its holding',async()=>{
   delete f.state.BTC.activeTrade.entrySecondsRemaining;
   lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
   assert.equal(f.requests.length,2);
+});
+
+test('production defaults block all new low-price scalps on either coin',async()=>{
+  for(const asset of ['BTC','ETH']) for(const price of [.04,.11,.16,.20,.25]) {
+    const f=fixture('UP',false,false);
+    setEntryBook(f,'yes',price);
+    if(asset==='ETH') Object.assign(f.state.ETH,{yesAsk:f.state.BTC.yesAsk,yesBid:f.state.BTC.yesBid,
+      yesPriceHistory:f.state.BTC.yesPriceHistory,lastQuoteMessageTs:Date.now()});
+    await f.executor.tick(f.ctx(asset));
+    assert.equal(f.requests.length,0,`${asset} ${price}`);
+  }
+  const f=fixture();
+  const executor=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  await executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0);
+});
+test('disabling early entries preserves profit exits on existing low-price holdings',async()=>{
+  const f=fixture();await f.executor.tick(f.ctx('BTC'));
+  const t=f.state.BTC.activeTrade;
+  const executor=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  executor.restore(structuredClone(f.executor.snapshot()));
+  Object.assign(f.state.BTC,{yesBid:targetFor(t),yesAsk:targetFor(t)+.01,lastQuoteMessageTs:Date.now()});
+  await executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.requests.length,2);
+});
+test('both coins can fill every late stage with separate budgets and shared cash',async()=>{
+  for(const first of ['BTC','ETH']) {
+    const f=stagedFixture(); const second=first==='BTC'?'ETH':'BTC';
+    f.api.getBalance=async()=>Math.round((200-['BTC','ETH'].reduce((sum,a)=>sum+(f.state[a].activeTrade?.originalCost??0),0))*100);
+    for(const [seconds,price] of [[179,.90],[119,.95],[59,.97]]) {
+      for(const asset of [first,second]) {
+        f.advanceRetry();lateOther(f,asset,seconds,price,asset==='BTC'?'yes':'no');
+        await f.executor.tick(f.ctx(asset));
+      }
+    }
+    assert.equal(f.requests.length,6);
+    const snap=f.executor.snapshot();
+    for(const asset of ['BTC','ETH']) {
+      assert.equal(snap.positions[asset].mode,'LATE_SETTLEMENT');
+      assert.equal(snap.positions[asset].count,79);
+      assert.ok(snap.positions[asset].originalCost<=77);
+      assert.equal(snap.lateStages[f.state[asset].ticker].attempted.length,3);
+    }
+    assert.ok(snap.positions.BTC.originalCost+snap.positions.ETH.originalCost<=154);
+    f.state.BTC.activeTrade=null;f.state.ETH.activeTrade=null;f.executor.restore(structuredClone(snap));
+    assert.equal(f.state.BTC.activeTrade.count,79);assert.equal(f.state.ETH.activeTrade.count,79);
+  }
+});
+test('dual late positions remain bounded by actual remaining cash',async()=>{
+  const f=stagedFixture();
+  f.api.getBalance=async()=>Math.floor((30-['BTC','ETH'].reduce((sum,a)=>sum+(f.state[a].activeTrade?.originalCost??0),0))*100);
+  for(const asset of ['BTC','ETH']) {
+    lateOther(f,asset,119,.95);await f.executor.tick(f.ctx(asset));
+  }
+  const total=['BTC','ETH'].reduce((sum,a)=>sum+(f.state[a].activeTrade?.originalCost??0),0);
+  assert.equal(f.requests.length,2);assert.ok(total<=30);
+  assert.ok(f.state.ETH.activeTrade.originalCost<25);
+});
+test('unknown order on one coin blocks submission on both until reconciled',async()=>{
+  const f=stagedFixture();lateOther(f,'BTC');await f.executor.tick(f.ctx('BTC'));
+  f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
+  lateOther(f,'ETH');await f.executor.tick(f.ctx('ETH'));
+  const pending=structuredClone(f.executor.snapshot().pending);
+  f.api.getOrders=async()=>[];
+  lateOther(f,'BTC',119,.95);await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,2);
+  assert.equal(f.executor.snapshot().pending.body.client_order_id,pending.body.client_order_id);
+});
+test('settling one late coin preserves the other holding and budget ledger',async()=>{
+  const f=stagedFixture();
+  for(const asset of ['BTC','ETH']){lateOther(f,asset);await f.executor.tick(f.ctx(asset));}
+  const btc=f.state.BTC.activeTrade,eth=f.state.ETH.activeTrade;
+  const ethLedger=structuredClone(f.executor.snapshot().lateStages[eth.ticker]);
+  f.api.getMarket=async ticker=>({status:ticker===btc.ticker?'finalized':'open',result:'yes'});
+  f.api.getPositions=async()=>[{ticker:eth.ticker,position_fp:String(eth.count)}];
+  f.api.getAllSettlements=async()=>[{ticker:btc.ticker,market_result:'yes',settled_time:new Date(btc.startedAt+1000).toISOString()}];
+  f.api.getAllFills=async()=>[];
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.state.ETH.activeTrade,eth);
+  assert.deepEqual(f.executor.snapshot().lateStages[eth.ticker],ethLedger);
+});
+test('daily loss cap remains within the day and resets only at midnight Eastern',t=>{
+  t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-15T04:59:00Z')});
+  const f=fixture();const s=f.state.BTC;
+  startDay(s,100);s.dailyPnL=-26.5323;
+  assert.equal(checkRiskGuards(s,100).reason,'DAILYCAP');
+  t.mock.timers.setTime(new Date('2026-11-15T05:01:00Z').getTime());
+  assert.equal(checkRiskGuards(s,90).blocked,false);
+  assert.equal(s.dailyPnL,0);assert.equal(s.dailyStartBalance,90);
+  s.dailyPnL=-8;
+  assert.equal(checkRiskGuards(s,90).reason,'DAILYCAP');
+});
+test('daily rollover preserves session and streak guards',t=>{
+  t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-15T04:59:00Z')});
+  const f=fixture();const s=f.state.BTC;startDay(s,100);s.dailyPnL=-26;
+  t.mock.timers.setTime(new Date('2026-11-15T05:01:00Z').getTime());
+  s.sessionPnL=-6;
+  assert.equal(checkRiskGuards(s,90).reason,'SESSIONKILL');assert.equal(s.dailyPnL,0);
+  s.sessionPnL=0;s.consecutiveLosses=3;s.lastLossTime=Date.now();
+  assert.equal(checkRiskGuards(s,90,false,{skipLossCooldown:true}).reason,'STREAK');
+});
+test('higher-price final-two-minute scalps remain enabled without an early entry',async()=>{
+  const f=fixture('UP',false,false);setEntryBook(f,'yes',.75);f.state.BTC.secsLeft=119;
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,1);assert.equal(f.state.BTC.activeTrade.mode,'SCALP');
+  assert.ok(f.state.BTC.activeTrade.originalCost<=1);
 });

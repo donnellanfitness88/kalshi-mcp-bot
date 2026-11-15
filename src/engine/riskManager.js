@@ -10,8 +10,18 @@ const RISK_STREAK_RESET_MS     = 30 * 60_000;  // auto-reset streak after 30 min
 // Fix 5: Shorter cooldown for high-confidence modes (DECAY, STRONG_CONVICTION)
 export const RISK_COOLDOWN_FAST_MS = 20_000;
 
+const riskDayFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+  year: 'numeric', month: '2-digit', day: '2-digit' });
+const riskDay = now => riskDayFormatter.format(new Date(now));
+
 export function checkRiskGuards(s, balance, fastCooldown = false, { skipLossCooldown = false } = {}) {
   const now = Date.now();
+  const today = riskDay(now);
+  // A daily cap expires at midnight Eastern, independently of process restarts.
+  // A state without a day key retains its current P&L on the first check.
+  if (s.riskDay && s.riskDay !== today && Number.isFinite(balance) && balance > 0) {
+    startDay(s, balance, now);
+  } else if (!s.riskDay) s.riskDay = today;
   const cooldown = fastCooldown ? RISK_COOLDOWN_FAST_MS : RISK_COOLDOWN_MS;
 
   if (!skipLossCooldown && now - s.lastLossTime < cooldown) {
@@ -78,7 +88,8 @@ export function startSession(s, balance) {
 }
 
 // Reset daily counters (call at midnight ET)
-export function startDay(s, balance) {
+export function startDay(s, balance, now = Date.now()) {
+  s.riskDay = riskDay(now);
   s.dailyStartBalance = balance;
   s.dailyPnL = 0;
 }
