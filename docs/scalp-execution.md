@@ -71,9 +71,11 @@ check against the current market's official `floor_strike`:
 
 | Stage | BTC minimum distance | ETH minimum distance |
 | --- | --- | --- |
-| under_180 ($2) | $50.00 | $1.00 |
-| under_120 ($25) | $50.00 | $0.75 |
-| under_60 ($50) | $50.00 | $0.50 |
+| under_180 ($2) | $30.00 | $1.00 |
+| under_150 ($5) | $30.00 | n/a |
+| under_120 ($25) | $30.00 | $0.75 |
+| under_60 ($50) | $30.00 | $0.50 |
+| under_45 ($100) | $30.00 | n/a |
 
 Equality qualifies. YES requires the reference price above the target by at
 least the buffer; NO requires it below by at least the buffer. Absolute distance
@@ -302,9 +304,21 @@ and recorded spending are retained across deployment; completed stages cannot
 be bought again, and missed stages are not backfilled. Existing positions are
 not resized. ETH retains its previous $77, three-stage schedule if re-enabled.
 
-Every BTC stage requires a fresh CF Benchmarks reference at least $50 onto the
+Every BTC stage requires a fresh CF Benchmarks reference at least $30 onto the
 winning side of the official target, including equality. The existing shrinking
 cushion guard applies to add-ons only, including partial-fill retries. Initial
 purchases remain subject to proximity but not the shrinking-cushion guard.
 Account reconciliation, sports exclusions, risk limits, IOC retry rules,
 settlement holding and existing scalp behavior remain unchanged.
+
+
+## BTC proximity reduced to $30
+
+All five BTC stages require at least $30 on the winning side of the target.
+Equality qualifies. The fresh-reference, price/time, cash and risk checks remain
+in force. Recovery after a latched shrinking guard still requires two consecutive
+seconds of flat/improving cushion, now above the $30 distance minimum.
+The rapid-shrink trigger retains its previous $50 minimum dollar drop, together
+with the existing 30%/15s and approaching conditions. It is separate from entry
+proximity so reducing the entry buffer does not change that trigger. The
+projected-crossing trigger, budgets and ETH disable setting are unchanged.

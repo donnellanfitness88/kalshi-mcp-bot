@@ -74,3 +74,10 @@ test('three quick feed messages do not substitute for two seconds of recovery',(
  const short=[...rows,...[200,400,600].map(dt=>({sourceTs:now+dt,price:target+140}))];
  assert.equal(run(short,{now:now+600,previous:first.guardState}).allowed,false);
 });
+
+
+test('lower proximity does not lower the separately preserved rapid-drop threshold',()=>{
+ const r=run(history(100,60),{minimumDistance:30,rapidDropMinimum:50,secondsRemaining:1});
+ assert.equal(r.rapid,false);assert.equal(r.allowed,true);
+ assert.equal(run(history(200,140),{minimumDistance:30,rapidDropMinimum:50}).rapid,true);
+});

@@ -105,7 +105,8 @@ export function createScalpExecutor(deps = {}) {
     if (ctx.s.activeTrade?.mode !== 'LATE_SETTLEMENT') return null;
     const check = evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
-      minimumDistance:distance.minimumDistance,secondsRemaining:remainingSeconds(ctx.s),
+      minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' ? 50 : distance.minimumDistance,
+      secondsRemaining:remainingSeconds(ctx.s),
       previous:shrinkingGuards[ctx.asset],now:Date.now() });
     if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[ctx.asset])) {
       const next={...shrinkingGuards,[ctx.asset]:check.guardState};

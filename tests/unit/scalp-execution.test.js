@@ -1333,9 +1333,9 @@ test('higher-price final-two-minute scalps remain enabled without an early entry
 
 test('live late entry enforces the requested proximity on each coin, stage and side',async()=>{
   for(const asset of ['BTC','ETH'])for(const [seconds,stageId,price,min]of [
-    [179,'under_180',.90,asset==='BTC'?50:1],
-    [119,'under_120',.95,asset==='BTC'?50:.75],
-    [59,'under_60',.97,asset==='BTC'?50:.50]])for(const side of ['yes','no'])for(const delta of [-.01,0]){
+    [179,'under_180',.90,asset==='BTC'?30:1],
+    [119,'under_120',.95,asset==='BTC'?30:.75],
+    [59,'under_60',.97,asset==='BTC'?30:.50]])for(const side of ['yes','no'])for(const delta of [-.01,0]){
       const f=stagedFixture();lateOther(f,asset,seconds,price,side);
       const target=asset==='BTC'?65000:2000;
       f.setReferenceQuote(()=>({price:target+(side==='yes'?1:-1)*(min+delta),source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
@@ -1364,7 +1364,7 @@ test('a narrowing distance during account reads blocks transmission without rese
   const f=stagedFixture();f.stage(59,.97);
   let distance=60;
   f.setReferenceQuote(()=>({price:65000+distance,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
-  f.api.getBalance=async()=>{distance=49;return 10000;};
+  f.api.getBalance=async()=>{distance=29;return 10000;};
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,0);assert.equal(f.executor.snapshot().pending,null);
   assert.equal(f.executor.snapshot().lateStages['BTC-TEST'],undefined);
