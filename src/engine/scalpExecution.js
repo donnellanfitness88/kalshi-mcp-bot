@@ -1,6 +1,7 @@
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
 import { benchmarkFeed } from '../prices/cfBenchmarks.js';
+import { evaluateShrinkingCushion } from './shrinkingCushion.js';
 import { evaluateLateProximity } from './lateProximity.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -98,6 +99,21 @@ export function createScalpExecutor(deps = {}) {
   const log = deps.log ?? (message => console.log('[SCALP] ' + JSON.stringify(message)));
   const retryNow = deps.now ?? Date.now;
   const getReferenceQuote = deps.getReferenceQuote ?? (asset => benchmarkFeed.getQuote(asset));
+  const getReferenceHistory = deps.getReferenceHistory ?? (asset => benchmarkFeed.getHistory(asset));
+  let shrinkingGuards = {};
+  function shrinkingCheck(ctx, distance) {
+    if (ctx.s.activeTrade?.mode !== 'LATE_SETTLEMENT') return null;
+    const check = evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
+      asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
+      minimumDistance:distance.minimumDistance,secondsRemaining:remainingSeconds(ctx.s),
+      previous:shrinkingGuards[ctx.asset],now:Date.now() });
+    if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[ctx.asset])) {
+      const next={...shrinkingGuards,[ctx.asset]:check.guardState};
+      save({...snapshot(),shrinkingGuards:next}); // Persist a latch before an add-on can proceed.
+      shrinkingGuards=next;
+    }
+    return check;
+  }
   const targetCache = new Map();
   async function proximity(ctx, signal) {
     const ticker = ctx.s.ticker, cached = targetCache.get(ctx.asset);
@@ -140,13 +156,14 @@ export function createScalpExecutor(deps = {}) {
   const settlementPolls = new Map();
   const manualPolls = new Map();
   const assets = () => ['BTC', 'ETH'].map(asset => shared[asset]);
-  const snapshot = () => ({ pending, lateEntryTickers, lateStages, positions: Object.fromEntries(['BTC', 'ETH'].map(asset =>
+  const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards, positions: Object.fromEntries(['BTC', 'ETH'].map(asset =>
     [asset, isManagedTrade(shared[asset].activeTrade) ? shared[asset].activeTrade : null])) });
   const persist = () => save(snapshot());
   const simulated = () => shared.simMode || process.env.DRY_RUN === 'true';
   function restore(saved) {
     if (!saved) return;
     pending = saved.pending ?? null;
+    shrinkingGuards = structuredClone(saved.shrinkingGuards ?? {});
     lateEntryTickers = saved.lateEntryTickers ?? [];
     lateStages = structuredClone(saved.lateStages ?? {});
     for (const asset of ['BTC', 'ETH']) {
@@ -200,7 +217,7 @@ export function createScalpExecutor(deps = {}) {
       save(saved);
       s.activeTrade = next; lateStages = nextStages; pending = null;
       log({ event: 'ENTRY_CONFIRMED', asset: p.asset, ...fill, sim: p.sim, mode: p.mode,
-        side: p.side, stage: p.stageId, ticker: p.body.ticker, proximity: p.proximity, totalContracts: next.count, totalCost: next.originalCost });
+        side: p.side, stage: p.stageId, ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard, totalContracts: next.count, totalCost: next.originalCost });
       return;
     } else if (p.kind === 'entry' && p.stageId && !fill.count) {
       const saved = snapshot(); saved.pending = null;
@@ -462,6 +479,8 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') {
       const check = await proximity(ctx, signal);
       if (!check.allowed) { entryBlocked(asset, check.reason, { proximity: check }); return; }
+      const shrink = shrinkingCheck(ctx,check);
+      if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
     lastAttempt = Date.now();
     if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
@@ -481,6 +500,10 @@ export function createScalpExecutor(deps = {}) {
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
     }
+    const shrinkCheck = distanceCheck ? shrinkingCheck(ctx,distanceCheck) : null;
+    if (shrinkCheck && !shrinkCheck.allowed) {
+      entryBlocked(asset,shrinkCheck.reason,{shrinkingGuard:shrinkCheck}); return;
+    }
     const final = entrySignal(s, mode);
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
@@ -491,7 +514,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
-      stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+      stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, shrinkingGuard: shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
   async function reconcileExternal(ctx, suppliedPositions) {
     const { asset, s } = ctx;

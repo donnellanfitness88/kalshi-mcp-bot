@@ -54,6 +54,7 @@ test('reference socket subscribes to the required indices and clears quotes imme
   ws.emit('message',Buffer.from(JSON.stringify({type:'cfbenchmarks_value_5hz',msg:{index_id:'BRTI',value_usd:'65050.00000000',source_ts_ms:now}})));
   assert.equal(f.getQuote('BTC').price,65050);
   ws.emit('ping');assert.equal(ws.ponged,true);
-  ws.emit('close');assert.equal(f.getQuote('BTC'),null);
+  assert.equal(f.getHistory('BTC').length,1);
+  ws.emit('close');assert.equal(f.getQuote('BTC'),null);assert.deepEqual(f.getHistory('BTC'),[]);
   f.close();assert.equal(f.reconnectTimer,null);assert.equal(f.watchdog,null);
 });

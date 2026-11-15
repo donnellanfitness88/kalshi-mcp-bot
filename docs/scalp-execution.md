@@ -104,6 +104,35 @@ final-minute settlement average, dynamically widen for volatility, or force an
 exit if distance later shrinks. The fixed buffers are user-selected and do not
 guarantee profit or a maximum loss.
 
+### Shrinking-cushion guard for additional purchases
+
+The first filled late purchase retains the existing fixed-distance and pricing
+rules. Every subsequent purchase into a held late position (including retries
+of a partly filled stage) must also pass the shrinking-cushion guard.
+
+Use signed CF Benchmarks distance onto the winning side. Block an add-on when
+all three conditions hold: the cushion fell at least 30% over 15 elapsed seconds,
+the dollar drop is at least the current stage's existing minimum distance,
+and the latest three-second change still approaches the target. Independently,
+block while still approaching if the fifteen-second average approach speed
+would consume the remaining cushion before expiry. This linear projection is a
+risk heuristic, not a prediction of settlement or its final-minute average.
+
+A trigger latches by coin, ticker and side. Resume only after ten consecutive
+elapsed one-second checkpoints show a flat or improving cushion, with valid
+continuous data and all original distance/price/time/risk requirements met.
+The last ten seconds are scanned for recent triggers even if no order check ran
+at the exact drop. Missing fifteen-second history, stale prices, or gaps over
+1.5 seconds block add-ons. First buys do not need this additional history.
+
+The guard uses sixty seconds of in-memory CF tick history and is checked both
+before and after slow account reads. Latches are saved in the execution journal
+before transmission and survive restarts; history rebuilds after a reconnect.
+Blocked adds reserve no new stage budget and may retry within the original
+stage. Logs retain guard metrics alongside the order's proximity evidence.
+It does not force a sale, change entry prices, move budget between stages, or
+change the $2/$25/$50 budgets or BTC/ETH fixed-distance thresholds.
+
 Each stage has one budget per ticker, which may be filled through multiple
 IOC limit orders. Missed earlier stages are skipped;
 there is no catch-up buying. A higher price does not trigger several stages at
@@ -163,7 +192,7 @@ against duplicate accounting. Missing fills, reversed/increased holdings or
 invalid data remain blocked. Account-level risk guards still apply.
 
 Validate:
-`node --test tests/unit/late-proximity.test.js tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
+`node --test tests/unit/shrinking-cushion.test.js tests/unit/late-proximity.test.js tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
 
 The older general suite has pre-existing failures against current API/NN
 shapes. Passing execution tests verifies programmed behavior, not profitability.

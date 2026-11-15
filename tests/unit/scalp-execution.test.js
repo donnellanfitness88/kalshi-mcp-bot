@@ -26,6 +26,10 @@ function fixture(direction = 'UP', sim = false, earlyScalpsEnabled = true) {
   const requests = [], logs = [];
   let referenceQuote = asset => ({price:(asset==='BTC'?65000:2000)+(state[asset].yesAsk>.5?1:-1)*(asset==='BTC'?1000:10),
     source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()});
+  let referenceHistory = asset => {
+    const q=referenceQuote(asset);
+    return q ? Array.from({length:31},(_,i)=>({price:q.price,sourceTs:Date.now()-(30-i)*1000})) : [];
+  };
   let saved;
   const api = { getMarket:async ticker=>mockMarket(ticker), getPositions: async () => ['BTC', 'ETH'].flatMap(asset => {
     const t = state[asset].activeTrade;
@@ -37,9 +41,9 @@ function fixture(direction = 'UP', sim = false, earlyScalpsEnabled = true) {
         average_fill_price: body.price, average_fee_paid: '0.0100' };
     } };
   const dynamicApi = Object.fromEntries(['getPositions', 'getOrders', 'getBalance', 'placeOrder', 'getOrder', 'getAllFills', 'getMarket', 'getAllSettlements'].map(key => [key, (...args) => api[key](...args)]));
-  const executor = createScalpExecutor({ state, getReferenceQuote:asset=>referenceQuote(asset), api: dynamicApi, earlyScalpsEnabled, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
+  const executor = createScalpExecutor({ state, getReferenceQuote:asset=>referenceQuote(asset),getReferenceHistory:asset=>referenceHistory(asset), api: dynamicApi, earlyScalpsEnabled, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
   const ctx = asset => ({ asset, s: state[asset], balance: 100 });
-  return { referenceQuote:asset=>referenceQuote(asset), setReferenceQuote:fn=>{referenceQuote=fn;}, advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
+  return { referenceHistory:asset=>referenceHistory(asset),setReferenceHistory:fn=>{referenceHistory=fn;}, referenceQuote:asset=>referenceQuote(asset), setReferenceQuote:fn=>{referenceQuote=fn;}, advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
 }
 function targetFor(t) {
   return scalpTakeProfitPrice(t.entrySidePrice,t.side,{contracts:t.count,entryFees:t.entryFees,
@@ -103,7 +107,7 @@ test('pending order recovers actual partial fills without another submission', a
 });
 test('journal failure prevents order transmission', async () => {
   const f = fixture();
-  const executor = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
+  const executor = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
   await executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 0);
 });
@@ -151,7 +155,7 @@ test('restored journal reconciles an interrupted buy without sending another ord
   f.api.placeOrder = async body => { f.requests.push(body); throw new Error('timeout'); };
   await f.executor.tick(f.ctx('BTC'));
   const saved = f.saved();
-  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: { ...f.api,
+  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: { ...f.api,
     getOrders: async () => [{ order_id: 'recovered', client_order_id: saved.pending.body.client_order_id,
       status: 'canceled', fill_count_fp: '0.00' }] }, save: () => {}, log: () => {} });
   restored.restore(saved);
@@ -270,7 +274,7 @@ test('late holding ignores 45-second and $5 scalp exits and survives restart', a
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 1);
   const saved = f.executor.snapshot();
-  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: () => {} });
+  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: f.api, save: () => {}, log: () => {} });
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade.mode, 'LATE_SETTLEMENT');
@@ -292,7 +296,7 @@ test('settlement waits for account record then records win/loss once with origin
     // Restore in a new executor to avoid waiting for the next read-only poll.
     f.api.getAllSettlements = async () => [{ ticker: t.ticker, settled_time: new Date(t.startedAt + 100000).toISOString(), market_result: result }];
     f.api.getAllFills = async () => [{ order_id: t.entryOrderId, created_time: new Date(t.startedAt).toISOString() }];
-    const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: value => f.logs.push(value) });
+    const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: f.api, save: () => {}, log: value => f.logs.push(value) });
     restored.restore(f.executor.snapshot());
     await restored.tick(f.ctx('BTC'));
     const expected = (result === 'yes' ? t.count : 0) - t.amount - t.entryFees;
@@ -336,7 +340,7 @@ test('verified full manual sale clears YES or NO holding with actual net P&L; se
     assert.ok(Math.abs(f.state.BTC.totalPnL - expected) < 1e-9);
     assert.equal(f.requests.length, 1);
     assert.equal(f.logs.at(-1).event, 'MANUAL_CLOSE_RECONCILED');
-    const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: () => {} });
+    const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: f.api, save: () => {}, log: () => {} });
     restored.restore(f.saved());
     f.state.BTC.farmArmed = false;
     await restored.tick(f.ctx('BTC'));
@@ -355,7 +359,7 @@ test('partial manual sale preserves remaining position, fees and previously real
   assert.ok(Math.abs(remaining.entryFees - fees * (n - 3) / n) < 1e-9);
   assert.equal(f.state.BTC.tradeCount, 0);
   assert.ok(Math.abs(remaining.realizedNet - (3 * (0.13 - t.entrySidePrice) - fees * 3 / n - 0.05)) < 1e-9);
-  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: () => {} });
+  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: f.api, save: () => {}, log: () => {} });
   restored.restore(f.saved());
   await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade.count, n - 3);
@@ -390,7 +394,7 @@ test('manual reconciliation does not mutate live accounting when journal write f
   f.api.getPositions = async () => [];
   f.api.getAllFills = async () => [manualFill(t)];
   f.api.getOrder = async () => manualOrder(t, t.count);
-  const executor = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
+  const executor = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset), api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
   await executor.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade, t);
   assert.equal(f.state.BTC.tradeCount, 0);
@@ -564,7 +568,7 @@ test('exact historically rejected request can recover after restart without resu
   await f.executor.tick(f.ctx('BTC'));
   const saved=f.saved();
   saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.equal(restored.snapshot().pending,null);
@@ -586,7 +590,7 @@ test('a matching exchange order takes priority over historical rejection evidenc
   const saved=f.saved();
   saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
   f.api.getOrders=async()=>[{client_order_id:saved.pending.body.client_order_id,status:'resting'}];
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.ok(restored.snapshot().pending);
@@ -621,7 +625,7 @@ test('journal failure during rejected-order recovery does not release in-memory 
   await f.executor.tick(f.ctx('BTC'));
   const saved=f.saved();
   saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{throw new Error('disk full');},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{throw new Error('disk full');},log:()=>{}});
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.ok(restored.snapshot().pending);
@@ -742,7 +746,7 @@ test('late stage thresholds are revalidated after balance and account reads',asy
 test('late stage reservations and cumulative cost survive restart; no missed-stage catchup',async()=>{
   const f=stagedFixture(); f.stage(119,.95); await f.executor.tick(f.ctx('BTC'));
   const saved=structuredClone(f.executor.snapshot());
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
   f.stage(59,.97); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
   assert.equal(f.state.BTC.activeTrade.count,77);
@@ -753,7 +757,7 @@ test('unknown add-on order stays pending across ticks and restart',async()=>{
   f.stage(119,.95);
   f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
   await f.executor.tick(f.ctx('BTC'));
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot()));
   await restored.tick(f.ctx('BTC')); f.stage(59,.97); await restored.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,2); assert.equal(f.state.BTC.activeTrade.count,2);
@@ -762,7 +766,7 @@ test('unknown add-on order stays pending across ticks and restart',async()=>{
 test('no late additions to a legacy holding without staged journal evidence',async()=>{
   const f=stagedFixture(); f.stage(179,.90); await f.executor.tick(f.ctx('BTC'));
   const saved=structuredClone(f.executor.snapshot()); delete saved.lateStages;
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved); f.stage(59,.97); await restored.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,1);
 });
@@ -778,7 +782,7 @@ test('combined staged position settles once using all entry orders and actual fe
     f.api.getMarket=async()=>({status:'finalized',result});
     f.api.getAllSettlements=async()=>[{ticker:t.ticker,settled_time:new Date(t.startedAt+10000).toISOString(),market_result:result}];
     f.api.getAllFills=async()=>t.entryOrderIds.map(order_id=>({order_id,created_time:new Date(t.startedAt).toISOString()}));
-    const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+    const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
     restored.restore(structuredClone(f.executor.snapshot()));
     await restored.tick(f.ctx('BTC')); await restored.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade,null); assert.equal(f.state.BTC.tradeCount,1);
@@ -794,7 +798,7 @@ test('manual full close recognizes all staged entry IDs and disables further add
     ...t.entryOrderIds.map(order_id=>({order_id,ticker:t.ticker,created_time:new Date(t.startedAt).toISOString(),book_side:'bid'})),
     manualFill(t,t.count,.98,.03)];
   f.api.getOrder=async()=>manualOrder(t,t.count);
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot())); await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade,null);
   assert.ok(restored.snapshot().lateStages[t.ticker].closed);
@@ -839,7 +843,7 @@ test('timed-out add-on reconciles partial fills into the existing position exact
 test('failed aggregate journal write leaves original holding intact and recovery does not double count',async()=>{
   const f=stagedFixture(); f.stage(179,.90); await f.executor.tick(f.ctx('BTC'));
   let saved=structuredClone(f.executor.snapshot()), fail=true;
-  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:{...f.api,getOrder:(...args)=>f.api.getOrder(...args),getAllFills:(...args)=>f.api.getAllFills(...args)},log:()=>{},save:value=>{
+  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:{...f.api,getOrder:(...args)=>f.api.getOrder(...args),getAllFills:(...args)=>f.api.getAllFills(...args)},log:()=>{},save:value=>{
     if(fail && value.positions.BTC?.count===28)throw new Error('disk full');
     saved=structuredClone(value);
   }});
@@ -858,7 +862,7 @@ test('partial manual sale retains stage spend cap and remaining cost before addi
   f.api.getPositions=async()=>[{ticker:t.ticker,position_fp:'24'}];
   f.api.getAllFills=async()=>[manualFill(t,2,.95,.02)];
   f.api.getOrder=async()=>manualOrder(t,2);
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot())); await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade.count,24);
   f.api.getPositions=async()=>[{ticker:t.ticker,position_fp:String(f.state.BTC.activeTrade.count)}];
@@ -916,7 +920,7 @@ test('retry waits and per-stage remaining budget survive restart',async()=>{
   const f=stagedFixture(); f.stage(119,.95);
   f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:'first-partial',fill_count:'4',remaining_count:'0',average_fill_price:body.price,average_fee_paid:'.01'};};
   await f.executor.tick(f.ctx('BTC'));
-  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,now:f.retryNow,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,now:f.retryNow,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot()));
   await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
   f.advanceRetry(); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
@@ -1069,7 +1073,7 @@ test('persisted uncertain fractional late fill reconciles all fills and settles 
     f.api.getOrder=async()=>({order_id:'fractional-order',status:'canceled',fill_count_fp:'1.55'});
     f.api.getAllFills=async()=>[.10,.20,1.25].map((qty,i)=>({fill_id:`f-${i}`,order_id:'fractional-order',book_side:p.body.side,
       count_fp:qty.toFixed(2),yes_price_dollars:side==='yes'?'.95':'.05',no_price_dollars:side==='no'?'.95':'.05',fee_cost:'.001'}));
-    const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+    const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
     restored.restore(saved);await restored.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade.count,1.55);assert.equal(restored.snapshot().pending,null);
     assert.equal(f.requests.length,1);
@@ -1078,7 +1082,7 @@ test('persisted uncertain fractional late fill reconciles all fills and settles 
     f.api.getPositions=async()=>[];
     f.api.getAllSettlements=async()=>[{ticker:t.ticker,settled_time:new Date(t.startedAt+1000).toISOString(),market_result:side}];
     f.api.getMarket=async()=>({status:'finalized',result:side});
-    const settling=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+    const settling=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
     settling.restore(structuredClone(restored.snapshot()));await settling.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.state.BTC.tradeCount,1);
     assert.ok(Math.abs(f.state.BTC.totalPnL-(1.55-1.55*.95-.003))<1e-9);
@@ -1232,13 +1236,13 @@ test('production defaults block all new low-price scalps on either coin',async()
     assert.equal(f.requests.length,0,`${asset} ${price}`);
   }
   const f=fixture();
-  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   await executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0);
 });
 test('disabling early entries preserves profit exits on existing low-price holdings',async()=>{
   const f=fixture();await f.executor.tick(f.ctx('BTC'));
   const t=f.state.BTC.activeTrade;
-  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
+  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),getReferenceHistory:asset=>f.referenceHistory(asset),api:f.api,save:()=>{},log:()=>{}});
   executor.restore(structuredClone(f.executor.snapshot()));
   Object.assign(f.state.BTC,{yesBid:targetFor(t),yesAsk:targetFor(t)+.01,lastQuoteMessageTs:Date.now()});
   await executor.tick(f.ctx('BTC'));
@@ -1385,4 +1389,43 @@ test('market target cache cannot carry an old strike into a new ticker',async()=
   f.state.BTC.ticker='BTC-NEXT';f.api.getMarket=async ticker=>({...mockMarket(ticker),floor_strike:70000});
   f.setReferenceQuote(()=>({price:65100,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
   f.advanceRetry();await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+});
+
+test('first late buy retains current eligibility even with no shrinking history; adds wait for history',async()=>{
+ const f=stagedFixture();f.setReferenceHistory(()=>[]);
+ f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ f.stage(119,.95);await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ const ledger=f.executor.snapshot().lateStages['BTC-TEST'];
+ assert.equal(ledger.records.under_120,undefined);
+ assert.ok(f.logs.some(e=>e.reason==='SHRINK_HISTORY_UNAVAILABLE'));
+});
+test('rapidly shrinking cushion blocks an add-on without consuming budget and restores its latch',async()=>{
+ const f=stagedFixture();f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));
+ const now=Date.now();
+ f.setReferenceQuote(()=>({price:65140,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
+ f.setReferenceHistory(()=>Array.from({length:46},(_,i)=>({sourceTs:now+(i-45)*1000,price:65000+(i<=30?200:200-60*(i-30)/15)})));
+ f.stage(119,.95);await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ const saved=structuredClone(f.executor.snapshot());
+ assert.equal(saved.shrinkingGuards.BTC.blocked,true);
+ assert.equal(saved.lateStages['BTC-TEST'].records.under_120,undefined);
+ const restored=createScalpExecutor({state:f.state,api:f.api,getReferenceQuote:f.referenceQuote,getReferenceHistory:f.referenceHistory,
+  now:f.retryNow,save:()=>{},log:()=>{}});
+ restored.restore(saved);f.advanceRetry();await restored.tick(f.ctx('BTC'));
+ assert.equal(f.requests.length,1);assert.equal(restored.snapshot().shrinkingGuards.BTC.blocked,true);
+});
+test('shrinking history is rechecked after slow account reads before an add-on is sent',async()=>{
+ const f=stagedFixture();f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));
+ f.stage(119,.95);
+ f.api.getBalance=async()=>{f.setReferenceHistory(()=>[]);return 10000;};
+ await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+ assert.equal(f.executor.snapshot().lateStages['BTC-TEST'].records.under_120,undefined);
+});
+test('a shrinking-guard journal write failure prevents the additional order',async()=>{
+ const f=stagedFixture();f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));
+ const now=Date.now();f.stage(119,.95);
+ f.setReferenceQuote(()=>({price:65140,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
+ f.setReferenceHistory(()=>Array.from({length:46},(_,i)=>({sourceTs:now+(i-45)*1000,price:65000+(i<=30?200:200-60*(i-30)/15)})));
+ const restored=createScalpExecutor({state:f.state,api:f.api,getReferenceQuote:f.referenceQuote,getReferenceHistory:f.referenceHistory,
+  save:()=>{throw new Error('disk full');},log:()=>{}});
+ restored.restore(f.executor.snapshot());await restored.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
 });

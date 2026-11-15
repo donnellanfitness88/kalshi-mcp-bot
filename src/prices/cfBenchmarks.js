@@ -11,7 +11,7 @@ export class BenchmarkFeed {
   constructor({ Socket = WebSocket, headers = buildHeaders, now = Date.now,
     log = message => console.log('[CF] ' + message) } = {}) {
     Object.assign(this, { Socket, headers, now, log });
-    this.quotes = {}; this.ws = null; this.closed = true;
+    this.history = {}; this.quotes = {}; this.ws = null; this.closed = true;
     this.reconnectTimer = null; this.watchdog = null;
   }
   ingest(frame) {
@@ -23,10 +23,13 @@ export class BenchmarkFeed {
         sourceTs > now || now - sourceTs > BENCHMARK_MAX_AGE_MS ||
         sourceTs <= (this.quotes[asset]?.sourceTs ?? 0)) return false;
     const first = !this.quotes[asset];
+    this.history[asset] = [...(this.history[asset] ?? []), {price,sourceTs}]
+      .filter(p => p.sourceTs >= sourceTs-60000).slice(-500);
     this.quotes[asset] = { price, sourceTs, receivedAt: now, source: 'CF_BENCHMARKS' };
     if (first) this.log(`${asset} reference ready (${m.index_id})`);
     return true;
   }
+  getHistory(asset) { return (this.history[asset] ?? []).map(p => ({...p})); }
   getQuote(asset) {
     const q = this.quotes[asset], now = this.now();
     if (!q || now < q.sourceTs || now - q.sourceTs > BENCHMARK_MAX_AGE_MS ||
@@ -39,7 +42,7 @@ export class BenchmarkFeed {
   }
   open() {
     if (this.closed) return;
-    this.quotes = {};
+    this.history = {}; this.quotes = {};
     try {
       const ws = new this.Socket(URL, { headers: this.headers('GET', '/trade-api/ws/v2') });
       this.ws = ws;
@@ -62,10 +65,10 @@ export class BenchmarkFeed {
       });
       ws.on('close', () => {
         if (this.ws !== ws) return;
-        this.quotes = {}; clearInterval(this.watchdog); this.watchdog = null;
+        this.history = {}; this.quotes = {}; clearInterval(this.watchdog); this.watchdog = null;
         this.schedule();
       });
-      ws.on('error', () => { if (this.ws === ws) { this.quotes = {}; ws.terminate(); } });
+      ws.on('error', () => { if (this.ws === ws) { this.history = {}; this.quotes = {}; ws.terminate(); } });
       clearInterval(this.watchdog);
       this.watchdog = setInterval(() => {
         if (this.now() - lastMessage > 15000) ws.terminate();
@@ -83,7 +86,7 @@ export class BenchmarkFeed {
   }
   close() {
     this.closed = true; clearTimeout(this.reconnectTimer); clearInterval(this.watchdog);
-    this.reconnectTimer = null; this.watchdog = null; this.quotes = {};
+    this.reconnectTimer = null; this.watchdog = null; this.history = {}; this.quotes = {};
     const ws = this.ws; this.ws = null; ws?.terminate();
   }
 }
