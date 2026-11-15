@@ -66,6 +66,44 @@ Late entries use three incremental budgets, including estimated entry fees:
 | Below 120 seconds, down to 60 seconds inclusive | 95 cents | $25 |
 | Below 60 seconds, above zero | 97 cents | $50 |
 
+Every new late purchase and add-on must also pass this signed dollar-distance
+check against the current market's official `floor_strike`:
+
+| Stage | BTC minimum distance | ETH minimum distance |
+| --- | --- | --- |
+| under_180 ($2) | $50.00 | $1.00 |
+| under_120 ($25) | $50.00 | $0.75 |
+| under_60 ($50) | $50.00 | $0.50 |
+
+Equality qualifies. YES requires the reference price above the target by at
+least the buffer; NO requires it below by at least the buffer. Absolute distance
+on the losing side never qualifies. These are entry filters, not stop-losses.
+Existing holdings still follow their settlement/manual-sale reconciliation.
+
+The reference is Kalshi's authenticated `cfbenchmarks_value_5hz` stream, index
+`BRTI` for BTC and `ETHUSD_RTI` for ETH. Both source publication and local receipt
+must be no older than two seconds, with no future timestamp. No Binance/Kraken
+fallback is used for this gate. Missing, rejected or stale reference data blocks
+late purchases until healthy data returns; existing holdings remain managed.
+The socket responds to pings, reconnects after disconnects and clears old quotes.
+
+The target is cached by coin and ticker after validating its market identity,
+positive numeric strike and `greater_or_equal` contract type. Missing targets
+are retried no faster than five seconds; a new ticker never inherits an old
+strike. Recheck proximity after the final account reads immediately before
+submission. A rejected distance does not reserve a stage or consume its budget,
+and may be retried while its time/price stage remains eligible.
+
+Entry confirmation logs include ticker and the order's proximity check: target,
+reference price, signed distance, required minimum, source timestamp and check
+time. The same evidence is persisted in the pending order for uncertain-response
+recovery. This captures the submission check, not a guarantee of price at fill.
+
+This filter uses the current reference index. It does not predict the eventual
+final-minute settlement average, dynamically widen for volatility, or force an
+exit if distance later shrinks. The fixed buffers are user-selected and do not
+guarantee profit or a maximum loss.
+
 Each stage has one budget per ticker, which may be filled through multiple
 IOC limit orders. Missed earlier stages are skipped;
 there is no catch-up buying. A higher price does not trigger several stages at
@@ -125,7 +163,7 @@ against duplicate accounting. Missing fills, reversed/increased holdings or
 invalid data remain blocked. Account-level risk guards still apply.
 
 Validate:
-`node --test tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
+`node --test tests/unit/late-proximity.test.js tests/unit/scalp-entry-filters.test.js tests/unit/scalp-execution.test.js`
 
 The older general suite has pre-existing failures against current API/NN
 shapes. Passing execution tests verifies programmed behavior, not profitability.
@@ -187,3 +225,5 @@ and returned counts for diagnosis. Prices, budgets and strategy rules do not
 change.
 
 Reference: https://docs.kalshi.com/getting_started/fixed_point_migration.md
+
+Proximity feed reference: https://docs.kalshi.com/websockets/cfbenchmarks-value-5hz

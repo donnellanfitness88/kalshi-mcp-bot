@@ -7,6 +7,8 @@ import { createScalpExecutor, scalpEntryBudget, scalpSize, reserveFee, scalpAck,
 import { checkRiskGuards, startDay } from '../../src/engine/riskManager.js';
 import { evaluateScalpExit, scalpEntryPriceAllowed, scalpTakeProfitPrice } from '../../src/engine/scalpStrategy.js';
 
+function mockMarket(ticker) { return {ticker, status:'open', strike_type:'greater_or_equal', floor_strike:ticker.startsWith('ETH')?2000:65000}; }
+
 process.env.SCALP_ENABLED = 'true';
 process.env.DRY_RUN = 'false';
 function fixture(direction = 'UP', sim = false, earlyScalpsEnabled = true) {
@@ -22,8 +24,10 @@ function fixture(direction = 'UP', sim = false, earlyScalpsEnabled = true) {
     })) });
   const state = { BTC: asset(), ETH: { ...asset(), ticker: 'ETH-TEST' }, simMode: sim, paperBalance: 50, disabledAssets: [] };
   const requests = [], logs = [];
+  let referenceQuote = asset => ({price:(asset==='BTC'?65000:2000)+(state[asset].yesAsk>.5?1:-1)*(asset==='BTC'?1000:10),
+    source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()});
   let saved;
-  const api = { getPositions: async () => ['BTC', 'ETH'].flatMap(asset => {
+  const api = { getMarket:async ticker=>mockMarket(ticker), getPositions: async () => ['BTC', 'ETH'].flatMap(asset => {
     const t = state[asset].activeTrade;
     return t && !t.sim ? [{ ticker: t.ticker, position_fp: String(t.side === 'yes' ? t.count : -t.count) }] : [];
   }), getOrders: async () => [], getBalance: async () => 10000,
@@ -33,9 +37,9 @@ function fixture(direction = 'UP', sim = false, earlyScalpsEnabled = true) {
         average_fill_price: body.price, average_fee_paid: '0.0100' };
     } };
   const dynamicApi = Object.fromEntries(['getPositions', 'getOrders', 'getBalance', 'placeOrder', 'getOrder', 'getAllFills', 'getMarket', 'getAllSettlements'].map(key => [key, (...args) => api[key](...args)]));
-  const executor = createScalpExecutor({ state, api: dynamicApi, earlyScalpsEnabled, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
+  const executor = createScalpExecutor({ state, getReferenceQuote:asset=>referenceQuote(asset), api: dynamicApi, earlyScalpsEnabled, now: () => retryClock, save: value => { saved = structuredClone(value); }, log: value => logs.push(value) });
   const ctx = asset => ({ asset, s: state[asset], balance: 100 });
-  return { advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
+  return { referenceQuote:asset=>referenceQuote(asset), setReferenceQuote:fn=>{referenceQuote=fn;}, advanceRetry: (ms=3001) => { retryClock += ms; }, retryNow: () => retryClock, state, api, executor, requests, logs, ctx, saved: () => saved };
 }
 function targetFor(t) {
   return scalpTakeProfitPrice(t.entrySidePrice,t.side,{contracts:t.count,entryFees:t.entryFees,
@@ -99,7 +103,7 @@ test('pending order recovers actual partial fills without another submission', a
 });
 test('journal failure prevents order transmission', async () => {
   const f = fixture();
-  const executor = createScalpExecutor({ state: f.state, api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
+  const executor = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
   await executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 0);
 });
@@ -147,7 +151,7 @@ test('restored journal reconciles an interrupted buy without sending another ord
   f.api.placeOrder = async body => { f.requests.push(body); throw new Error('timeout'); };
   await f.executor.tick(f.ctx('BTC'));
   const saved = f.saved();
-  const restored = createScalpExecutor({ state: f.state, api: { ...f.api,
+  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: { ...f.api,
     getOrders: async () => [{ order_id: 'recovered', client_order_id: saved.pending.body.client_order_id,
       status: 'canceled', fill_count_fp: '0.00' }] }, save: () => {}, log: () => {} });
   restored.restore(saved);
@@ -262,11 +266,11 @@ test('late holding ignores 45-second and $5 scalp exits and survives restart', a
   await f.executor.tick(f.ctx('BTC'));
   f.state.BTC.activeTrade.startedAt -= 60000;
   Object.assign(f.state.BTC, { secsLeft: 20, yesAsk: 0.51, yesBid: 0.50 });
-  f.api.getMarket = async () => ({ status: 'open' });
+  f.api.getMarket = async ticker => mockMarket(ticker);
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length, 1);
   const saved = f.executor.snapshot();
-  const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
+  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: () => {} });
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade.mode, 'LATE_SETTLEMENT');
@@ -288,7 +292,7 @@ test('settlement waits for account record then records win/loss once with origin
     // Restore in a new executor to avoid waiting for the next read-only poll.
     f.api.getAllSettlements = async () => [{ ticker: t.ticker, settled_time: new Date(t.startedAt + 100000).toISOString(), market_result: result }];
     f.api.getAllFills = async () => [{ order_id: t.entryOrderId, created_time: new Date(t.startedAt).toISOString() }];
-    const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: value => f.logs.push(value) });
+    const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: value => f.logs.push(value) });
     restored.restore(f.executor.snapshot());
     await restored.tick(f.ctx('BTC'));
     const expected = (result === 'yes' ? t.count : 0) - t.amount - t.entryFees;
@@ -332,7 +336,7 @@ test('verified full manual sale clears YES or NO holding with actual net P&L; se
     assert.ok(Math.abs(f.state.BTC.totalPnL - expected) < 1e-9);
     assert.equal(f.requests.length, 1);
     assert.equal(f.logs.at(-1).event, 'MANUAL_CLOSE_RECONCILED');
-    const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
+    const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: () => {} });
     restored.restore(f.saved());
     f.state.BTC.farmArmed = false;
     await restored.tick(f.ctx('BTC'));
@@ -351,7 +355,7 @@ test('partial manual sale preserves remaining position, fees and previously real
   assert.ok(Math.abs(remaining.entryFees - fees * (n - 3) / n) < 1e-9);
   assert.equal(f.state.BTC.tradeCount, 0);
   assert.ok(Math.abs(remaining.realizedNet - (3 * (0.13 - t.entrySidePrice) - fees * 3 / n - 0.05)) < 1e-9);
-  const restored = createScalpExecutor({ state: f.state, api: f.api, save: () => {}, log: () => {} });
+  const restored = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => {}, log: () => {} });
   restored.restore(f.saved());
   await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade.count, n - 3);
@@ -362,7 +366,7 @@ test('zero account position without closing fills never clears the trade', async
   const t = f.state.BTC.activeTrade;
   f.api.getPositions = async () => [];
   f.api.getAllFills = async () => [];
-  f.api.getMarket = async () => ({ status: 'open' });
+  f.api.getMarket = async ticker => mockMarket(ticker);
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade, t);
   assert.equal(f.state.BTC.tradeCount, 0);
@@ -386,7 +390,7 @@ test('manual reconciliation does not mutate live accounting when journal write f
   f.api.getPositions = async () => [];
   f.api.getAllFills = async () => [manualFill(t)];
   f.api.getOrder = async () => manualOrder(t, t.count);
-  const executor = createScalpExecutor({ state: f.state, api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
+  const executor = createScalpExecutor({ state: f.state, getReferenceQuote:asset=>f.referenceQuote(asset), api: f.api, save: () => { throw new Error('disk full'); }, log: () => {} });
   await executor.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade, t);
   assert.equal(f.state.BTC.tradeCount, 0);
@@ -560,7 +564,7 @@ test('exact historically rejected request can recover after restart without resu
   await f.executor.tick(f.ctx('BTC'));
   const saved=f.saved();
   saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.equal(restored.snapshot().pending,null);
@@ -582,7 +586,7 @@ test('a matching exchange order takes priority over historical rejection evidenc
   const saved=f.saved();
   saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
   f.api.getOrders=async()=>[{client_order_id:saved.pending.body.client_order_id,status:'resting'}];
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.ok(restored.snapshot().pending);
@@ -617,7 +621,7 @@ test('journal failure during rejected-order recovery does not release in-memory 
   await f.executor.tick(f.ctx('BTC'));
   const saved=f.saved();
   saved.pending.body.client_order_id='777a5890-567c-4d8d-a124-f85bd8b834c5';
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{throw new Error('disk full');},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{throw new Error('disk full');},log:()=>{}});
   restored.restore(saved);
   await restored.tick(f.ctx('BTC'));
   assert.ok(restored.snapshot().pending);
@@ -671,7 +675,7 @@ test('cheap NO is blocked and a cheap YES without rising momentum cannot enter',
 function stagedFixture(side='yes', sim=false) {
   const f=fixture('UP',sim);
   let order=0;
-  f.api.getMarket=async()=>({status:'open'});
+  f.api.getMarket=async ticker=>mockMarket(ticker);
   f.api.placeOrder=async body=>{
     f.requests.push(body);
     return {order_id:`staged-${++order}`,fill_count:body.count,remaining_count:'0',
@@ -738,7 +742,7 @@ test('late stage thresholds are revalidated after balance and account reads',asy
 test('late stage reservations and cumulative cost survive restart; no missed-stage catchup',async()=>{
   const f=stagedFixture(); f.stage(119,.95); await f.executor.tick(f.ctx('BTC'));
   const saved=structuredClone(f.executor.snapshot());
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
   f.stage(59,.97); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
   assert.equal(f.state.BTC.activeTrade.count,77);
@@ -749,7 +753,7 @@ test('unknown add-on order stays pending across ticks and restart',async()=>{
   f.stage(119,.95);
   f.api.placeOrder=async body=>{f.requests.push(body);throw new Error('timeout');};
   await f.executor.tick(f.ctx('BTC'));
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot()));
   await restored.tick(f.ctx('BTC')); f.stage(59,.97); await restored.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,2); assert.equal(f.state.BTC.activeTrade.count,2);
@@ -758,7 +762,7 @@ test('unknown add-on order stays pending across ticks and restart',async()=>{
 test('no late additions to a legacy holding without staged journal evidence',async()=>{
   const f=stagedFixture(); f.stage(179,.90); await f.executor.tick(f.ctx('BTC'));
   const saved=structuredClone(f.executor.snapshot()); delete saved.lateStages;
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(saved); f.stage(59,.97); await restored.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,1);
 });
@@ -774,7 +778,7 @@ test('combined staged position settles once using all entry orders and actual fe
     f.api.getMarket=async()=>({status:'finalized',result});
     f.api.getAllSettlements=async()=>[{ticker:t.ticker,settled_time:new Date(t.startedAt+10000).toISOString(),market_result:result}];
     f.api.getAllFills=async()=>t.entryOrderIds.map(order_id=>({order_id,created_time:new Date(t.startedAt).toISOString()}));
-    const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+    const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
     restored.restore(structuredClone(f.executor.snapshot()));
     await restored.tick(f.ctx('BTC')); await restored.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade,null); assert.equal(f.state.BTC.tradeCount,1);
@@ -790,7 +794,7 @@ test('manual full close recognizes all staged entry IDs and disables further add
     ...t.entryOrderIds.map(order_id=>({order_id,ticker:t.ticker,created_time:new Date(t.startedAt).toISOString(),book_side:'bid'})),
     manualFill(t,t.count,.98,.03)];
   f.api.getOrder=async()=>manualOrder(t,t.count);
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot())); await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade,null);
   assert.ok(restored.snapshot().lateStages[t.ticker].closed);
@@ -835,7 +839,7 @@ test('timed-out add-on reconciles partial fills into the existing position exact
 test('failed aggregate journal write leaves original holding intact and recovery does not double count',async()=>{
   const f=stagedFixture(); f.stage(179,.90); await f.executor.tick(f.ctx('BTC'));
   let saved=structuredClone(f.executor.snapshot()), fail=true;
-  const executor=createScalpExecutor({state:f.state,api:{...f.api,getOrder:(...args)=>f.api.getOrder(...args),getAllFills:(...args)=>f.api.getAllFills(...args)},log:()=>{},save:value=>{
+  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:{...f.api,getOrder:(...args)=>f.api.getOrder(...args),getAllFills:(...args)=>f.api.getAllFills(...args)},log:()=>{},save:value=>{
     if(fail && value.positions.BTC?.count===28)throw new Error('disk full');
     saved=structuredClone(value);
   }});
@@ -854,7 +858,7 @@ test('partial manual sale retains stage spend cap and remaining cost before addi
   f.api.getPositions=async()=>[{ticker:t.ticker,position_fp:'24'}];
   f.api.getAllFills=async()=>[manualFill(t,2,.95,.02)];
   f.api.getOrder=async()=>manualOrder(t,2);
-  const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot())); await restored.tick(f.ctx('BTC'));
   assert.equal(f.state.BTC.activeTrade.count,24);
   f.api.getPositions=async()=>[{ticker:t.ticker,position_fp:String(f.state.BTC.activeTrade.count)}];
@@ -912,7 +916,7 @@ test('retry waits and per-stage remaining budget survive restart',async()=>{
   const f=stagedFixture(); f.stage(119,.95);
   f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:'first-partial',fill_count:'4',remaining_count:'0',average_fill_price:body.price,average_fee_paid:'.01'};};
   await f.executor.tick(f.ctx('BTC'));
-  const restored=createScalpExecutor({state:f.state,api:f.api,now:f.retryNow,save:()=>{},log:()=>{}});
+  const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,now:f.retryNow,save:()=>{},log:()=>{}});
   restored.restore(structuredClone(f.executor.snapshot()));
   await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,1);
   f.advanceRetry(); await restored.tick(f.ctx('BTC')); assert.equal(f.requests.length,2);
@@ -1065,7 +1069,7 @@ test('persisted uncertain fractional late fill reconciles all fills and settles 
     f.api.getOrder=async()=>({order_id:'fractional-order',status:'canceled',fill_count_fp:'1.55'});
     f.api.getAllFills=async()=>[.10,.20,1.25].map((qty,i)=>({fill_id:`f-${i}`,order_id:'fractional-order',book_side:p.body.side,
       count_fp:qty.toFixed(2),yes_price_dollars:side==='yes'?'.95':'.05',no_price_dollars:side==='no'?'.95':'.05',fee_cost:'.001'}));
-    const restored=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+    const restored=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
     restored.restore(saved);await restored.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade.count,1.55);assert.equal(restored.snapshot().pending,null);
     assert.equal(f.requests.length,1);
@@ -1074,7 +1078,7 @@ test('persisted uncertain fractional late fill reconciles all fills and settles 
     f.api.getPositions=async()=>[];
     f.api.getAllSettlements=async()=>[{ticker:t.ticker,settled_time:new Date(t.startedAt+1000).toISOString(),market_result:side}];
     f.api.getMarket=async()=>({status:'finalized',result:side});
-    const settling=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+    const settling=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
     settling.restore(structuredClone(restored.snapshot()));await settling.tick(f.ctx('BTC'));
     assert.equal(f.state.BTC.activeTrade,null);assert.equal(f.state.BTC.tradeCount,1);
     assert.ok(Math.abs(f.state.BTC.totalPnL-(1.55-1.55*.95-.003))<1e-9);
@@ -1228,13 +1232,13 @@ test('production defaults block all new low-price scalps on either coin',async()
     assert.equal(f.requests.length,0,`${asset} ${price}`);
   }
   const f=fixture();
-  const executor=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   await executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0);
 });
 test('disabling early entries preserves profit exits on existing low-price holdings',async()=>{
   const f=fixture();await f.executor.tick(f.ctx('BTC'));
   const t=f.state.BTC.activeTrade;
-  const executor=createScalpExecutor({state:f.state,api:f.api,save:()=>{},log:()=>{}});
+  const executor=createScalpExecutor({state:f.state,getReferenceQuote:asset=>f.referenceQuote(asset),api:f.api,save:()=>{},log:()=>{}});
   executor.restore(structuredClone(f.executor.snapshot()));
   Object.assign(f.state.BTC,{yesBid:targetFor(t),yesAsk:targetFor(t)+.01,lastQuoteMessageTs:Date.now()});
   await executor.tick(f.ctx('BTC'));
@@ -1321,4 +1325,64 @@ test('higher-price final-two-minute scalps remain enabled without an early entry
   await f.executor.tick(f.ctx('BTC'));
   assert.equal(f.requests.length,1);assert.equal(f.state.BTC.activeTrade.mode,'SCALP');
   assert.ok(f.state.BTC.activeTrade.originalCost<=1);
+});
+
+test('live late entry enforces the requested proximity on each coin, stage and side',async()=>{
+  for(const asset of ['BTC','ETH'])for(const [seconds,stageId,price,min]of [
+    [179,'under_180',.90,asset==='BTC'?50:1],
+    [119,'under_120',.95,asset==='BTC'?50:.75],
+    [59,'under_60',.97,asset==='BTC'?50:.50]])for(const side of ['yes','no'])for(const delta of [-.01,0]){
+      const f=stagedFixture();lateOther(f,asset,seconds,price,side);
+      const target=asset==='BTC'?65000:2000;
+      f.setReferenceQuote(()=>({price:target+(side==='yes'?1:-1)*(min+delta),source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
+      await f.executor.tick(f.ctx(asset));assert.equal(f.requests.length,delta===0?1:0,`${asset} ${stageId} ${side} ${delta}`);
+      if(delta===0){
+        const event=f.logs.find(e=>e.event==='ENTRY_CONFIRMED');
+        assert.equal(event.proximity.target,target);assert.equal(event.proximity.minimumDistance,min);
+        assert.equal(event.proximity.source,'CF_BENCHMARKS');assert.ok(event.proximity.checkedAt);
+      } else assert.equal(f.executor.snapshot().lateStages[f.state[asset].ticker],undefined);
+  }
+});
+test('blocked proximity consumes no late budget and qualifying add-ons resume with a fresh check',async()=>{
+  const f=stagedFixture();let distance=1;
+  f.setReferenceQuote(()=>({price:2000+distance,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
+  lateOther(f,'ETH',179,.90);await f.executor.tick(f.ctx('ETH'));
+  const t=f.state.ETH.activeTrade;
+  distance=.74;lateOther(f,'ETH',119,.95);await f.executor.tick(f.ctx('ETH'));
+  assert.equal(f.requests.length,1);assert.equal(f.state.ETH.activeTrade,t);
+  assert.equal(f.executor.snapshot().lateStages[t.ticker].records.under_120,undefined);
+  f.advanceRetry();distance=.75;await f.executor.tick(f.ctx('ETH'));assert.equal(f.requests.length,2);
+  distance=.49;lateOther(f,'ETH',59,.97);await f.executor.tick(f.ctx('ETH'));assert.equal(f.requests.length,2);
+  f.advanceRetry();distance=.50;await f.executor.tick(f.ctx('ETH'));assert.equal(f.requests.length,3);
+  assert.ok(f.executor.snapshot().lateStages[t.ticker].spent<=77);
+});
+test('a narrowing distance during account reads blocks transmission without reserving a stage',async()=>{
+  const f=stagedFixture();f.stage(59,.97);
+  let distance=60;
+  f.setReferenceQuote(()=>({price:65000+distance,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
+  f.api.getBalance=async()=>{distance=49;return 10000;};
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,0);assert.equal(f.executor.snapshot().pending,null);
+  assert.equal(f.executor.snapshot().lateStages['BTC-TEST'],undefined);
+});
+test('missing, stale or mismatched target and reference data blocks late entries',async()=>{
+  for(const issue of ['noTarget','wrongTicker','wrongStrike','booleanTarget','staleReference','missingReference','otherFeed']){
+    const f=stagedFixture();f.stage(59,.97);
+    if(issue==='noTarget')f.api.getMarket=async ticker=>({...mockMarket(ticker),floor_strike:null});
+    if(issue==='wrongTicker')f.api.getMarket=async()=>mockMarket('OLD-TICKER');
+    if(issue==='wrongStrike')f.api.getMarket=async ticker=>({...mockMarket(ticker),strike_type:'less'});
+    if(issue==='booleanTarget')f.api.getMarket=async ticker=>({...mockMarket(ticker),floor_strike:true});
+    if(issue==='staleReference')f.setReferenceQuote(()=>({price:65100,source:'CF_BENCHMARKS',sourceTs:Date.now()-3000,receivedAt:Date.now()}));
+    if(issue==='missingReference')f.setReferenceQuote(()=>null);
+    if(issue==='otherFeed')f.setReferenceQuote(()=>({price:65100,source:'BINANCE',sourceTs:Date.now(),receivedAt:Date.now()}));
+    await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,0,issue);
+  }
+});
+test('market target cache cannot carry an old strike into a new ticker',async()=>{
+  const f=stagedFixture();f.stage(59,.97);
+  f.api.placeOrder=async body=>{f.requests.push(body);return {order_id:'zero',fill_count:'0',remaining_count:'0',average_fill_price:body.price,average_fee_paid:'0'};};
+  await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
+  f.state.BTC.ticker='BTC-NEXT';f.api.getMarket=async ticker=>({...mockMarket(ticker),floor_strike:70000});
+  f.setReferenceQuote(()=>({price:65100,source:'CF_BENCHMARKS',sourceTs:Date.now(),receivedAt:Date.now()}));
+  f.advanceRetry();await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
 });

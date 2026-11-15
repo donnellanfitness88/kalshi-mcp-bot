@@ -1,5 +1,7 @@
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
+import { benchmarkFeed } from '../prices/cfBenchmarks.js';
+import { evaluateLateProximity } from './lateProximity.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -95,14 +97,38 @@ export function createScalpExecutor(deps = {}) {
   const save = deps.save ?? saveJournal;
   const log = deps.log ?? (message => console.log('[SCALP] ' + JSON.stringify(message)));
   const retryNow = deps.now ?? Date.now;
+  const getReferenceQuote = deps.getReferenceQuote ?? (asset => benchmarkFeed.getQuote(asset));
+  const targetCache = new Map();
+  async function proximity(ctx, signal) {
+    const ticker = ctx.s.ticker, cached = targetCache.get(ctx.asset);
+    let target = cached?.ticker === ticker ? cached.target : null;
+    if (!Number.isFinite(target)) {
+      if (cached?.ticker === ticker && Date.now() - cached.checkedAt < 5000) {
+        return evaluateLateProximity({ asset: ctx.asset, ticker, stageId: signal.stage.id,
+          side: signal.direction === 'UP' ? 'yes' : 'no', target: null });
+      }
+      targetCache.set(ctx.asset, { ticker, target: null, checkedAt: Date.now() });
+      const market = await api.getMarket(ticker);
+      const raw = market.floor_strike;
+      if (market.ticker === ticker && market.strike_type === 'greater_or_equal' &&
+          ['string', 'number'].includes(typeof raw) && String(raw).trim() !== '' &&
+          Number.isFinite(Number(raw)) && Number(raw) > 0) {
+        target = Number(raw);
+        targetCache.set(ctx.asset, { ticker, target, checkedAt: Date.now() });
+      }
+    }
+    return evaluateLateProximity({ asset: ctx.asset, ticker, stageId: signal.stage.id,
+      side: signal.direction === 'UP' ? 'yes' : 'no', target,
+      quote: getReferenceQuote(ctx.asset), now: Date.now() });
+  }
   // New early/low-price entries are disabled; existing holdings still receive exits.
   const earlyScalpsEnabled = deps.earlyScalpsEnabled ?? false;
   const entryBlockLogs = new Map();
-  function entryBlocked(asset, reason) {
+  function entryBlocked(asset, reason, details = {}) {
     const key = `${asset}:${reason}`;
     if (retryNow() - (entryBlockLogs.get(key) ?? -Infinity) < 60000) return;
     entryBlockLogs.set(key, retryNow());
-    log({ event: 'ENTRY_BLOCKED', asset, reason });
+    log({ event: 'ENTRY_BLOCKED', asset, reason, ...details });
   }
   const lateChecks = new Map();
   let busy = false;
@@ -174,7 +200,7 @@ export function createScalpExecutor(deps = {}) {
       save(saved);
       s.activeTrade = next; lateStages = nextStages; pending = null;
       log({ event: 'ENTRY_CONFIRMED', asset: p.asset, ...fill, sim: p.sim, mode: p.mode,
-        side: p.side, stage: p.stageId, totalContracts: next.count, totalCost: next.originalCost });
+        side: p.side, stage: p.stageId, ticker: p.body.ticker, proximity: p.proximity, totalContracts: next.count, totalCost: next.originalCost });
       return;
     } else if (p.kind === 'entry' && p.stageId && !fill.count) {
       const saved = snapshot(); saved.pending = null;
@@ -433,6 +459,10 @@ export function createScalpExecutor(deps = {}) {
       if (retryNow() - (lateChecks.get(key) ?? -Infinity) < SCALP_CONFIG.lateRetryMs) return;
       lateChecks.set(key, retryNow());
     }
+    if (mode === 'LATE_SETTLEMENT') {
+      const check = await proximity(ctx, signal);
+      if (!check.allowed) { entryBlocked(asset, check.reason, { proximity: check }); return; }
+    }
     lastAttempt = Date.now();
     if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { log({ event: 'ENTRY_BLOCKED', reason: 'ACCOUNT_NOT_FLAT' }); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
@@ -447,6 +477,10 @@ export function createScalpExecutor(deps = {}) {
     const count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget) : scalpSize(price, balance, mode);
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) return;
     // The final account check may cross a time tier or receive a changed quote.
+    const distanceCheck = mode === 'LATE_SETTLEMENT' ? await proximity(ctx, fresh) : null;
+    if (distanceCheck && !distanceCheck.allowed) {
+      entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
+    }
     const final = entrySignal(s, mode);
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
@@ -457,7 +491,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
-      stageId: fresh.stage?.id, stageBudget, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+      stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
   async function reconcileExternal(ctx, suppliedPositions) {
     const { asset, s } = ctx;

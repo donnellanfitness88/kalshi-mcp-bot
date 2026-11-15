@@ -7,6 +7,7 @@ import { checkExit } from './exitManager.js';
 import { startSession, startDay } from './riskManager.js';
 import { loadBotState } from './botStateStore.js';
 import { writeStateSnapshot } from './stateSnapshot.js';
+import { benchmarkFeed } from '../prices/cfBenchmarks.js';
 import { priceFeed } from '../prices/binance.js';
 import { krakenFallback } from '../prices/kraken.js'; // activates fallback wiring
 import { KalshiWebSocket } from '../kalshi/websocket.js';
@@ -434,6 +435,7 @@ if (!s.activeTrade) {
 export async function startClock() {
   console.log('[Clock] Starting price feeds...');
   priceFeed.connect();
+  benchmarkFeed.connect();
 
   // Check for sim override file — persists sim mode across restarts
   try {
@@ -459,7 +461,7 @@ export async function startClock() {
   // Restore our journal before servicing scalp orders. Existing account holdings
   // block new entries; do not liquidate unrelated positions during scalp startup.
   restoreScalpExecution();
-  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; scalp budget=$1 including fee reserve; one late position per coin; simultaneous BTC/ETH late stages allowed; new early/low-price scalps disabled; entries<=20c target 50% net return after entry fees and reserved exit fees; higher scalps >70c and <97c only <120s; late stages: $2>=90c/<180s, $25>=95c/<120s, $50>=97c/<60s; late cap=$77 per coin, $154 across BTC/ETH including fees and limited by available cash; late IOC partial fills with remaining-budget retries >=3s; scalp stop=disabled; reentry wait=0; fee-aware low-price targets and existing higher-price targets');
+  if (process.env.SCALP_ENABLED === 'true') console.log('[SCALP] Execution enabled; scalp budget=$1 including fee reserve; one late position per coin; simultaneous BTC/ETH late stages allowed; new early/low-price scalps disabled; entries<=20c target 50% net return after entry fees and reserved exit fees; higher scalps >70c and <97c only <120s; late stages: $2>=90c/<180s, $25>=95c/<120s, $50>=97c/<60s; late cap=$77 per coin, $154 across BTC/ETH including fees and limited by available cash; late distance gates: BTC=$50/$50/$50, ETH=$1/$0.75/$0.50 using fresh CF Benchmarks; late IOC partial fills with remaining-budget retries >=3s; scalp stop=disabled; reentry wait=0; fee-aware low-price targets and existing higher-price targets');
   // Legacy startup handling applies only outside scalp mode.
   if (process.env.SCALP_ENABLED !== 'true') try {
     const positions = await getPositions();
