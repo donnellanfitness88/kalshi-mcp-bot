@@ -12,7 +12,7 @@ Eligibility for either YES or NO:
   remains positive. The displayed percentage is not used as the purchase price.
 - Official current market target, fresh CF reference no older than two seconds,
   and signed distance **strictly greater than $50** onto the purchased side.
-- Six elapsed one-second checkpoints covering five seconds; each interval must
+- Three elapsed one-second checkpoints covering two seconds; each interval must
   improve the purchased side's cushion. Flat intervals do not qualify.
 - Continuous 60-second reference history, with no gap over 1.5 seconds. Cushion
   must also be at least 1.5 times the observed 60-second high-low range. This is a

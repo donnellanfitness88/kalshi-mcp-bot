@@ -6,10 +6,10 @@ const history=(side='yes')=>Array.from({length:326},(_,i)=>({sourceTs:now-65000+
   price:side==='yes'?38150+i*.02:37850-i*.02}));
 const input=(side='yes')=>({history:history(side),quote:{source:'CF_BENCHMARKS',price:history(side).at(-1).price,
   sourceTs:now},target:38000,side,secondsRemaining:60,now,ticker:'KXBTC15M-TEST'});
-test('both sides qualify on winning cushion and five elapsed increasing seconds',()=>{
+test('both sides qualify on winning cushion and two elapsed increasing seconds',()=>{
   for(const side of ['yes','no']) {
     const c=evaluateBtcLarge(input(side));assert.equal(c.allowed,true);
-    assert.equal(c.momentumCheckpoints.length,6);assert.ok(c.cushion>100);
+    assert.equal(c.momentumCheckpoints.length,3);assert.ok(c.cushion>100);
   }
 });
 test('strict time, signed distance and fresh official reference fail closed',()=>{
@@ -20,12 +20,12 @@ test('strict time, signed distance and fresh official reference fail closed',()=
   for(const quote of [null,{...i.quote,source:'BINANCE'},{...i.quote,sourceTs:now-2001},{...i.quote,sourceTs:now+1}])
     assert.equal(evaluateBtcLarge({...i,quote}).allowed,false);
 });
-test('requires continuous one-minute history and five improving intervals, not five messages',()=>{
+test('requires continuous one-minute history and two improving intervals, not two messages',()=>{
   const i=input();
   assert.equal(evaluateBtcLarge({...i,history:i.history.slice(-25)}).allowed,false);
   assert.equal(evaluateBtcLarge({...i,history:i.history.filter(p=>p.sourceTs<now-10000||p.sourceTs>now-5000)}).allowed,false);
   const flat=i.history.map(p=>({...p,price:i.quote.price}));
-  assert.equal(evaluateBtcLarge({...i,history:flat}).reason,'FIVE_SECOND_MOMENTUM_REQUIRED');
+  assert.equal(evaluateBtcLarge({...i,history:flat}).reason,'TWO_SECOND_MOMENTUM_REQUIRED');
 });
 test('volatility cushion and first-entry shrinking guard are enforced',()=>{
   const i=input();const h=i.history.map((p,j)=>({...p,price:j===40?39000:p.price}));
