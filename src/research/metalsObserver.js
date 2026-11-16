@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {MetalsProxy} from './metalsProxy.js';
 
 // Observation only: this module never imports authenticated clients or order code.
 export const METALS = { GOLD: 'KXGOLD15M', SILVER: 'KXSILVER15M' };
@@ -90,9 +91,9 @@ export function fileObserverStore(directory = metalsDirectory()) {
 }
 
 export class MetalsObserver {
-  constructor({read=publicMetalRead, store=fileObserverStore(), now=Date.now,
+  constructor({read=publicMetalRead, store=fileObserverStore(), now=Date.now, proxy=null,
     log=event=>console.log('[METALS_OBSERVER] '+JSON.stringify(event))}={}) {
-    Object.assign(this,{read,store,now,log});
+    Object.assign(this,{read,store,now,log,proxy});
     this.state=store.load() ?? {version:1, markets:{}, totals:{}};
     if(this.state.version!==1 || !this.state.markets || !this.state.totals) throw new Error('Invalid metals observer journal');
     this.current={}; this.nextDiscovery={}; this.nextSettlement=0; this.series={}; this.busy=false;
@@ -137,19 +138,23 @@ export class MetalsObserver {
     const at=this.now(), stage=metalsStage((Date.parse(market.close_time)-at)/1000);
     if(at-started>MAX_RESPONSE_AGE_MS || !stage) return;
     const book=metalBook(data), next=structuredClone(this.state), row=next.markets[market.ticker];
-    const sample={at,secondsRemaining:(Date.parse(market.close_time)-at)/1000,stageId:stage.id,book,
-      referencePrice:null,distance:null,proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED'};
-    row.observations=[...row.observations,sample].slice(-120);
-    // One theoretical snapshot per tier, not a claim of fill or a full strategy replay.
     const candidate=!row.candidates.some(c=>c.stageId===stage.id) && row.feeType==='quadratic'
       ? estimateMetalEntry({book,stage,side:row.side,feeMultiplier:row.feeMultiplier}) : null;
+    const proxySide=candidate?.side??row.side;
+    const proxy=this.proxy?.snapshot(asset,row.target,proxySide)??null;
+    const sample={at,secondsRemaining:(Date.parse(market.close_time)-at)/1000,stageId:stage.id,book,
+      referencePrice:null,distance:null,proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED',proxySide,proxy};
+    row.observations=[...row.observations,sample].slice(-120);
+    // One theoretical snapshot per tier, not a claim of fill or a full strategy replay.
     if(candidate) {
       row.side=candidate.side;
       row.candidates.push({...sample,...candidate,stageId:stage.id,
         qualification:'PRICE_TIME_LIQUIDITY_ONLY',fillAssumed:true,feesAreEstimated:true});
     }
     this.persist(next,candidate?{event:'CANDIDATE',asset,ticker:market.ticker,stageId:stage.id,
-      ...candidate,qualification:'PRICE_TIME_LIQUIDITY_ONLY',proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED'}:null);
+      ...candidate,target:row.target,proxySide,proxy,qualification:'PRICE_TIME_LIQUIDITY_ONLY',proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED'}:null);
+    if(proxy)this.emit({event:'PROXY_OBSERVATION',asset,ticker:market.ticker,target:row.target,
+      secondsRemaining:sample.secondsRemaining,proxySide,proxy});
   }
   async settleOne() {
     if(this.now()<this.nextSettlement) return;
@@ -188,11 +193,15 @@ export class MetalsObserver {
   }
   start() {
     this.emit({event:'STARTED',mode:'PRICE_TIME_OBSERVATION',stages:METALS_STAGES,
-      referenceFeed:'NOT_CONNECTED',liveOrders:false});
+      referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
     void this.tick(); this.timer=setInterval(()=>void this.tick(),5000); this.timer.unref?.();
     return this;
   }
-  stop() { clearInterval(this.timer); }
+  stop() { clearInterval(this.timer); this.proxy?.stop(); }
 }
 
-export function startMetalsObserver() { return new MetalsObserver().start(); }
+export function startMetalsObserver() {
+  const observer=new MetalsObserver();
+  observer.proxy=new MetalsProxy({log:event=>observer.emit(event)}).start(process.env.PYTH_PRO_API_KEY);
+  return observer.start();
+}
