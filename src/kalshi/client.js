@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import 'dotenv/config';
+import { createBalanceReader } from './balanceReader.js';
 
 const BASE_URL = 'https://api.elections.kalshi.com/trade-api/v2';
 
@@ -61,6 +62,11 @@ async function request(method, path, body = null) {
     error.kalshiCode = data?.error?.code ?? data?.code;
     error.requestMethod = method;
     error.requestPath = path;
+    const reset = res.headers?.get?.('X-RateLimit-Reset');
+    if (reset !== null && reset !== undefined && String(reset).trim() &&
+        Number.isFinite(Number(reset)) && Number(reset) >= 0) {
+      error.rateLimitResetMs = Number(reset) * 1000;
+    }
     throw error;
   }
 
@@ -69,10 +75,10 @@ async function request(method, path, body = null) {
 
 // Portfolio
 
-export async function getBalance() {
+export const getBalance = createBalanceReader({ read: async () => {
   const data = await request('GET', '/portfolio/balance');
   return data.balance;
-}
+} });
 
 async function collectPortfolio(path, field, params = {}) {
   const rows = [], seen = new Set();

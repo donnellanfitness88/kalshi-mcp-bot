@@ -1520,6 +1520,16 @@ test('BTC five stages aggregate incremental budgets and preserve the $182 fee-in
   assert.equal(f.requests.length,5);
  }
 });
+test('a balance wait crossing a late tier aborts the old attempt; next tick evaluates the new tier',async()=>{
+ const f=stagedFixture();f.stage(179,.95);
+ f.api.getBalance=async()=>{f.state.BTC.secsLeft=149;return 10000;};
+ await f.executor.tick(f.ctx('BTC'));
+ assert.equal(f.requests.length,0);assert.equal(f.executor.snapshot().pending,null);
+ await f.executor.tick(f.ctx('BTC'));
+ assert.equal(f.requests.length,1);
+ const event=f.logs.find(e=>e.event==='ENTRY_CONFIRMED');
+ assert.equal(event.stage,'under_150');assert.ok(event.totalCost<=5);
+});
 test('ETH keeps its prior stages; disabled ETH cannot submit an initial purchase',async()=>{
  assert.equal(lateStage(149,'ETH').id,'under_180');
  assert.equal(lateStage(44,'ETH').id,'under_60');

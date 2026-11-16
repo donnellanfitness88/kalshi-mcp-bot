@@ -433,6 +433,7 @@ if (!s.activeTrade) {
 }
 
 export async function startClock() {
+  console.log('[Clock] Balance reads coordinated: concurrent callers share one request; at least 1100ms between completed reads and the next request; 429 retries bounded to two; no stale balance fallback');
   console.log('[Clock] Starting price feeds...');
   priceFeed.connect();
   benchmarkFeed.connect();
