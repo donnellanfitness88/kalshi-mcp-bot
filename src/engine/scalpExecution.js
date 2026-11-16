@@ -102,7 +102,7 @@ export function createScalpExecutor(deps = {}) {
   const getReferenceHistory = deps.getReferenceHistory ?? (asset => benchmarkFeed.getHistory(asset));
   let shrinkingGuards = {};
   function shrinkingCheck(ctx, distance) {
-    if (ctx.s.activeTrade?.mode !== 'LATE_SETTLEMENT') return null;
+    // Every late purchase must pass, including the first purchase.
     const check = evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' ? 50 : distance.minimumDistance,
@@ -110,7 +110,7 @@ export function createScalpExecutor(deps = {}) {
       previous:shrinkingGuards[ctx.asset],now:Date.now() });
     if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[ctx.asset])) {
       const next={...shrinkingGuards,[ctx.asset]:check.guardState};
-      save({...snapshot(),shrinkingGuards:next}); // Persist a latch before an add-on can proceed.
+      save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
       shrinkingGuards=next;
     }
     return check;

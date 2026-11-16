@@ -1391,13 +1391,20 @@ test('market target cache cannot carry an old strike into a new ticker',async()=
   f.advanceRetry();await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
 });
 
-test('first late buy retains current eligibility even with no shrinking history; adds wait for history',async()=>{
- const f=stagedFixture();f.setReferenceHistory(()=>[]);
- f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
- f.stage(119,.95);await f.executor.tick(f.ctx('BTC'));assert.equal(f.requests.length,1);
- const ledger=f.executor.snapshot().lateStages['BTC-TEST'];
- assert.equal(ledger.records.under_120,undefined);
- assert.ok(f.logs.some(e=>e.reason==='SHRINK_HISTORY_UNAVAILABLE'));
+test('all late stages require shrinking history before the first purchase',async()=>{
+ for(const [seconds,price] of [[179,.90],[149,.93],[119,.95],[59,.97],[44,.98]]) {
+  const f=stagedFixture();f.setReferenceHistory(()=>[]);
+  f.stage(seconds,price);await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,0);
+  assert.equal(f.state.BTC.activeTrade,null);
+  assert.ok(f.logs.some(e=>e.reason==='SHRINK_HISTORY_UNAVAILABLE'));
+  f.setReferenceHistory(()=>{
+   const now=Date.now(),q=f.referenceQuote('BTC');
+   return Array.from({length:31},(_,i)=>({price:q.price,sourceTs:now-(30-i)*1000}));
+  });
+  f.advanceRetry();await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,1);
+ }
 });
 test('rapidly shrinking cushion blocks an add-on without consuming budget and restores its latch',async()=>{
  const f=stagedFixture();f.stage(179,.90);await f.executor.tick(f.ctx('BTC'));
