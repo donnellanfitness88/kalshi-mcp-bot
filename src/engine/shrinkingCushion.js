@@ -2,12 +2,12 @@ const STABILIZATION_SECONDS = 2;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, observationOnlyNoMinimum = false, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
-      !Number.isFinite(minimumDistance) || minimumDistance <= 0 ||
-      !Number.isFinite(rapidDropMinimum) || rapidDropMinimum <= 0 ||
+      !Number.isFinite(minimumDistance) || (minimumDistance < 0 || minimumDistance === 0 && !observationOnlyNoMinimum) ||
+      !Number.isFinite(rapidDropMinimum) || (rapidDropMinimum < 0 || rapidDropMinimum === 0 && !observationOnlyNoMinimum) ||
       !Number.isFinite(secondsRemaining) || secondsRemaining <= 0 || !Array.isArray(history)) {
     return reject('SHRINK_HISTORY_UNAVAILABLE');
   }

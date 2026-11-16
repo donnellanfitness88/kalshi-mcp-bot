@@ -1,80 +1,131 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {MetalsObserver,metalCushionCheck} from '../../src/research/metalsObserver.js';
+import {MetalsObserver,metalShrinkingCheck,METALS}
+  from '../../src/research/metalsObserver.js';
+import {evaluateShrinkingCushion}
+  from '../../src/engine/shrinkingCushion.js';
 
 const base=1800000000000;
-const fresh=(price,sourceAt=base)=>({status:'FRESH_PROXY',price,sourceAt});
-test('signed metal thresholds include equality and reject the losing side',()=>{
-  for(const [asset,target,gap] of [['GOLD',3800,2],['SILVER',47,.07]]) {
-    for(const side of ['yes','no']) {
-      const sign=side==='yes'?1:-1;
-      assert.equal(metalCushionCheck(asset,target,side,fresh(target+sign*gap),base).pass,true);
-      assert.equal(metalCushionCheck(asset,target,side,fresh(target+sign*(gap-.001)),base).pass,false);
-      assert.equal(metalCushionCheck(asset,target,side,fresh(target-sign*10),base).pass,false);
-    }
-  }
-  assert.equal(metalCushionCheck('EURUSD',1,'yes',fresh(2),base),null);
-});
-test('missing, stale, future or invalid references and missing targets fail closed',()=>{
-  for(const p of [null,{},fresh(NaN),fresh(3803,base-2001),fresh(3803,base+1),
-    {...fresh(3803),status:'UNAVAILABLE_OR_STALE'}])
-    assert.equal(metalCushionCheck('GOLD',3800,'yes',p,base).pass,false);
-  assert.equal(metalCushionCheck('GOLD',3800,'yes',fresh(3802,base-2000),base).pass,true);
-  for(const t of [null,NaN,0])assert.equal(metalCushionCheck('GOLD',t,'yes',fresh(3803),base).pass,false);
-});
-function fixture(asset='GOLD') {
-  let at=base,price=asset==='GOLD'?3801:47.06,side='yes',saved=null,result='';
-  const target=asset==='GOLD'?3800:47,ticker=`KX${asset}15M-TEST`;
-  const market={ticker,open_time:new Date(base-721000).toISOString(),
-    close_time:new Date(base+179000).toISOString(),floor_strike:target,status:'active'};
-  const logs=[],store={load:()=>structuredClone(saved),save:s=>{saved=structuredClone(s);}};
-  const read=async route=>route.includes('/orderbook')?{orderbook_fp:{
-    yes_dollars:[[side==='yes'?'.89':'.10','1000']],no_dollars:[[side==='yes'?'.10':'.89','1000']]}}
-    :{market:{...market,status:result?'finalized':'closed',result}};
-  const proxy={snapshot:()=>fresh(price,at)};
-  const make=()=>new MetalsObserver({read,store,proxy,now:()=>at,log:e=>logs.push(e)});
-  const observer=make();observer.current[asset]=market;
-  observer.state.markets[ticker]={asset,ticker,closeTime:market.close_time,target,
-    feeType:'quadratic',feeMultiplier:1,candidates:[],observations:[],side:null,result:null};
-  return {observer,make,logs,store,ticker,market,asset,setPrice:p=>{price=p;},
-    setSide:s=>{side=s;},setAt:t=>{at=t;},setResult:r=>{result=r;}};
+const specs=[
+  ['GOLD',3800,.2],['SILVER',47,.005],
+  ['EURUSD',1.1,.0001],['USDJPY',159,.01]
+];
+const rows=(target,gap,side='yes',end=gap)=>
+  Array.from({length:46},(_,i)=>({
+    sourceAt:base+(i-45)*1000,
+    price:target+(side==='yes'?1:-1)*
+      (i<=30?gap:gap+(end-gap)*(i-30)/15)
+  }));
+function check(asset,target,history,side='yes',options={}) {
+  const last=history.at(-1);
+  return metalShrinkingCheck({
+    asset,ticker:asset+'-TEST',target,side,history,
+    at:base,secondsRemaining:1,
+    proxy:{status:'FRESH_PROXY',price:last?.price,sourceAt:last?.sourceAt},
+    ...options
+  });
 }
-test('both metal scenarios retry blocked stages, persist accepted stages, and leave baseline intact',async()=>{
-  for(const asset of ['GOLD','SILVER']) {
-    const f=fixture(asset);await f.observer.observe(asset);
-    let row=f.observer.state.markets[f.ticker];
-    assert.equal(row.candidates.length,1);assert.equal(row.cushionTest.candidates.length,0);
-    assert.equal(row.cushionTest.blockedChecks,1);
-    f.setPrice(asset==='GOLD'?3802:47.07);await f.observer.observe(asset);
-    row=f.observer.state.markets[f.ticker];assert.equal(row.cushionTest.candidates.length,1);
-    const restored=f.make();restored.current[asset]=f.market;await restored.observe(asset);
-    assert.equal(restored.state.markets[f.ticker].cushionTest.candidates.length,1);
-    assert.equal(restored.state.markets[f.ticker].candidates.length,1);
+test('all four accept small winning cushions without fixed floors',()=>{
+  for(const [a,t,d] of specs)for(const side of ['yes','no'])
+    assert.equal(check(a,t,rows(t,d,side),side).allowed,true);
+});
+test('rapid shrink blocks; recovery requires two elapsed seconds',()=>{
+  for(const [a,t,d] of specs)for(const side of ['yes','no']) {
+    const h=rows(t,d,side,d*.6),first=check(a,t,h,side);
+    assert.equal(first.reason,'SHRINK_RAPID_APPROACH');
+    assert.equal(first.allowed,false);
+    h.push({sourceAt:base+1000,price:h.at(-1).price});
+    assert.equal(check(a,t,h,side,{
+      at:base+1000,previous:first.guardState
+    }).allowed,false);
+    h.push({sourceAt:base+2000,price:h.at(-1).price});
+    assert.equal(check(a,t,h,side,{
+      at:base+2000,previous:first.guardState
+    }).allowed,true);
   }
 });
-test('filtered side selection is independent of a rejected baseline side',async()=>{
-  const f=fixture();await f.observer.observe('GOLD');f.setSide('no');f.setPrice(3798);
-  await f.observer.observe('GOLD');const row=f.observer.state.markets[f.ticker];
-  assert.equal(row.side,'yes');assert.equal(row.cushionTest.side,'no');
-  assert.equal(row.cushionTest.candidates[0].side,'no');
+test('projection, missing history, stale data and losing references reject',()=>{
+  for(const [a,t,d] of specs) {
+    assert.equal(check(a,t,rows(t,d,'yes',d*.8),'yes',{
+      secondsRemaining:90
+    }).allowed,false);
+    assert.equal(check(a,t,rows(t,d),'yes',{
+      at:base+2001
+    }).allowed,false);
+    assert.equal(check(a,t,rows(t,d).slice(-10)).allowed,false);
+    assert.equal(check(a,t,rows(t,d).filter(
+      (_,i)=>i<36||i>40
+    )).allowed,false);
+    assert.equal(check(a,t,rows(t,-d)).allowed,false);
+    assert.equal(check(a,t,rows(t,0)).allowed,false);
+    assert.equal(check(a,null,rows(t,d)).allowed,false);
+  }
 });
-test('settlement records separate net results once; restart does not backfill legacy history',async()=>{
-  const f=fixture();await f.observer.observe('GOLD');f.setAt(base+200000);f.setResult('no');
-  await f.observer.settleOne();let s=f.observer.state;
-  assert.ok(s.totals.GOLD.hypotheticalNet<0);assert.equal(s.cushionTotals.GOLD.hypotheticalNet,0);
-  assert.equal(s.cushionTotals.GOLD.sampledMarkets,1);
-  await f.make().settleOne();assert.equal(f.logs.filter(x=>x.event==='CUSHION_SETTLED_ESTIMATE').length,1);
-  const old=fixture();await old.observer.observe('GOLD');
-  const legacy=structuredClone(old.observer.state);delete legacy.markets[old.ticker].cushionTest;
-  old.store.save(legacy);old.setAt(base+200000);old.setResult('yes');await old.make().settleOne();
-  assert.equal(old.store.load().cushionTotals,undefined);
+test('live callers cannot use zero thresholds without explicit research mode',()=>{
+  assert.equal(evaluateShrinkingCushion({
+    history:rows(65000,10).map(p=>({
+      sourceTs:p.sourceAt,price:p.price
+    })),
+    asset:'BTC',ticker:'T',target:65000,side:'yes',
+    minimumDistance:0,rapidDropMinimum:0,
+    secondsRemaining:1,now:base
+  }).allowed,false);
 });
-test('filtered accounting includes fees, accepted additions and only the filtered side payout',async()=>{
-  const f=fixture();f.setPrice(3802);await f.observer.observe('GOLD');
-  f.setAt(base+135000);f.setPrice(3801);await f.observer.observe('GOLD');
-  assert.equal(f.observer.state.markets[f.ticker].cushionTest.candidates.length,1);
-  f.setAt(base+200000);f.setResult('yes');await f.observer.settleOne();
-  const t=f.observer.state.markets[f.ticker].cushionTest;
-  assert.equal(t.estimatedCost,1.82);assert.equal(t.hypotheticalPayout,2);
-  assert.ok(Math.abs(t.hypotheticalNet-.18)<1e-9);
+test('all tiers retry blocked entries and restore without duplicates',async()=>{
+  for(const [asset,target,gap] of specs) {
+    let at=base,saved=null,result='',h=[];
+    const ticker=METALS[asset]+'-TEST',close=base+179000;
+    const market={ticker,close_time:new Date(close).toISOString()};
+    const store={
+      load:()=>structuredClone(saved),
+      save:s=>{saved=structuredClone(s);}
+    };
+    const proxy={
+      history:{},
+      snapshot:()=>({
+        status:'FRESH_PROXY',price:h.at(-1)?.price,
+        sourceAt:h.at(-1)?.sourceAt
+      })
+    };
+    const read=async route=>route.includes('/orderbook')?
+      {orderbook_fp:{
+        yes_dollars:[['.979','1000']],no_dollars:[['.02','1000']]
+      }}:{market:{ticker,status:'finalized',result}};
+    const make=()=>new MetalsObserver({
+      read,store,proxy,now:()=>at,log:()=>{}
+    });
+    let o=make();o.current[asset]=market;
+    o.state.markets[ticker]={
+      asset,ticker,closeTime:market.close_time,target,
+      feeType:'quadratic',feeMultiplier:1,
+      candidates:[],observations:[],side:null,result:null
+    };
+    for(const seconds of [179,149,119,59,44]) {
+      at=close-seconds*1000;h=[];proxy.history[asset]=h;
+      await o.observe(asset);
+      const before=o.state.markets[ticker].shrinkTest.candidates.length;
+      h=rows(target,gap).map(p=>({
+        ...p,sourceAt:p.sourceAt+at-base
+      }));
+      proxy.history[asset]=h;await o.observe(asset);
+      assert.equal(
+        o.state.markets[ticker].shrinkTest.candidates.length,before+1
+      );
+      o=make();o.current[asset]=market;await o.observe(asset);
+      assert.equal(
+        o.state.markets[ticker].shrinkTest.candidates.length,before+1
+      );
+    }
+    const row=o.state.markets[ticker];
+    assert.equal(row.shrinkTest.candidates.length,5);
+    assert.equal(row.cushionTest,undefined);
+    assert.ok(row.shrinkTest.candidates.reduce(
+      (n,c)=>n+c.estimatedCost,0
+    )<=182);
+    at=close+60000;result='yes';await o.settleOne();
+    assert.equal(o.state.shrinkTotals[asset].sampledMarkets,1);
+    assert.ok(o.state.shrinkTotals[asset].hypotheticalNet>0);
+    at+=61000;const restored=make();await restored.settleOne();
+    assert.equal(restored.state.shrinkTotals[asset].sampledMarkets,1);
+  }
 });
