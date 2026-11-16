@@ -5,7 +5,7 @@ import {evaluateShrinkingCushion} from '../engine/shrinkingCushion.js';
 
 // Research only. No authenticated client, order submission, or trading-state mutation.
 export const BTC_LARGE_RULES={budget:2500,maxSeconds:90,minPrice:.99,
-  minimumCushion:100,momentumSeconds:5,rangeSeconds:60,rangeMultiple:2,
+  minimumCushion:50,momentumSeconds:5,rangeSeconds:60,rangeMultiple:2,
   maxReferenceAgeMs:2000,maxBookAgeMs:2000};
 const BASE='https://api.elections.kalshi.com/trade-api/v2';
 export async function publicBtcObservationRead(route) {
@@ -29,7 +29,7 @@ export function evaluateBtcLarge({history,quote,target,side,secondsRemaining,now
     !Number.isSafeInteger(quote.sourceTs)||now-quote.sourceTs<0||now-quote.sourceTs>2000)
     return reject('REFERENCE_UNAVAILABLE');
   const sign=side==='yes'?1:-1,cushion=sign*(quote.price-target);
-  if(cushion<=100)return reject('CUSHION_NOT_ABOVE_100',{cushion});
+  if(cushion<=50)return reject('CUSHION_NOT_ABOVE_50',{cushion});
   const rows=(history??[]).filter(p=>Number.isSafeInteger(p.sourceTs)&&p.sourceTs<=now&&
     Number.isFinite(p.price)&&p.price>0).sort((a,b)=>a.sourceTs-b.sourceTs);
   const last=rows.at(-1),point=t=>rows.findLast(p=>p.sourceTs<=t&&t-p.sourceTs<=500);
@@ -38,9 +38,9 @@ export function evaluateBtcLarge({history,quote,target,side,secondsRemaining,now
   if(!first||recent.some((p,i)=>i&&p.sourceTs-recent[i-1].sourceTs>1500))
     return reject('SIXTY_SECOND_HISTORY_REQUIRED',{cushion});
   const range60=Math.max(...recent.map(p=>p.price))-Math.min(...recent.map(p=>p.price));
-  const guard=evaluateShrinkingCushion({history:rows,asset:'BTC',ticker,side,target,minimumDistance:100,
+  const guard=evaluateShrinkingCushion({history:rows,asset:'BTC',ticker,side,target,minimumDistance:50,
     rapidDropMinimum:50,secondsRemaining,previous,now});
-  const detail={cushion,range60,requiredCushion:Math.max(100,2*range60),guard};
+  const detail={cushion,range60,requiredCushion:Math.max(50,2*range60),guard};
   if(!guard.allowed)return reject(guard.reason,detail);
   if(cushion<2*range60)return reject('VOLATILITY_CUSHION_TOO_SMALL',detail);
   const checkpoints=Array.from({length:6},(_,i)=>point(last.sourceTs-(5-i)*1000));

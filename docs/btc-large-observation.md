@@ -11,14 +11,14 @@ Eligibility for either YES or NO:
   purchase-price cap**: 99.9 and 99.99 cents are included if fee-adjusted profit
   remains positive. The displayed percentage is not used as the purchase price.
 - Official current market target, fresh CF reference no older than two seconds,
-  and signed distance **strictly greater than $100** onto the purchased side.
+  and signed distance **strictly greater than $50** onto the purchased side.
 - Six elapsed one-second checkpoints covering five seconds; each interval must
   improve the purchased side's cushion. Flat intervals do not qualify.
 - Continuous 60-second reference history, with no gap over 1.5 seconds. Cushion
   must also be at least twice the observed 60-second high-low range. This is a
   preliminary volatility heuristic, not a calibrated probability estimate.
 - Existing shrinking-cushion evaluator applies even to the first hypothetical
-  purchase: minimum distance $100, rapid-drop absolute minimum $50, existing
+  purchase: minimum distance $50, rapid-drop absolute minimum $50, existing
   projected-crossing rule and two-second recovery. Its latch is scenario-local.
 
 The model uses one $2,500 fee-inclusive budget per ticker. At the first qualifying

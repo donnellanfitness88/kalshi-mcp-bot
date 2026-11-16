@@ -15,7 +15,7 @@ test('both sides qualify on winning cushion and five elapsed increasing seconds'
 test('strict time, signed distance and fresh official reference fail closed',()=>{
   const i=input();
   for(const secondsRemaining of [90,0,-1])assert.equal(evaluateBtcLarge({...i,secondsRemaining}).allowed,false);
-  assert.equal(evaluateBtcLarge({...i,target:i.quote.price-100}).reason,'CUSHION_NOT_ABOVE_100');
+  assert.equal(evaluateBtcLarge({...i,target:i.quote.price-50}).reason,'CUSHION_NOT_ABOVE_50');
   assert.equal(evaluateBtcLarge({...i,side:'no'}).allowed,false);
   for(const quote of [null,{...i.quote,source:'BINANCE'},{...i.quote,sourceTs:now-2001},{...i.quote,sourceTs:now+1}])
     assert.equal(evaluateBtcLarge({...i,quote}).allowed,false);
