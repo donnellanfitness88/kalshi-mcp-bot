@@ -24,7 +24,7 @@ export class BenchmarkFeed {
         sourceTs <= (this.quotes[asset]?.sourceTs ?? 0)) return false;
     const first = !this.quotes[asset];
     this.history[asset] = [...(this.history[asset] ?? []), {price,sourceTs}]
-      .filter(p => p.sourceTs >= sourceTs-60000).slice(-500);
+      .filter(p => p.sourceTs >= sourceTs-65000).slice(-500);
     this.quotes[asset] = { price, sourceTs, receivedAt: now, source: 'CF_BENCHMARKS' };
     if (first) this.log(`${asset} reference ready (${m.index_id})`);
     return true;

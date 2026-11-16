@@ -31,6 +31,13 @@ import { startClock } from './engine/clock.js';
 async function main() {
   await startClock();
 
+  // Read-only BTC large-entry scenario; reuses the existing reference connection.
+  if(process.env.BTC_LARGE_OBSERVER_ENABLED!=='false') {
+    Promise.all([import('./research/btcLargeObserver.js'),import('./prices/cfBenchmarks.js')])
+      .then(([{BtcLargeObserver},{benchmarkFeed}])=>new BtcLargeObserver({feed:benchmarkFeed}).start())
+      .catch(e=>console.error('[BTC_LARGE_OBSERVER] Startup failed:',e.message));
+  }
+
   // Independent, public-data-only observer; errors cannot stop BTC execution.
   if (process.env.METALS_OBSERVER_ENABLED !== 'false') {
     import('./research/metalsObserver.js').then(({ startMetalsObserver }) => startMetalsObserver())
