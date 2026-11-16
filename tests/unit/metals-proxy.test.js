@@ -45,11 +45,12 @@ test('source history stays bounded, and silver uses its own feed',()=>{
 test('without a key no network is opened; all endpoints use headers and secrets are not logged',()=>{
   const opened=[],logs=[];
   class Socket extends EventEmitter {constructor(url,options){super();this.url=url;this.options=options;opened.push(this);}
-    send(body){this.body=JSON.parse(body);}terminate(){this.emit('close');}close(){this.emit('close');}}
+    send(body){(this.bodies??=[]).push(JSON.parse(body));}terminate(){this.emit('close');}close(){this.emit('close');}}
   const p=new MetalsProxy({Socket,log:e=>logs.push(e)});p.start('');assert.equal(opened.length,0);
   p.start('private-test-key');assert.equal(opened.length,3);
   for(const s of opened){assert.equal(s.options.headers.Authorization,'Bearer private-test-key');s.emit('open');
-    assert.deepEqual(s.body.priceFeedIds,[346,345]);assert.ok(s.body.properties.includes('feedUpdateTimestamp'));}
+    assert.deepEqual(s.bodies[0].priceFeedIds,[346,345]);assert.ok(s.bodies[0].properties.includes('feedUpdateTimestamp'));
+    assert.deepEqual(s.bodies[1].priceFeedIds,[327,340]);}
   p.stop();assert.ok(!JSON.stringify(logs).includes('private-test-key'));
 });
 test('proxy measurements persist with hypothetical entries but never gate or alter sizing',async()=>{

@@ -1,19 +1,23 @@
 import WebSocket from 'ws';
 
 // Research only. These are spot proxies, NOT Kalshi's settlement indices.
-export const PROXY_FEEDS = {GOLD:{id:346,symbol:'Metal.XAU/USD'}, SILVER:{id:345,symbol:'Metal.XAG/USD'}};
+export const PROXY_FEEDS = {GOLD:{id:346,symbol:'Metal.XAU/USD',quoteUnit:'USD',pipSize:null},
+  SILVER:{id:345,symbol:'Metal.XAG/USD',quoteUnit:'USD',pipSize:null},
+  EURUSD:{id:327,symbol:'FX.EUR/USD',quoteUnit:'USD per EUR',pipSize:.0001},
+  USDJPY:{id:340,symbol:'FX.USD/JPY',quoteUnit:'JPY per USD',pipSize:.01}};
 const URLS = [0,1,2].map(i=>`wss://pyth-lazer-${i}.dourolabs.app/v1/stream`);
 const numeric = v => (typeof v==='number' || typeof v==='string' && v.trim()!=='') ? Number(v) : NaN;
 
 export class MetalsProxy {
   constructor({now=Date.now,log=()=>{},Socket=WebSocket}={}) {
-    Object.assign(this,{now,log,Socket}); this.history={GOLD:[],SILVER:[]}; this.sockets=[];this.timers=new Set();
+    Object.assign(this,{now,log,Socket}); this.history=Object.fromEntries(Object.keys(PROXY_FEEDS).map(a=>[a,[]])); this.sockets=[];this.timers=new Set();
   }
   ingest(message) {
-    if(message?.type!=='streamUpdated' || message.subscriptionId!==1 || !Array.isArray(message.parsed?.priceFeeds))return;
+    if(message?.type!=='streamUpdated' || ![1,2].includes(message.subscriptionId) || !Array.isArray(message.parsed?.priceFeeds))return;
     for(const row of message.parsed.priceFeeds) {
       const asset=Object.keys(PROXY_FEEDS).find(a=>PROXY_FEEDS[a].id===row.priceFeedId);
       if(!asset)continue;
+      if(message.subscriptionId!==(['EURUSD','USDJPY'].includes(asset)?2:1))continue;
       const exponent=numeric(row.exponent), mantissa=numeric(row.price), sourceAt=numeric(row.feedUpdateTimestamp)/1000;
       const price=mantissa/10**(-exponent), at=this.now(), age=at-sourceAt;
       if(!Number.isInteger(exponent)||exponent < -18||exponent>0||!Number.isSafeInteger(mantissa)||
@@ -30,6 +34,7 @@ export class MetalsProxy {
   snapshot(asset,target,side) {
     const history=this.history[asset]??[],last=history.at(-1), at=this.now();
     const meta={source:PROXY_FEEDS[asset]?.symbol??null,referenceType:'SPOT_PROXY_NOT_SETTLEMENT',
+      quoteUnit:PROXY_FEEDS[asset]?.quoteUnit??null,pipSize:PROXY_FEEDS[asset]?.pipSize??null,
       officialReferencePrice:null,proxyIndexDifference:null};
     if(!last || at-last.sourceAt<0 || at-last.sourceAt>2000)return {...meta,status:'UNAVAILABLE_OR_STALE',price:null,estimatedCushion:null};
     const t=numeric(target),direction=side==='yes'?1:side==='no'?-1:null;
@@ -43,8 +48,10 @@ export class MetalsProxy {
         priceChange:last.price-first.price,range:Math.max(...points.map(p=>p.price))-Math.min(...points.map(p=>p.price)),
         cushionChange:direction===null?null:direction*(last.price-first.price)}:null;
     }
+    const estimatedCushion=direction!==null && Number.isFinite(t)&&t>0?direction*(last.price-t):null;
     return {...meta,status:'FRESH_PROXY',price:last.price,sourceAt:last.sourceAt,ageMs:at-last.sourceAt,
-      confidence:last.confidence,estimatedCushion:direction!==null && Number.isFinite(t)&&t>0?direction*(last.price-t):null,movement};
+      confidence:last.confidence,estimatedCushion,
+      estimatedCushionPips:estimatedCushion!==null&&meta.pipSize?estimatedCushion/meta.pipSize:null,movement};
   }
   start(key) {
     if(!key){this.log({event:'PROXY_DISABLED',reason:'PYTH_PRO_API_KEY_NOT_SET'});return this;}
@@ -66,10 +73,14 @@ export class MetalsProxy {
       if(this.stopped){ws.close();return;}
       ws.send(JSON.stringify({type:'subscribe',subscriptionId:1,priceFeedIds:[346,345],
         properties:['price','exponent','confidence','feedUpdateTimestamp','marketSession'],formats:[],channel:'fixed_rate@200ms',ignoreInvalidFeeds:true}));
+      // Separate subscription: an FX entitlement rejection must not stop metals.
+      ws.send(JSON.stringify({type:'subscribe',subscriptionId:2,priceFeedIds:[327,340],
+        properties:['price','exponent','confidence','feedUpdateTimestamp','marketSession'],formats:[],channel:'fixed_rate@200ms',ignoreInvalidFeeds:true}));
     });
     ws.on('message',data=>{
       try {const message=JSON.parse(data.toString());
         if(message.type==='subscriptionError') {
+          if(message.subscriptionId===2){this.log({event:'PROXY_SUBSCRIPTION_ERROR',endpoint:index,subscriptionId:2});return;}
           denied=true;this.log({event:'PROXY_SUBSCRIPTION_ERROR',endpoint:index});ws.close();
         } else this.ingest(message);
       } catch {} // Do not print payloads or credentials.

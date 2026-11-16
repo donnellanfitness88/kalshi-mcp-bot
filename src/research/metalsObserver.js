@@ -3,7 +3,8 @@ import path from 'node:path';
 import {MetalsProxy} from './metalsProxy.js';
 
 // Observation only: this module never imports authenticated clients or order code.
-export const METALS = { GOLD: 'KXGOLD15M', SILVER: 'KXSILVER15M' };
+// Keep the existing name/journal to preserve accumulated metals observations.
+export const METALS = { GOLD: 'KXGOLD15M', SILVER: 'KXSILVER15M', EURUSD:'KXEURUSD15M', USDJPY:'KXUSDJPY15M' };
 export const METALS_STAGES = [
   { id: 'under_180', maxSeconds: 180, minPrice: .90, budget: 2 },
   { id: 'under_150', maxSeconds: 150, minPrice: .93, budget: 5 },
@@ -60,8 +61,8 @@ export function estimateMetalEntry({book, stage, side, feeMultiplier}) {
 
 // Restrict the network adapter itself to public GET market/series endpoints.
 export async function publicMetalRead(route) {
-  const exact = /^\/series\/KX(?:GOLD|SILVER)15M$/.test(route) ||
-    /^\/markets\/KX(?:GOLD|SILVER)15M-[A-Z0-9-]+(?:\/orderbook\?depth=1)?$/.test(route);
+  const exact = /^\/series\/KX(?:GOLD|SILVER|EURUSD|USDJPY)15M$/.test(route) ||
+    /^\/markets\/KX(?:GOLD|SILVER|EURUSD|USDJPY)15M-[A-Z0-9-]+(?:\/orderbook\?depth=1)?$/.test(route);
   let discovery=false;
   if(route.startsWith('/markets?')) {
     const q=new URLSearchParams(route.slice('/markets?'.length));
@@ -96,7 +97,7 @@ export class MetalsObserver {
     Object.assign(this,{read,store,now,log,proxy});
     this.state=store.load() ?? {version:1, markets:{}, totals:{}};
     if(this.state.version!==1 || !this.state.markets || !this.state.totals) throw new Error('Invalid metals observer journal');
-    this.current={}; this.nextDiscovery={}; this.nextSettlement=0; this.series={}; this.busy=false;
+    this.current={}; this.nextDiscovery={}; this.nextTargetRead={}; this.nextSettlement=0; this.series={}; this.busy=false;
   }
   emit(event) { this.log({at:this.now(), observationOnly:true, ...event}); }
   persist(next, event) {
@@ -134,6 +135,19 @@ export class MetalsObserver {
     const seconds=(Date.parse(market.close_time)-this.now())/1000;
     if(seconds<=0) { this.current[asset]=null; this.nextDiscovery[asset]=0; return; }
     if(!metalsStage(seconds)) return;
+    // Some newly opened markets publish their strike after initial discovery.
+    // Refresh missing targets without discarding prior observations or candidates.
+    if(!Number.isFinite(number(this.state.markets[market.ticker]?.target)) && this.now()>=(this.nextTargetRead[asset]??0)) {
+      this.nextTargetRead[asset]=this.now()+15000;
+      try {
+        const {market:fresh}=await this.read('/markets/'+encodeURIComponent(market.ticker));
+        const target=number(fresh?.floor_strike);
+        if(fresh?.ticker===market.ticker && Number.isFinite(target) && target>0) {
+          const next=structuredClone(this.state);next.markets[market.ticker].target=target;
+          this.persist(next,{event:'TARGET_READY',asset,ticker:market.ticker,target});
+        }
+      } catch {} // Missing metadata cannot stop the independent price-time observer.
+    }
     const started=this.now(), data=await this.read('/markets/'+encodeURIComponent(market.ticker)+'/orderbook?depth=1');
     const at=this.now(), stage=metalsStage((Date.parse(market.close_time)-at)/1000);
     if(at-started>MAX_RESPONSE_AGE_MS || !stage) return;
@@ -193,7 +207,7 @@ export class MetalsObserver {
   }
   start() {
     this.emit({event:'STARTED',mode:'PRICE_TIME_OBSERVATION',stages:METALS_STAGES,
-      referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
+      assets:METALS,referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
     void this.tick(); this.timer=setInterval(()=>void this.tick(),5000); this.timer.unref?.();
     return this;
   }

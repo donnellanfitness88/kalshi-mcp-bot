@@ -3,7 +3,7 @@ const state=fileObserverStore().load();
 if(!state) {
   console.log('No metals observations saved yet at '+metalsDirectory());
 } else {
-  console.log('Gold/silver price-time observation — hypothetical results, NOT live trades.');
+  console.log('Gold/silver/EURUSD/USDJPY price-time observation — hypothetical results, NOT live trades.');
   console.log('Proximity, shrinking-cushion, account risk and available cash were NOT evaluated.');
   console.table(Object.entries(state.totals).map(([asset,s])=>({asset,...s})));
   console.log('Unsettled sampled markets: '+Object.values(state.markets).filter(m=>!m.result).length);

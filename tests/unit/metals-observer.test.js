@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {SCALP_CONFIG} from '../../src/engine/scalpStrategy.js';
-import {METALS_STAGES, metalsStage, activeMetalMarket, metalBook, estimateMetalEntry,
+import {METALS, METALS_STAGES, metalsStage, activeMetalMarket, metalBook, estimateMetalEntry,
   MetalsObserver, publicMetalRead, fileObserverStore} from '../../src/research/metalsObserver.js';
 
 const base=1800000000000;
@@ -21,7 +21,7 @@ function fixture({side='yes',load=null}={}) {
   }};
   const read=async route=>{
     requests.push(route);
-    const asset=route.includes('SILVER')?'SILVER':'GOLD';
+    const asset=Object.keys(METALS).find(a=>route.includes(METALS[a]))??'GOLD';
     if(route.startsWith('/series/'))return {series:{ticker:`KX${asset}15M`,frequency:'fifteen_min',fee_type:'quadratic',fee_multiplier:1}};
     if(route.startsWith('/markets?'))return {markets:[market(asset)]};
     if(route.includes('/orderbook')) {now+=latency;return book(side,price);}
@@ -115,7 +115,7 @@ test('no open market is idle, read errors are contained, and ticks cannot overla
   assert.equal(f.observer.busy,false);assert.ok(f.logs.some(e=>e.event==='READ_ERROR'));
   const idle=fixture();idle.observer.read=async route=>route.startsWith('/markets?')?{markets:[]}:idle.read(route);
   await idle.observer.tick();assert.equal(Object.keys(idle.observer.state.markets).length,0);
-  assert.equal(idle.logs.filter(e=>e.event==='NO_OPEN_MARKET').length,2);
+  assert.equal(idle.logs.filter(e=>e.event==='NO_OPEN_MARKET').length,4);
 });
 test('failed persistence cannot advance in-memory candidates or emit success',async()=>{
   const f=fixture();await f.observer.discover('GOLD');f.fail();
