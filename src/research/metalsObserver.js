@@ -14,6 +14,21 @@ export const METALS_STAGES = [
 ];
 const BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 const MAX_RESPONSE_AGE_MS = 2000;
+export const METALS_CUSHIONS = {GOLD:2, SILVER:.07};
+const CUSHION_TEST = 'gold_2_silver_007_v1';
+// Signed distance: being far from the target on the losing side never qualifies.
+export function metalCushionCheck(asset, target, side, proxy, at) {
+  const minimum=METALS_CUSHIONS[asset];
+  if(minimum===undefined)return null;
+  if(!Number.isFinite(target)||target<=0||!['yes','no'].includes(side))
+    return {minimum,pass:false,reason:'INVALID_TARGET_OR_SIDE',distance:null};
+  if(proxy?.status!=='FRESH_PROXY'||!Number.isFinite(proxy.price)||proxy.price<=0||
+    !Number.isFinite(proxy.sourceAt)||at-proxy.sourceAt<0||at-proxy.sourceAt>2000)
+    return {minimum,pass:false,reason:'MISSING_OR_STALE_PROXY',distance:null};
+  const distance=(side==='yes'?1:-1)*(proxy.price-target);
+  const pass=distance>=minimum-1e-9;
+  return {minimum,distance,pass,reason:pass?'PASS':'BELOW_MINIMUM'};
+}
 const number = x => (typeof x === 'number' || (typeof x === 'string' && x.trim())) ? Number(x) : NaN;
 export const metalsStage = seconds => Number.isFinite(seconds) && seconds > 0
   ? METALS_STAGES.findLast(s => seconds < s.maxSeconds) ?? null : null;
@@ -95,6 +110,7 @@ export class MetalsObserver {
   constructor({read=publicMetalRead, store=fileObserverStore(), now=Date.now, proxy=null,
     log=event=>console.log('[METALS_OBSERVER] '+JSON.stringify(event))}={}) {
     Object.assign(this,{read,store,now,log,proxy});
+    this.startedAt=this.now();
     this.state=store.load() ?? {version:1, markets:{}, totals:{}};
     if(this.state.version!==1 || !this.state.markets || !this.state.totals) throw new Error('Invalid metals observer journal');
     this.current={}; this.nextDiscovery={}; this.nextTargetRead={}; this.nextSettlement=0; this.series={}; this.busy=false;
@@ -158,6 +174,28 @@ export class MetalsObserver {
     const proxy=this.proxy?.snapshot(asset,row.target,proxySide)??null;
     const sample={at,secondsRemaining:(Date.parse(market.close_time)-at)/1000,stageId:stage.id,book,
       referencePrice:null,distance:null,proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED',proxySide,proxy};
+    // Independent forward-only scenario. Baseline history and totals stay comparable.
+    let cushionEvent=null;
+    if(METALS_CUSHIONS[asset]!==undefined) {
+      const test=row.cushionTest??={id:CUSHION_TEST,startedAt:at,
+        partialWindow:this.startedAt>Date.parse(row.closeTime)-180000,side:null,candidates:[],blockedChecks:0};
+      const proposed=!test.candidates.some(c=>c.stageId===stage.id)&&row.feeType==='quadratic'
+        ?estimateMetalEntry({book,stage,side:test.side,feeMultiplier:row.feeMultiplier}):null;
+      if(proposed) {
+        const reference=this.proxy?.snapshot(asset,row.target,proposed.side)??null;
+        const check=metalCushionCheck(asset,row.target,proposed.side,reference,at);
+        const detail={event:check.pass?'CUSHION_CANDIDATE':'CUSHION_BLOCKED',testId:CUSHION_TEST,
+          asset,ticker:row.ticker,stageId:stage.id,...proposed,target:row.target,proxy:reference,cushion:check};
+        if(check.pass) {
+          test.side=proposed.side;
+          test.candidates.push({...sample,...proposed,proxySide:proposed.side,proxy:reference,
+            cushion:check,proximity:'PASS_SPOT_PROXY',qualification:'PRICE_TIME_LIQUIDITY_PROXY_CUSHION',
+            fillAssumed:true,feesAreEstimated:true});
+        } else test.blockedChecks++;
+        // Rejections do not consume a stage; a later five-second sample may qualify.
+        cushionEvent=detail;
+      }
+    }
     row.observations=[...row.observations,sample].slice(-120);
     // One theoretical snapshot per tier, not a claim of fill or a full strategy replay.
     if(candidate) {
@@ -167,6 +205,7 @@ export class MetalsObserver {
     }
     this.persist(next,candidate?{event:'CANDIDATE',asset,ticker:market.ticker,stageId:stage.id,
       ...candidate,target:row.target,proxySide,proxy,qualification:'PRICE_TIME_LIQUIDITY_ONLY',proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED'}:null);
+    if(cushionEvent)this.emit(cushionEvent);
     if(proxy)this.emit({event:'PROXY_OBSERVATION',asset,ticker:market.ticker,target:row.target,
       secondsRemaining:sample.secondsRemaining,proxySide,proxy});
   }
@@ -188,11 +227,29 @@ export class MetalsObserver {
     totals.sampledMarkets++; totals.candidateMarkets+=r.candidates.length?1:0;
     totals.wins+=r.hypotheticalNet>0?1:0; totals.losses+=r.hypotheticalNet<0?1:0;
     totals.estimatedCost+=r.estimatedCost; totals.hypotheticalNet+=r.hypotheticalNet; next.totals[r.asset]=totals;
+    let cushionSettlement=null;
+    if(r.cushionTest) {
+      const test=r.cushionTest;
+      test.estimatedCost=test.candidates.reduce((n,c)=>n+c.estimatedCost,0);
+      test.hypotheticalPayout=test.candidates.reduce((n,c)=>n+(c.side===r.result?c.count:0),0);
+      test.hypotheticalNet=test.hypotheticalPayout-test.estimatedCost;
+      next.cushionTotals??={};
+      const totals=next.cushionTotals[r.asset]??={sampledMarkets:0,candidateMarkets:0,wins:0,losses:0,estimatedCost:0,hypotheticalNet:0};
+      totals.sampledMarkets++;totals.candidateMarkets+=test.candidates.length?1:0;
+      totals.wins+=test.hypotheticalNet>0?1:0;totals.losses+=test.hypotheticalNet<0?1:0;
+      totals.estimatedCost+=test.estimatedCost;totals.hypotheticalNet+=test.hypotheticalNet;
+      cushionSettlement={event:'CUSHION_SETTLED_ESTIMATE',testId:test.id,asset:r.asset,ticker:r.ticker,
+        result:r.result,startedAt:test.startedAt,candidates:test.candidates.length,blockedChecks:test.blockedChecks,
+        estimatedCost:test.estimatedCost,hypotheticalPayout:test.hypotheticalPayout,hypotheticalNet:test.hypotheticalNet,
+        baselineNet:r.hypotheticalNet,partialWindow:test.partialWindow,
+        filtersNotEvaluated:['shrinking-cushion','account-risk','available-cash'],referenceType:'SPOT_PROXY_NOT_SETTLEMENT'};
+    }
     const closed=Object.values(next.markets).filter(m=>m.result).sort((a,b)=>b.settledAt-a.settledAt);
     for(const old of closed.slice(512)) delete next.markets[old.ticker];
     this.persist(next,{event:'SETTLED_ESTIMATE',asset:r.asset,ticker:r.ticker,result:r.result,
       candidates:r.candidates.length,estimatedCost:r.estimatedCost,hypotheticalPayout:r.hypotheticalPayout,
       hypotheticalNet:r.hypotheticalNet,filtersNotEvaluated:['proximity','shrinking-cushion','account-risk','available-cash']});
+    if(cushionSettlement)this.emit(cushionSettlement);
   }
   async tick() {
     if(this.busy) return;
@@ -207,7 +264,7 @@ export class MetalsObserver {
   }
   start() {
     this.emit({event:'STARTED',mode:'PRICE_TIME_OBSERVATION',stages:METALS_STAGES,
-      assets:METALS,referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
+      assets:METALS,cushionTest:{id:CUSHION_TEST,minimums:METALS_CUSHIONS},referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
     void this.tick(); this.timer=setInterval(()=>void this.tick(),5000); this.timer.unref?.();
     return this;
   }

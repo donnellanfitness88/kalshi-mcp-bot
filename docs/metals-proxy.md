@@ -1,5 +1,32 @@
 # Metals spot-proxy observation
 
+## Forward-only proximity comparison
+
+Gold requires a signed winning-side cushion of at least **$2.00 per ounce**;
+silver requires **$0.07 per ounce**, at every hypothetical purchase in all five
+stages. Equality passes. YES needs the proxy above the target; NO needs it below.
+The separate `cushionTest` scenario uses fresh spot-proxy prices (maximum age
+two seconds). Invalid/missing targets or unavailable/stale references reject
+new candidates. A rejected check does not consume a stage; later samples may
+qualify before that stage ends. Accepted stages cannot be duplicated, including
+after restart, and the first accepted candidate locks this scenario's side.
+
+The unfiltered baseline continues alongside it, with independent side selection
+and totals. Existing baseline purchases/history are never copied into the new
+scenario. Testing starts with the first observation after deployment; a window
+already in progress is labelled partial in settlement logs and the report.
+`CUSHION_BLOCKED`, `CUSHION_CANDIDATE`, and `CUSHION_SETTLED_ESTIMATE` logs expose
+the reason, measured distance, threshold, and separate estimated net outcome.
+Blocked-check counts are samples, not unique trades. Historical windows are not
+retroactively filtered. Old and new aggregate periods differ; compare matched
+windows in the report. Run `node scripts/metals-observer-report.mjs` on the
+observer's state directory to view both scenarios.
+
+This is observation only: no metals orders are placed. These are spot-proxy
+distances, not calibrated distances to the official settlement indices.
+Shrinking-cushion, cash and account-risk filters remain unevaluated. EUR/USD,
+USD/JPY and BTC execution are unchanged.
+
 ## EUR/USD and USD/JPY observation extension
 
 The same observer now includes EURUSD (`KXEURUSD15M`) and USDJPY (`KXUSDJPY15M`).
