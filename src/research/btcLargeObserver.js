@@ -5,7 +5,7 @@ import {evaluateShrinkingCushion} from '../engine/shrinkingCushion.js';
 
 // Research only. No authenticated client, order submission, or trading-state mutation.
 export const BTC_LARGE_RULES={budget:2500,maxSeconds:90,minPrice:.99,
-  minimumCushion:50,momentumSeconds:5,rangeSeconds:60,rangeMultiple:2,
+  minimumCushion:50,momentumSeconds:5,rangeSeconds:60,rangeMultiple:1.5,
   maxReferenceAgeMs:2000,maxBookAgeMs:2000};
 const BASE='https://api.elections.kalshi.com/trade-api/v2';
 export async function publicBtcObservationRead(route) {
@@ -40,9 +40,9 @@ export function evaluateBtcLarge({history,quote,target,side,secondsRemaining,now
   const range60=Math.max(...recent.map(p=>p.price))-Math.min(...recent.map(p=>p.price));
   const guard=evaluateShrinkingCushion({history:rows,asset:'BTC',ticker,side,target,minimumDistance:50,
     rapidDropMinimum:50,secondsRemaining,previous,now});
-  const detail={cushion,range60,requiredCushion:Math.max(50,2*range60),guard};
+  const detail={cushion,range60,requiredCushion:Math.max(50,1.5*range60),guard};
   if(!guard.allowed)return reject(guard.reason,detail);
-  if(cushion<2*range60)return reject('VOLATILITY_CUSHION_TOO_SMALL',detail);
+  if(cushion<1.5*range60)return reject('VOLATILITY_CUSHION_TOO_SMALL',detail);
   const checkpoints=Array.from({length:6},(_,i)=>point(last.sourceTs-(5-i)*1000));
   if(checkpoints.some(p=>!p)||checkpoints.some((p,i)=>i&&sign*(p.price-checkpoints[i-1].price)<=1e-9))
     return reject('FIVE_SECOND_MOMENTUM_REQUIRED',detail);

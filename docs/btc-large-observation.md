@@ -15,7 +15,7 @@ Eligibility for either YES or NO:
 - Six elapsed one-second checkpoints covering five seconds; each interval must
   improve the purchased side's cushion. Flat intervals do not qualify.
 - Continuous 60-second reference history, with no gap over 1.5 seconds. Cushion
-  must also be at least twice the observed 60-second high-low range. This is a
+  must also be at least 1.5 times the observed 60-second high-low range. This is a
   preliminary volatility heuristic, not a calibrated probability estimate.
 - Existing shrinking-cushion evaluator applies even to the first hypothetical
   purchase: minimum distance $50, rapid-drop absolute minimum $50, existing
