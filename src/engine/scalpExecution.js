@@ -433,14 +433,7 @@ export function createScalpExecutor(deps = {}) {
         s.lastQuoteMessageTs > now || ![s.yesAsk, s.yesBid].every(Number.isFinite) ||
         s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid) return { shouldEnter: false };
     if (mode === 'SCALP') {
-      if (!earlyScalpsEnabled && remainingSeconds(s) > SCALP_CONFIG.entryMinSecondsRemaining) {
-        return { shouldEnter: false, reason: 'EARLY_SCALPS_DISABLED' };
-      }
-      const signal = evaluateScalpEntry({ priceHistory: s.yesPriceHistory, yesAsk: s.yesAsk, yesBid: s.yesBid });
-      if (!signal.shouldEnter) return signal;
-      const price = signal.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
-      if (!scalpEntryPriceAllowed(price, remainingSeconds(s), signal.direction === 'UP' ? 'yes' : 'no')) return { shouldEnter: false, reason: 'ENTRY_PRICE_BAND' };
-      return signal;
+      return { shouldEnter: false, reason: 'ALL_SCALP_ENTRIES_DISABLED' };
     }
     if (mode !== 'LATE_SETTLEMENT') return { shouldEnter: false };
     const stage = lateStage(remainingSeconds(s), s === shared.ETH ? 'ETH' : 'BTC');
