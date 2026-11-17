@@ -81,3 +81,48 @@ test('lower proximity does not lower the separately preserved rapid-drop thresho
  assert.equal(r.rapid,false);assert.equal(r.allowed,true);
  assert.equal(run(history(200,140),{minimumDistance:30,rapidDropMinimum:50}).rapid,true);
 });
+
+function longHistory(fn,side='yes',length=61) {
+  return Array.from({length},(_,i)=>({sourceTs:now+(i-length+1)*1000,
+    price:target+(side==='yes'?1:-1)*fn(i-length+61)}));
+}
+const warning={ticker:'BTC-T',side:'yes',blocked:true,triggeredAt:now-30000,triggerReason:'SHRINK_RAPID_APPROACH'};
+test('large-stage recovery retains a warning despite two stable seconds when the 60-second trend is adverse',()=>{
+  for(const side of ['yes','no']) {
+    const rows=longHistory(i=>i<=45?200-i*100/45:i<58?100+(i-45)*50/13:150,side);
+    const opts={side,previous:{...warning,side},requireLongRecovery:true};
+    const r=run(rows,opts);
+    assert.equal(r.stabilized,true);assert.equal(r.allowed,false);
+    assert.equal(r.reason,'SHRINK_LONG_TREND_RECOVERY');
+    assert.ok(r.longRecovery.cushionChange15>0);assert.equal(r.longRecovery.cushionChange60,-50);
+    assert.equal(r.guardState.blocked,true);
+    const again=run(rows,{...opts,previous:JSON.parse(JSON.stringify(r.guardState))});
+    assert.equal(again.allowed,false);
+    assert.equal(run(rows,{...opts,requireLongRecovery:false}).allowed,true);
+  }
+});
+test('large-stage recovery also requires a non-adverse 15-second trend and continuous 60-second data',()=>{
+  const rows=longHistory(i=>i<=45?100+i*100/45:i<58?200-(i-45)*50/13:150);
+  const r=run(rows,{previous:warning,requireLongRecovery:true});
+  assert.equal(r.stabilized,true);assert.equal(r.allowed,false);
+  assert.ok(r.longRecovery.cushionChange60>0);assert.ok(r.longRecovery.cushionChange15<0);
+  for(const missing of [rows.slice(-40),rows.filter((_,i)=>i<10||i>15)]) {
+    const m=run(missing,{previous:warning,requireLongRecovery:true});
+    assert.equal(m.reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');assert.equal(m.guardState.blocked,true);
+  }
+});
+test('large-stage warning clears when both broader trends and two-second recovery agree',()=>{
+  for(const side of ['yes','no']) {
+    const rows=longHistory(()=>150,side);
+    const r=run(rows,{side,previous:{...warning,side},requireLongRecovery:true});
+    assert.equal(r.allowed,true);assert.equal(r.guardState.blocked,false);
+    assert.equal(r.longRecovery.cushionChange15,0);assert.equal(r.longRecovery.cushionChange60,0);
+    assert.equal(run(longHistory(i=>100+i,side),{side,previous:{...warning,side},requireLongRecovery:true}).allowed,true);
+  }
+});
+test('long recovery does not invent a warning, transfer another ticker latch, or weaken distance checks',()=>{
+  const rows=history(200,200);
+  assert.equal(run(rows,{requireLongRecovery:true}).allowed,true);
+  assert.equal(run(rows,{requireLongRecovery:true,previous:{...warning,ticker:'OLD'}}).allowed,true);
+  assert.equal(run(longHistory(()=>49),{requireLongRecovery:true,previous:warning}).allowed,false);
+});

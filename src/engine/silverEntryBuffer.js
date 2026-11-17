@@ -1,10 +1,12 @@
-// Additional SILVER/EURUSD purchase gates, independent of the existing guard's latch.
+// Additional SILVER/EURUSD/USDJPY purchase gates, independent of the existing guard's latch.
 // This extrapolates the existing 15-second approach speed; it is not a forecast.
 export const SILVER_ENTRY_TIME_BUFFER_SECONDS = 20;
 export const EURUSD_ENTRY_TIME_BUFFER_SECONDS = 15;
+export const USDJPY_ENTRY_TIME_BUFFER_SECONDS = 15;
 export function entryCrossingBuffer(check,asset,secondsRemaining,now=Date.now()) {
   const buffer=asset==='SILVER'?SILVER_ENTRY_TIME_BUFFER_SECONDS:
-    asset==='EURUSD'?EURUSD_ENTRY_TIME_BUFFER_SECONDS:null;
+    asset==='EURUSD'?EURUSD_ENTRY_TIME_BUFFER_SECONDS:
+    asset==='USDJPY'?USDJPY_ENTRY_TIME_BUFFER_SECONDS:null;
   if(buffer===null || !check?.allowed)return check;
   const reject=reason=>({...check,allowed:false,reason,
     entryTimeBufferSeconds:buffer});

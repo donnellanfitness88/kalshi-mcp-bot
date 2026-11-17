@@ -2,7 +2,7 @@ const STABILIZATION_SECONDS = 2;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, observationOnlyNoMinimum = false, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, observationOnlyNoMinimum = false, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
@@ -12,7 +12,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     return reject('SHRINK_HISTORY_UNAVAILABLE');
   }
   const rows = history.filter(p => Number.isSafeInteger(p.sourceTs) && p.sourceTs <= now &&
-    Number.isFinite(p.price) && p.price > 0 && p.sourceTs >= now - 60000)
+    Number.isFinite(p.price) && p.price > 0 && p.sourceTs >= now - 90000)
     .sort((a,b) => a.sourceTs-b.sourceTs);
   const last = rows.at(-1);
   if (!last || now-last.sourceTs > 2000) return reject('SHRINK_HISTORY_UNAVAILABLE');
@@ -54,12 +54,28 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     complete(checkpoints[0].sourceTs,last.sourceTs) &&
     checkpoints.every((p,i)=>!i || cushion(p)+1e-9>=cushion(checkpoints[i-1]));
   const tooClose=current.currentCushion+1e-9<minimumDistance;
-  const blocked=Boolean(((trigger || prior?.blocked) && !stabilized) || tooClose);
-  const reason=!blocked?'SHRINK_OK':trigger ? (trigger.rapid?'SHRINK_RAPID_APPROACH':'SHRINK_PROJECTED_CROSSING') :
+  // Large stages must not erase a warning on a short pause while either broader
+  // trend still erodes the winning-side cushion. Preserve the latch on missing
+  // continuous history; smaller stages and observer baselines retain their rules.
+  const recoveryWarning=Boolean(trigger || prior?.blocked);
+  let longRecovery=null;
+  if(requireLongRecovery && recoveryWarning) {
+    const first=at(last.sourceTs-60000);
+    const available=Boolean(first && complete(first.sourceTs,last.sourceTs));
+    const change15=current.currentCushion-current.initialCushion;
+    const change60=available?current.currentCushion-cushion(first):null;
+    longRecovery={lookbackSeconds:[15,60],historyAvailable:available,
+      cushionChange15:change15,cushionChange60:change60,
+      allowed:available && change15>=-1e-9 && change60>=-1e-9};
+  }
+  const longRecoveryBlocked=Boolean(longRecovery && !longRecovery.allowed);
+  const blocked=Boolean((recoveryWarning && (!stabilized || longRecoveryBlocked)) || tooClose);
+  const reason=!blocked?'SHRINK_OK':longRecoveryBlocked ?
+    (longRecovery.historyAvailable?'SHRINK_LONG_TREND_RECOVERY':'SHRINK_LONG_HISTORY_UNAVAILABLE'):trigger ? (trigger.rapid?'SHRINK_RAPID_APPROACH':'SHRINK_PROJECTED_CROSSING') :
     tooClose?'SHRINK_DISTANCE_TOO_CLOSE':blocked?'SHRINK_STABILIZING':'SHRINK_OK';
   const guardState={asset,ticker,side,blocked,
     triggeredAt:trigger?.at ?? prior?.triggeredAt ?? null,
     triggerReason:trigger ? reason : prior?.triggerReason ?? null};
-  return { allowed:!blocked,reason,guardState,...current,stabilized,
+  return { allowed:!blocked,reason,guardState,...current,stabilized,longRecovery,
     sourceTs:last.sourceTs,checkedAt:now,lookbackSeconds:15,stabilizationSeconds:STABILIZATION_SECONDS };
 }

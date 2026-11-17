@@ -238,7 +238,7 @@ test('silver buffer cannot be cleared by stabilization alone or bypass existing 
   assert.equal(silverEntryBuffer(check,'SILVER',57,now).allowed,false);
   const blocked={...check,allowed:false,reason:'SHRINK_RAPID_APPROACH'};
   assert.equal(silverEntryBuffer(blocked,'SILVER',10,now),blocked);
-  for(const a of ['BTC','GOLD','USDJPY'])assert.equal(silverEntryBuffer(check,a,57,now),check);
+  for(const a of ['BTC','GOLD'])assert.equal(silverEntryBuffer(check,a,57,now),check);
   assert.equal(silverEntryBuffer({...check,approachUsdPerSecond:0,projectedSecondsToTarget:null},'SILVER',57,now).allowed,true);
   assert.equal(silverEntryBuffer({...check,projectedSecondsToTarget:NaN},'SILVER',57,now).allowed,false);
 });
@@ -304,4 +304,89 @@ test('EUR/USD delays YES and NO final-stage entries until projection moves beyon
     const check=f.logs.find(e=>e.event==='ENTRY_CONFIRMED').shrinkingGuard;
     assert.equal(check.entryTimeBufferSeconds,15);assert.ok(check.projectedMarginSeconds>15);
   }
+});
+
+test('USD/JPY has the same independent 15-second buffer as EUR/USD, including the overnight 4.5-second margin',()=>{
+  const now=Date.now(),base={allowed:true,reason:'SHRINK_OK',sourceTs:now-104,
+    approachUsdPerSecond:.0005333333333333333,projectedSecondsToTarget:22.5,stabilized:true};
+  const r=silverEntryBuffer(base,'USDJPY',17.896,now);
+  assert.equal(r.allowed,false);assert.equal(r.reason,'USDJPY_CROSSING_TIME_BUFFER');
+  assert.ok(Math.abs(r.projectedMarginSeconds-4.5)<1e-8);assert.equal(r.entryTimeBufferSeconds,15);
+  assert.equal(silverEntryBuffer({...base,sourceTs:now,projectedSecondsToTarget:35},'USDJPY',20,now).allowed,false);
+  assert.equal(silverEntryBuffer({...base,sourceTs:now,projectedSecondsToTarget:36},'USDJPY',20,now).allowed,true);
+  assert.equal(silverEntryBuffer({...base,sourceTs:now-2001},'USDJPY',20,now).allowed,false);
+  assert.equal(silverEntryBuffer({...base,approachUsdPerSecond:0,projectedSecondsToTarget:null},'USDJPY',20,now).allowed,true);
+});
+test('USD/JPY buffer blocks YES and NO purchases, including a deteriorating final pre-submit check',async()=>{
+  for(const side of ['yes','no'])for(const finalOnly of [false,true]) {
+    const f=fixture(),s=f.shared.USDJPY;s.marketCloseTs=Date.now()+170000;
+    s.yesAsk=side==='yes'?.99:.02;s.yesBid=side==='yes'?.98:.01;
+    let projection=finalOnly?220:174.5;
+    f.proxy.snapshot=asset=>{const at=Date.now(),speed=.012/projection,sign=side==='yes'?1:-1;
+      f.proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,
+        price:2000+sign*(.012+speed*(30-i*.2))}));
+      return {status:'FRESH_PROXY',sourceAt:at,price:2000+sign*.012};};
+    let reads=0,deteriorate=true;f.api.getOrders=async()=>{if(++reads===2 && deteriorate)projection=174.5;return [];};
+    await f.executor.tick(f.ctx('USDJPY'));
+    assert.equal(f.requests.length,0,JSON.stringify(f.logs));
+    assert.ok(f.logs.some(e=>e.reason==='USDJPY_CROSSING_TIME_BUFFER'));
+    if(finalOnly)assert.equal(reads,2);
+    projection=220;deteriorate=false;f.advance();await f.executor.tick(f.ctx('USDJPY'));
+    assert.equal(f.requests.length,1,JSON.stringify(f.logs));
+    assert.equal(s.activeTrade.side,side);
+  }
+});
+test('all four live markets retain warnings for $25+ stages on a short rebound, including partial-budget retries',async()=>{
+  for(const asset of Object.keys(LIVE_LATE_MARKETS))for(const side of ['yes','no'])
+  for(const [seconds,price,budget,stageId] of [[110,.95,25,'under_120'],[55,.97,50,'under_60'],[40,.98,100,'under_45']]) {
+    const f=fixture(),s=f.shared[asset],sign=side==='yes'?1:-1;
+    s.marketCloseTs=Date.now()+seconds*1000;s.yesAsk=side==='yes'?price:1-price+.01;s.yesBid=side==='yes'?price-.01:1-price;
+    const snapshot=f.executor.snapshot();snapshot.shrinkingGuards={[asset]:{asset,ticker:s.ticker,side,
+      blocked:true,triggeredAt:Date.now()-30000,triggerReason:'SHRINK_RAPID_APPROACH'}};
+    // Stage protection follows the original allocation, even if only $1 remains.
+    snapshot.lateStages[s.ticker]={ticker:s.ticker,side,sim:false,attempted:[stageId],spent:budget-1,records:{[stageId]:{spent:budget-1}}};
+    f.executor.restore(snapshot);
+    f.proxy.snapshot=a=>{const at=Date.now();
+      f.proxy.history[a]=Array.from({length:301},(_,i)=>{const sec=i*.2;
+        const cushion=sec<=45?4-sec*3/45:sec<58?1+(sec-45)/13:2;
+        return {sourceAt:at-60000+i*200,price:2000+sign*cushion};});
+      return {status:'FRESH_PROXY',sourceAt:at,price:2000+sign*2};};
+    await f.executor.tick(f.ctx(asset));
+    assert.equal(f.requests.length,0,JSON.stringify(f.logs));
+    assert.ok(f.logs.some(e=>e.reason==='SHRINK_LONG_TREND_RECOVERY'),JSON.stringify(f.logs));
+    assert.equal(f.executor.snapshot().shrinkingGuards[asset].blocked,true);
+  }
+});
+
+test('large-stage warning persists across restart then resumes after full trend recovery',async()=>{
+  const f=fixture(),s=f.shared.GOLD;
+  s.marketCloseTs=Date.now()+110000;s.yesAsk=.95;s.yesBid=.94;
+  const snap=f.executor.snapshot();snap.shrinkingGuards={GOLD:{asset:'GOLD',ticker:s.ticker,side:'yes',
+    blocked:true,triggeredAt:Date.now()-30000,triggerReason:'SHRINK_RAPID_APPROACH'}};
+  f.executor.restore(JSON.parse(JSON.stringify(snap)));
+  let recovering=false;
+  f.proxy.snapshot=asset=>{const at=Date.now();f.proxy.history[asset]=Array.from({length:301},(_,i)=>{
+    const sec=i*.2,cushion=recovering?2:sec<=45?4-sec*3/45:sec<58?1+(sec-45)/13:2;
+    return {sourceAt:at-60000+i*200,price:2000+cushion};});
+    return {status:'FRESH_PROXY',sourceAt:at,price:2002};};
+  await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,0);
+  f.executor.restore(JSON.parse(JSON.stringify(f.executor.snapshot())));
+  recovering=true;f.advance();await f.executor.tick(f.ctx('GOLD'));
+  assert.equal(f.requests.length,1,JSON.stringify(f.logs));
+  assert.equal(f.saved().shrinkingGuards.GOLD.blocked,false);
+  assert.equal(f.logs.find(e=>e.event==='ENTRY_CONFIRMED').shrinkingGuard.allowed,true);
+});
+test('large-stage recovery is checked again after account reads and saves a newly detected warning',async()=>{
+  const f=fixture(),s=f.shared.GOLD;
+  s.marketCloseTs=Date.now()+110000;s.yesAsk=.95;s.yesBid=.94;
+  let deteriorating=false;
+  f.proxy.snapshot=asset=>{const at=Date.now();f.proxy.history[asset]=Array.from({length:301},(_,i)=>{
+    const sec=i*.2,cushion=deteriorating?(sec<58?4-sec*2/58:2):4;
+    return {sourceAt:at-60000+i*200,price:2000+cushion};});
+    return {status:'FRESH_PROXY',sourceAt:at,price:2000+(deteriorating?2:4)};};
+  let reads=0;f.api.getOrders=async()=>{if(++reads===2)deteriorating=true;return [];};
+  await f.executor.tick(f.ctx('GOLD'));
+  assert.equal(reads,2);assert.equal(f.requests.length,0,JSON.stringify(f.logs));
+  assert.equal(f.saved().shrinkingGuards.GOLD.blocked,true);
+  assert.ok(f.logs.some(e=>e.reason==='SHRINK_LONG_TREND_RECOVERY'));
 });

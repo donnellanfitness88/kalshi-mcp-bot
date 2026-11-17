@@ -105,18 +105,19 @@ export function createScalpExecutor(deps = {}) {
   const getReferenceQuote = deps.getReferenceQuote ?? (asset => benchmarkFeed.getQuote(asset));
   const getReferenceHistory = deps.getReferenceHistory ?? (asset => benchmarkFeed.getHistory(asset));
   let shrinkingGuards = {};
-  function shrinkingCheck(ctx, distance) {
+  function shrinkingCheck(ctx, distance, stageBudget) {
+    const requireLongRecovery=stageBudget>=25;
     // Every late purchase must pass, including the first purchase.
     const check = isFourMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
       history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[ctx.asset],
-      secondsRemaining:remainingSeconds(ctx.s),at:Date.now()
+      secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,at:Date.now()
     }) : evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' ? 50 : distance.minimumDistance,
       secondsRemaining:remainingSeconds(ctx.s),
-      previous:shrinkingGuards[ctx.asset],now:Date.now() });
+      previous:shrinkingGuards[ctx.asset],requireLongRecovery,now:Date.now() });
     if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[ctx.asset])) {
       const next={...shrinkingGuards,[ctx.asset]:check.guardState};
       save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
@@ -530,7 +531,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') {
       const check = await proximity(ctx, signal);
       if (!check.allowed) { entryBlocked(asset, check.reason, { proximity: check }); return; }
-      const shrink = shrinkingCheck(ctx,check);
+      const shrink = shrinkingCheck(ctx,check,signal.stage.budget);
       if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
     lastAttempt = Date.now();
@@ -565,7 +566,7 @@ export function createScalpExecutor(deps = {}) {
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
     }
-    const shrinkCheck = distanceCheck ? shrinkingCheck(ctx,distanceCheck) : null;
+    const shrinkCheck = distanceCheck ? shrinkingCheck(ctx,distanceCheck,fresh.stage.budget) : null;
     if (shrinkCheck && !shrinkCheck.allowed) {
       entryBlocked(asset,shrinkCheck.reason,{shrinkingGuard:shrinkCheck}); return;
     }

@@ -142,3 +142,49 @@ The read-only observer baselines do not include these extra live time buffers.
 Validation: 105 focused tests pass, including YES/NO delay-and-resume execution,
 quote-age adjustment, exact threshold rejection and preservation of silver's
 20-second threshold and the original shrinking-cushion checks.
+
+## USD/JPY buffer and large-stage warning recovery
+
+USDJPY now uses the same independent projected-crossing margin gate as EURUSD:
+when the 15-second average cushion is shrinking, the source-age-adjusted
+projected crossing must be more than 15 seconds beyond expiry. Equality blocks.
+This applies to every new USDJPY purchase, including initial purchases,
+additions and partial-fill retries, and is rechecked immediately before
+submission. A two-second pause cannot override this gate. Silver remains at
+20 seconds; EURUSD remains at 15 seconds.
+
+Across live BTC and all four approved markets, a stage allocated $25 or more
+cannot clear a shrinking-cushion warning on two-second stabilization alone.
+Recovery additionally requires both the trailing 15-second and trailing
+60-second signed winning-side cushion changes to be nonnegative, allowing only
+a 1e-9 numerical tolerance. The 60-second history must be continuous under the
+existing gap limits. Missing history keeps a warning latched. Both flat and
+improving broader trends can qualify if two-second stabilization and all other
+checks also pass. A fresh rapid-drop or projected-crossing warning receives the
+same treatment, including before the first fill of a larger stage.
+
+The threshold uses the original stage allocation ($25/$50/$100), not the
+remaining budget or actual order value: a $1 retry in a $25 stage still receives
+the stricter recovery check. The latch is durably saved before a rejected
+purchase returns and restored after a restart. The check runs before account
+reads and again before submission. $2/$5 stages retain their existing recovery
+rule. This does not create a new warning solely from a negative longer trend
+when no current or persisted shrinking-cushion warning exists.
+
+Logs expose `longRecovery` when a warning requires this check, including
+`cushionChange15`, `cushionChange60` and `historyAvailable`. Rejections identify
+`SHRINK_LONG_TREND_RECOVERY` or `SHRINK_LONG_HISTORY_UNAVAILABLE`; USDJPY time
+buffer rejections use `USDJPY_CROSSING_TIME_BUFFER` or
+`USDJPY_BUFFER_DATA_UNAVAILABLE`.
+
+Allocations, entry-price/time tiers, existing BTC distance checks, settlement
+handling and other risk gates are retained. These are purchase filters and do
+not close existing holdings or guarantee a settlement result. Read-only
+observer baselines, including the large BTC observation, retain their existing
+recovery behavior. Their results should not be represented as a replay of
+these stricter live gates.
+
+Validation: `npm run test:four-markets` passes 114 tests, including USDJPY
+YES/NO delay and resume, final pre-submission deterioration, exact time-buffer
+thresholds, all four markets at all three larger stages, partial-budget retries,
+YES/NO broader-trend recovery, missing/gapped history and restart persistence.
