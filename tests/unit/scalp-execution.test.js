@@ -1544,3 +1544,12 @@ test('ETH keeps its prior stages; disabled ETH cannot submit an initial purchase
  f.state.ETH.secsLeft=44; f.state.ETH.yesAsk=.98; f.state.ETH.yesBid=.97; await f.executor.tick(f.ctx('ETH'));
  assert.equal(f.requests.length,0);
 });
+test('sixth stage selection preserves fifth until funded and excludes ETH',()=>{
+ for(const asset of ['BTC','GOLD','SILVER','EURUSD','USDJPY']) {
+  assert.equal(lateStage(40,asset).id,'under_45');
+  assert.equal(lateStage(40,asset,{records:{under_45:{spent:26.75}}}).id,'under_45');
+  assert.equal(lateStage(40,asset,{records:{under_45:{spent:99}}}).id,'under_45_extra');
+  assert.equal(lateStage(45,asset,{records:{under_45:{spent:100}}}).id,'under_60');
+ }
+ assert.equal(lateStage(40,'ETH',{records:{under_45:{spent:100}}}).id,'under_60');
+});

@@ -37,8 +37,9 @@ export const SCALP_CONFIG = {
 
 
 // ETH retains its previous schedule if explicitly re-enabled later.
+export const EXTRA_LATE_STAGE = Object.freeze({id:'under_45_extra',maxSeconds:45,minPrice:0.98,budget:900});
 export function lateStagesFor(asset = 'BTC') {
-  return asset === 'ETH' ? SCALP_CONFIG.lateStages.filter(stage => !['under_150', 'under_45'].includes(stage.id)) : SCALP_CONFIG.lateStages;
+  return asset === 'ETH' ? SCALP_CONFIG.lateStages.filter(stage => !['under_150', 'under_45'].includes(stage.id)) : [...SCALP_CONFIG.lateStages,EXTRA_LATE_STAGE];
 }
 export function lateBudgetFor(asset = 'BTC') {
   return lateStagesFor(asset).reduce((sum, stage) => sum + stage.budget, 0);

@@ -52,7 +52,7 @@ export class LateMarketRunner {
   }
   start() {
     this.log({event:'STARTED',enabled:fourMarketsEnabled(),markets:LIVE_LATE_MARKETS,
-      capPerMarket:182,totalCapIncludingBTC:910,largeBTC:'OBSERVATION_ONLY',
+      capPerMarket:1082,totalCapIncludingBTC:5410,largeBTC:'OBSERVATION_ONLY',
       reference:'PYTH_SPOT_PROXY_NOT_SETTLEMENT',fixedMinimum:null,
       rapidDropFraction:.30,recoverySeconds:2});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;

@@ -2,7 +2,7 @@ const STABILIZATION_SECONDS = 2;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, observationOnlyNoMinimum = false, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, observationOnlyNoMinimum = false, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
@@ -49,15 +49,17 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     const m=point && measure(point);
     if(m?.rapid || m?.projection){trigger={...m,at:point.sourceTs};break;}
   }
-  const checkpoints=Array.from({length:STABILIZATION_SECONDS+1},(_,i)=>at(last.sourceTs-(STABILIZATION_SECONDS-i)*1000));
-  const stabilized=checkpoints.every(Boolean) &&
+  const checkpoints=Array.from({length:stabilizationSeconds+1},(_,i)=>at(last.sourceTs-(stabilizationSeconds-i)*1000));
+  const stableRows=rows.filter(p=>p.sourceTs>=last.sourceTs-stabilizationSeconds*1000);
+  const noIntraSecondDecrease=!requireStableAlways || stableRows.every((p,i)=>!i || cushion(p)+1e-9>=cushion(stableRows[i-1]));
+  const stabilized=noIntraSecondDecrease && checkpoints.every(Boolean) &&
     complete(checkpoints[0].sourceTs,last.sourceTs) &&
     checkpoints.every((p,i)=>!i || cushion(p)+1e-9>=cushion(checkpoints[i-1]));
   const tooClose=current.currentCushion+1e-9<minimumDistance;
   // Large stages must not erase a warning on a short pause while either broader
   // trend still erodes the winning-side cushion. Preserve the latch on missing
   // continuous history; smaller stages and observer baselines retain their rules.
-  const recoveryWarning=Boolean(trigger || prior?.blocked);
+  const recoveryWarning=Boolean(trigger || prior?.blocked || requireStableAlways);
   let longRecovery=null;
   if(requireLongRecovery && recoveryWarning) {
     const first=at(last.sourceTs-60000);
@@ -77,5 +79,5 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     triggeredAt:trigger?.at ?? prior?.triggeredAt ?? null,
     triggerReason:trigger ? reason : prior?.triggerReason ?? null};
   return { allowed:!blocked,reason,guardState,...current,stabilized,longRecovery,
-    sourceTs:last.sourceTs,checkedAt:now,lookbackSeconds:15,stabilizationSeconds:STABILIZATION_SECONDS };
+    sourceTs:last.sourceTs,checkedAt:now,lookbackSeconds:15,stabilizationSeconds };
 }

@@ -20,7 +20,7 @@ const SHRINK_TEST = 'all_four_shrinking_no_fixed_minimum_v1';
 // Shared observer/live qualification for the four approved markets.
 // No fixed distance/drop floor; live BTC retains its existing thresholds.
 export function metalShrinkingCheck({asset,ticker,side,target,proxy,history,
-  previous=null,at,secondsRemaining,requireLongRecovery=false}) {
+  previous=null,at,secondsRemaining,requireLongRecovery=false,stabilizationSeconds=2,requireStableAlways=false}) {
   const blocked=reason=>({allowed:false,reason,guardState:previous});
   if(!Number.isFinite(target)||target<=0||!['yes','no'].includes(side))
     return blocked('INVALID_TARGET_OR_SIDE');
@@ -38,7 +38,7 @@ export function metalShrinkingCheck({asset,ticker,side,target,proxy,history,
   return evaluateShrinkingCushion({
     history:rows,asset,ticker,side,target,minimumDistance:0,
     rapidDropMinimum:0,observationOnlyNoMinimum:true,
-    secondsRemaining,previous,requireLongRecovery,now:at
+    secondsRemaining,previous,requireLongRecovery,stabilizationSeconds,requireStableAlways,now:at
   });
 }
 const number = x => (typeof x === 'number' || (typeof x === 'string' && x.trim())) ? Number(x) : NaN;

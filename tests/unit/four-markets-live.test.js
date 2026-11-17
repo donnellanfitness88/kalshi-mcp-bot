@@ -390,3 +390,45 @@ test('large-stage recovery is checked again after account reads and saves a newl
   assert.equal(f.saved().shrinkingGuards.GOLD.blocked,true);
   assert.ok(f.logs.some(e=>e.reason==='SHRINK_LONG_TREND_RECOVERY'));
 });
+
+function extraHistory(f,fn=()=>10) {
+  f.proxy.snapshot=asset=>{const at=Date.now();f.proxy.history[asset]=Array.from({length:351},(_,i)=>({sourceAt:at-70000+i*200,price:2000+fn(i*.2-70)}));
+    return {status:'FRESH_PROXY',sourceAt:at,price:f.proxy.history[asset].at(-1).price};};
+}
+test('sixth stage requires near-full fifth fill, then five stable seconds and broader recovery',async()=>{
+  for(const asset of Object.keys(LIVE_LATE_MARKETS))for(const side of ['yes','no']) {
+    const f=fixture(),s=f.shared[asset];s.marketCloseTs=Date.now()+40000;
+    s.yesAsk=side==='yes'?.99:.02;s.yesBid=side==='yes'?.98:.01;
+    const sign=side==='yes'?1:-1;extraHistory(f,()=>sign*10);
+    f.api.placeOrder=async body=>{f.requests.push({...body});return {order_id:'extra-'+f.requests.length,fill_count:body.count,remaining_count:'0.00',average_fill_price:body.price,average_fee_paid:'0.0000'};};
+    await f.executor.tick(f.ctx(asset));
+    assert.equal(f.logs.find(e=>e.event==='ENTRY_CONFIRMED').stage,'under_45');
+    assert.ok(f.executor.snapshot().lateStages[s.ticker].records.under_45.spent>=99);
+    f.advance();await f.executor.tick(f.ctx(asset));
+    const extra=f.logs.filter(e=>e.event==='ENTRY_CONFIRMED').at(-1);
+    assert.equal(extra.stage,'under_45_extra',JSON.stringify(f.logs));
+    assert.equal(extra.shrinkingGuard.stabilizationSeconds,5);
+    assert.equal(extra.shrinkingGuard.longRecovery.allowed,true);
+    assert.ok(f.executor.snapshot().lateStages[s.ticker].records.under_45_extra.spent<=900);
+    f.executor.restore(f.executor.snapshot());f.advance();await f.executor.tick(f.ctx(asset));
+    assert.ok(f.executor.snapshot().lateStages[s.ticker].records.under_45_extra.spent<=900);
+    assert.ok(f.executor.snapshot().lateStages[s.ticker].spent<=1082);
+  }
+});
+test('partial fifth fill cannot unlock sixth stage',async()=>{
+  const f=fixture(),s=f.shared.GOLD;s.marketCloseTs=Date.now()+40000;s.yesAsk=.99;s.yesBid=.98;s.yesAskSize=2;
+  extraHistory(f);await f.executor.tick(f.ctx('GOLD'));f.advance();await f.executor.tick(f.ctx('GOLD'));
+  assert.ok(f.logs.filter(e=>e.event==='ENTRY_CONFIRMED').every(e=>e.stage==='under_45'));
+});
+test('sixth stage blocks adverse broad trend, short recovery, missing history and final-check deterioration',async()=>{
+  for(const defect of ['trend','short','missing','final']) {
+    const f=fixture(),s=f.shared.GOLD;s.marketCloseTs=Date.now()+40000;s.yesAsk=.99;s.yesBid=.98;
+    extraHistory(f);await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,1);
+    if(defect==='trend')extraHistory(f,t=>10-t*.01);
+    if(defect==='short')extraHistory(f,t=>t< -3?11:10);
+    if(defect==='missing') {const base=f.proxy.snapshot;f.proxy.snapshot=a=>{const p=base(a);f.proxy.history[a]=f.proxy.history[a].slice(-151);return p;};}
+    if(defect==='final') {let reads=0;f.api.getOrders=async()=>{if(++reads===2)extraHistory(f,t=>10-t*.01);return [];};}
+    f.advance();await f.executor.tick(f.ctx('GOLD'));
+    assert.equal(f.requests.length,1,defect+JSON.stringify(f.logs));
+  }
+});

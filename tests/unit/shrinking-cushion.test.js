@@ -126,3 +126,11 @@ test('long recovery does not invent a warning, transfer another ticker latch, or
   assert.equal(run(rows,{requireLongRecovery:true,previous:{...warning,ticker:'OLD'}}).allowed,true);
   assert.equal(run(longHistory(()=>49),{requireLongRecovery:true,previous:warning}).allowed,false);
 });
+test('extra stage requires five stable seconds even without warning and rejects intra-second dips',()=>{
+  const rows=Array.from({length:351},(_,i)=>({sourceTs:now-70000+i*200,price:target+100}));
+  const opts={requireLongRecovery:true,requireStableAlways:true,stabilizationSeconds:5};
+  assert.equal(run(rows,opts).allowed,true);
+  const dip=rows.map(p=>({...p,price:p.sourceTs===now-2400?target+99:p.price}));
+  assert.equal(run(dip,opts).allowed,false);
+  assert.equal(run(rows.slice(-151),opts).reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');
+});

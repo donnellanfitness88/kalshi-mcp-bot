@@ -46,9 +46,11 @@ export function entryPhase(seconds) {
   return 'BUFFER';
 }
 // Only the current time tier is eligible; missed earlier tiers are not backfilled.
-export function lateStage(seconds, asset = 'BTC') {
+export function lateStage(seconds, asset = 'BTC', ledger = null) {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return lateStagesFor(asset).findLast(stage => seconds < stage.maxSeconds) ?? null;
+  const extraReady=asset!=='ETH' && ledger?.records?.under_45?.spent>=99;
+  return lateStagesFor(asset).filter(stage=>stage.id!=='under_45_extra'||extraReady)
+    .findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
 export function lateStageSize(price, balance, budget, feeMultiplier = 1) {
   if (![price,balance,budget].every(Number.isFinite) || price <= 0 || price >= 1) return 0;
@@ -107,17 +109,18 @@ export function createScalpExecutor(deps = {}) {
   let shrinkingGuards = {};
   function shrinkingCheck(ctx, distance, stageBudget) {
     const requireLongRecovery=stageBudget>=25;
+    const extraOptions=stageBudget===900?{stabilizationSeconds:5,requireStableAlways:true}:{};
     // Every late purchase must pass, including the first purchase.
     const check = isFourMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
       history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[ctx.asset],
-      secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,at:Date.now()
+      secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,...extraOptions,at:Date.now()
     }) : evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' ? 50 : distance.minimumDistance,
       secondsRemaining:remainingSeconds(ctx.s),
-      previous:shrinkingGuards[ctx.asset],requireLongRecovery,now:Date.now() });
+      previous:shrinkingGuards[ctx.asset],requireLongRecovery,...extraOptions,now:Date.now() });
     if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[ctx.asset])) {
       const next={...shrinkingGuards,[ctx.asset]:check.guardState};
       save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
@@ -470,8 +473,10 @@ export function createScalpExecutor(deps = {}) {
       return { shouldEnter: false, reason: 'ALL_SCALP_ENTRIES_DISABLED' };
     }
     if (mode !== 'LATE_SETTLEMENT') return { shouldEnter: false };
-    const stage = lateStage(remainingSeconds(s), s === shared.ETH ? 'ETH' : 'BTC');
     const ledger = lateStages[s.ticker];
+    // Preserve the fifth stage until its fee-inclusive allocation is effectively
+    // filled (less than $1 remains). A small partial fill never unlocks $900.
+    const stage = lateStage(remainingSeconds(s),asset,ledger);
     // Old journals reserved the entire ticker. Never infer missing stage history.
     const record = ledger?.records?.[stage?.id];
     if (!stage || ledger?.closed || (lateEntryTickers.includes(s.ticker) && !ledger) ||

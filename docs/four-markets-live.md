@@ -188,3 +188,20 @@ Validation: `npm run test:four-markets` passes 114 tests, including USDJPY
 YES/NO delay and resume, final pre-submission deterioration, exact time-buffer
 thresholds, all four markets at all three larger stages, partial-budget retries,
 YES/NO broader-trend recovery, missing/gapped history and restart persistence.
+
+## Separate $900 sixth stage
+
+BTC, GOLD, SILVER, EURUSD and USDJPY retain their first five stages. A separate
+`under_45_extra` stage permits at most $900 including fees, only below 45 seconds
+and at an executable purchased-side price of at least 98 cents. It unlocks only
+once confirmed fifth-stage spending is at least $99 (less than $1 unfilled).
+A small partial fill does not unlock the extra stage. ETH remains unchanged.
+
+Every extra-stage purchase and retry requires five seconds without a decrease
+across fresh reference samples, continuous reference history, and nonnegative
+15-second AND 60-second cushion changes, even without an active warning. Existing
+proximity, crossing buffers, account checks, risk limits and liquidity checks run
+before purchase and are rechecked before submission. Retries and restarts share
+the durable stage spending ledger; the combined cap is $1,082 per market. Existing
+holdings can qualify after deployment only if their recorded fifth-stage spending
+meets the same prerequisite. No missed earlier stage is backfilled.
