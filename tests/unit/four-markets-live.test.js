@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createScalpExecutor,lateFee} from '../../src/engine/scalpExecution.js';
+import {createScalpExecutor,lateFee,lateStage} from '../../src/engine/scalpExecution.js';
 import {LIVE_LATE_MARKETS,MANAGED_ASSETS} from '../../src/engine/lateMarkets.js';
 import {LateMarketRunner} from '../../src/engine/lateMarketRunner.js';
 process.env.SCALP_ENABLED='true';process.env.DRY_RUN='false';
@@ -395,7 +395,7 @@ function extraHistory(f,fn=()=>10) {
   f.proxy.snapshot=asset=>{const at=Date.now();f.proxy.history[asset]=Array.from({length:351},(_,i)=>({sourceAt:at-70000+i*200,price:2000+fn(i*.2-70)}));
     return {status:'FRESH_PROXY',sourceAt:at,price:f.proxy.history[asset].at(-1).price};};
 }
-test('sixth stage requires near-full fifth fill, then five stable seconds and broader recovery',async()=>{
+test('sixth stage follows qualifying fifth fills and always checks broader trends',async()=>{
   for(const asset of Object.keys(LIVE_LATE_MARKETS))for(const side of ['yes','no']) {
     const f=fixture(),s=f.shared[asset];s.marketCloseTs=Date.now()+40000;
     s.yesAsk=side==='yes'?.99:.02;s.yesBid=side==='yes'?.98:.01;
@@ -420,15 +420,63 @@ test('partial fifth fill cannot unlock sixth stage',async()=>{
   extraHistory(f);await f.executor.tick(f.ctx('GOLD'));f.advance();await f.executor.tick(f.ctx('GOLD'));
   assert.ok(f.logs.filter(e=>e.event==='ENTRY_CONFIRMED').every(e=>e.stage==='under_45'));
 });
-test('sixth stage blocks adverse broad trend, short recovery, missing history and final-check deterioration',async()=>{
-  for(const defect of ['trend','short','missing','final']) {
+test('sixth stage blocks adverse broad trend, missing history and final-check deterioration',async()=>{
+  for(const defect of ['trend','missing','final']) {
     const f=fixture(),s=f.shared.GOLD;s.marketCloseTs=Date.now()+40000;s.yesAsk=.99;s.yesBid=.98;
     extraHistory(f);await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,1);
     if(defect==='trend')extraHistory(f,t=>10-t*.01);
-    if(defect==='short')extraHistory(f,t=>t< -3?11:10);
     if(defect==='missing') {const base=f.proxy.snapshot;f.proxy.snapshot=a=>{const p=base(a);f.proxy.history[a]=f.proxy.history[a].slice(-151);return p;};}
     if(defect==='final') {let reads=0;f.api.getOrders=async()=>{if(++reads===2)extraHistory(f,t=>10-t*.01);return [];};}
     f.advance();await f.executor.tick(f.ctx('GOLD'));
     assert.equal(f.requests.length,1,defect+JSON.stringify(f.logs));
   }
+});
+
+test('sixth-stage unlock is exactly $50 confirmed fee-inclusive fifth spending for all five markets',()=>{
+  for(const asset of ['BTC',...Object.keys(LIVE_LATE_MARKETS)]) {
+    for(const spent of [0,26.75,49.99,NaN,Infinity])
+      assert.equal(lateStage(40,asset,{records:{under_45:{spent}}}).id,'under_45');
+    for(const spent of [50,50.01,99,100])
+      assert.equal(lateStage(40,asset,{records:{under_45:{spent}}}).id,'under_45_extra');
+    assert.equal(lateStage(45,asset,{records:{under_45:{spent:50}}}).id,'under_60');
+  }
+  assert.equal(lateStage(40,'ETH',{records:{under_45:{spent:100}}}).id,'under_60');
+});
+test('a half-filled fifth stage unlocks $900; an unflagged recent dip does not force five-second waiting',async()=>{
+  for(const asset of Object.keys(LIVE_LATE_MARKETS))for(const side of ['yes','no']) {
+    const f=fixture(),s=f.shared[asset],sign=side==='yes'?1:-1;
+    s.marketCloseTs=Date.now()+40000;s.yesAsk=side==='yes'?.99:.02;s.yesBid=side==='yes'?.98:.01;
+    extraHistory(f,()=>sign*10);
+    f.api.placeOrder=async body=>{f.requests.push({...body});return {order_id:'half-'+f.requests.length,
+      fill_count:f.requests.length===1?'51.00':body.count,remaining_count:'0.00',average_fill_price:body.price,average_fee_paid:'0.0000'};};
+    await f.executor.tick(f.ctx(asset));assert.equal(f.requests.length,1);
+    assert.equal(f.executor.snapshot().lateStages[s.ticker].records.under_45.spent,50.49);
+    extraHistory(f,t=>sign*(Math.abs(t+2.4)<.01?9.999999:10));
+    f.advance();await f.executor.tick(f.ctx(asset));
+    assert.equal(f.requests.length,2,JSON.stringify(f.logs));
+    const entry=f.logs.filter(e=>e.event==='ENTRY_CONFIRMED').at(-1);
+    assert.equal(entry.stage,'under_45_extra');assert.equal(entry.shrinkingGuard.stabilized,false);
+    assert.equal(entry.shrinkingGuard.longRecovery.allowed,true);
+    const ledger=f.executor.snapshot().lateStages[s.ticker];
+    assert.equal(ledger.records.under_45.spent,50.49);
+    assert.ok(ledger.records.under_45_extra.spent<=900);assert.ok(ledger.spent<=950.49);
+  }
+});
+test('a warned sixth stage needs five stable seconds, persists on restart and rechecks on every retry',async()=>{
+  const f=fixture(),s=f.shared.GOLD;s.marketCloseTs=Date.now()+40000;s.yesAsk=.99;s.yesBid=.98;
+  extraHistory(f);await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,1);
+  const saved=f.executor.snapshot();saved.shrinkingGuards.GOLD={asset:'GOLD',ticker:s.ticker,side:'yes',
+    blocked:true,triggeredAt:Date.now()-30000,triggerReason:'SHRINK_RAPID_APPROACH'};
+  f.executor.restore(saved);
+  extraHistory(f,t=>Math.abs(t+2.4)<.01?9.999999:10);
+  f.advance();await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,1);
+  assert.equal(f.executor.snapshot().shrinkingGuards.GOLD.blocked,true);
+  f.executor.restore(JSON.parse(JSON.stringify(f.executor.snapshot())));
+  extraHistory(f);f.advance();
+  f.api.placeOrder=async body=>{f.requests.push({...body});return {order_id:'part-extra',fill_count:'10.00',
+    remaining_count:'0.00',average_fill_price:body.price,average_fee_paid:'0.0000'};};
+  await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,2,JSON.stringify(f.logs));
+  assert.ok(f.executor.snapshot().lateStages[s.ticker].records.under_45_extra.spent<900);
+  extraHistory(f,t=>10-t*.01);f.advance();await f.executor.tick(f.ctx('GOLD'));
+  assert.equal(f.requests.length,2);assert.equal(f.executor.snapshot().shrinkingGuards.GOLD.blocked,true);
 });

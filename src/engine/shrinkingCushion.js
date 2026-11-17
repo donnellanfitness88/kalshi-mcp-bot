@@ -2,7 +2,7 @@ const STABILIZATION_SECONDS = 2;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, observationOnlyNoMinimum = false, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
@@ -51,7 +51,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
   }
   const checkpoints=Array.from({length:stabilizationSeconds+1},(_,i)=>at(last.sourceTs-(stabilizationSeconds-i)*1000));
   const stableRows=rows.filter(p=>p.sourceTs>=last.sourceTs-stabilizationSeconds*1000);
-  const noIntraSecondDecrease=!requireStableAlways || stableRows.every((p,i)=>!i || cushion(p)+1e-9>=cushion(stableRows[i-1]));
+  const noIntraSecondDecrease=!(requireStableAlways || stabilizationSeconds>STABILIZATION_SECONDS) || stableRows.every((p,i)=>!i || cushion(p)+1e-9>=cushion(stableRows[i-1]));
   const stabilized=noIntraSecondDecrease && checkpoints.every(Boolean) &&
     complete(checkpoints[0].sourceTs,last.sourceTs) &&
     checkpoints.every((p,i)=>!i || cushion(p)+1e-9>=cushion(checkpoints[i-1]));
@@ -61,7 +61,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
   // continuous history; smaller stages and observer baselines retain their rules.
   const recoveryWarning=Boolean(trigger || prior?.blocked || requireStableAlways);
   let longRecovery=null;
-  if(requireLongRecovery && recoveryWarning) {
+  if(requireLongRecovery && (recoveryWarning || requireLongAlways)) {
     const first=at(last.sourceTs-60000);
     const available=Boolean(first && complete(first.sourceTs,last.sourceTs));
     const change15=current.currentCushion-current.initialCushion;
@@ -71,7 +71,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
       allowed:available && change15>=-1e-9 && change60>=-1e-9};
   }
   const longRecoveryBlocked=Boolean(longRecovery && !longRecovery.allowed);
-  const blocked=Boolean((recoveryWarning && (!stabilized || longRecoveryBlocked)) || tooClose);
+  const blocked=Boolean((recoveryWarning && !stabilized) || longRecoveryBlocked || tooClose);
   const reason=!blocked?'SHRINK_OK':longRecoveryBlocked ?
     (longRecovery.historyAvailable?'SHRINK_LONG_TREND_RECOVERY':'SHRINK_LONG_HISTORY_UNAVAILABLE'):trigger ? (trigger.rapid?'SHRINK_RAPID_APPROACH':'SHRINK_PROJECTED_CROSSING') :
     tooClose?'SHRINK_DISTANCE_TOO_CLOSE':blocked?'SHRINK_STABILIZING':'SHRINK_OK';

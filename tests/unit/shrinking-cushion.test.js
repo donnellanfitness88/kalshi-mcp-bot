@@ -134,3 +134,23 @@ test('extra stage requires five stable seconds even without warning and rejects 
   assert.equal(run(dip,opts).allowed,false);
   assert.equal(run(rows.slice(-151),opts).reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');
 });
+
+test('conditional five-second recovery allows an unflagged dip but never weakens the broader trend gate',()=>{
+  const opts={requireLongRecovery:true,requireLongAlways:true,stabilizationSeconds:5};
+  for(const side of ['yes','no']) {
+    const sign=side==='yes'?1:-1;
+    const rows=Array.from({length:351},(_,i)=>({sourceTs:now-70000+i*200,price:target+sign*150}));
+    rows.find(p=>p.sourceTs===now-2400).price=target+sign*149.5;
+    const unflagged=run(rows,{...opts,side});
+    assert.equal(unflagged.stabilized,false);assert.equal(unflagged.longRecovery.allowed,true);
+    assert.equal(unflagged.allowed,true);assert.equal(unflagged.guardState.blocked,false);
+    const warned=run(rows,{...opts,side,previous:{...warning,side}});
+    assert.equal(warned.allowed,false);assert.equal(warned.guardState.blocked,true);
+    const recovered=rows.map(p=>({...p,price:target+sign*150}));
+    assert.equal(run(recovered,{...opts,side,previous:warned.guardState}).allowed,true);
+    const eroding=rows.map((p,i)=>({...p,price:target+sign*(200-i*.1)}));
+    const rejected=run(eroding,{...opts,side});
+    assert.equal(rejected.allowed,false);assert.equal(rejected.reason,'SHRINK_LONG_TREND_RECOVERY');
+    assert.equal(run(rows.slice(-151),{...opts,side}).reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');
+  }
+});

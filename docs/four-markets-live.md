@@ -191,17 +191,32 @@ YES/NO broader-trend recovery, missing/gapped history and restart persistence.
 
 ## Separate $900 sixth stage
 
-BTC, GOLD, SILVER, EURUSD and USDJPY retain their first five stages. A separate
-`under_45_extra` stage permits at most $900 including fees, only below 45 seconds
-and at an executable purchased-side price of at least 98 cents. It unlocks only
-once confirmed fifth-stage spending is at least $99 (less than $1 unfilled).
-A small partial fill does not unlock the extra stage. ETH remains unchanged.
+BTC, GOLD, SILVER, EURUSD and USDJPY retain their first five stages. The separate
+`under_45_extra` stage permits up to $900 including fees, only below 45 seconds
+and at an executable purchased-side price of at least 98 cents. It unlocks once
+confirmed, finite fifth-stage spending reaches $50 including fees, replacing
+the former $99 prerequisite. ETH remains unchanged and disabled.
 
-Every extra-stage purchase and retry requires five seconds without a decrease
-across fresh reference samples, continuous reference history, and nonnegative
-15-second AND 60-second cushion changes, even without an active warning. Existing
-proximity, crossing buffers, account checks, risk limits and liquidity checks run
-before purchase and are rechecked before submission. Retries and restarts share
-the durable stage spending ledger; the combined cap is $1,082 per market. Existing
-holdings can qualify after deployment only if their recorded fifth-stage spending
-meets the same prerequisite. No missed earlier stage is backfilled.
+Every extra-stage purchase/retry still requires fresh continuous history and
+nonnegative 15-second AND 60-second signed cushion changes. Five-second recovery
+is required only when a current or persisted shrinking-cushion warning is
+active. Without a warning, a small recent dip is not an independent rejection
+if both broader trends and all other checks pass. Clearing a warning requires
+five elapsed seconds of nondecreasing cushion across all intervening source
+samples. These are rolling lookbacks, not a new timer after the fifth fill.
+Broader-trend/history failures remain blocked and latched until recovery.
+
+All existing proximity, crossing-time, cash, account, risk, price, expiry and
+executable-liquidity checks remain and run again before submission. Available
+liquidity and actual IOC execution still limit fills; $900 is not guaranteed.
+Unfilled fifth-stage budget is not transferred to stage six: $50 plus $900 is
+$950 across those two stages. No missed earlier stage is backfilled. The
+maximum combined cap remains $1,082 per market, bounded by available cash.
+The durable ledger and warning state survive retries and restarts. Existing
+holdings can qualify if recorded fifth-stage spending meets $50. The 25% daily
+cap, 5% session guard, other allocations and $2,500 BTC observer are unchanged.
+
+Validation: 122 focused four-market tests and six daily-cap tests pass, covering
+the $50 boundary across five markets, YES/NO partial fifth fills, unflagged small
+dips, warned five-second recovery, gaps and adverse broader trends, final
+pre-submit checks, partial-budget retries and restart persistence.

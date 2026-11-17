@@ -48,7 +48,8 @@ export function entryPhase(seconds) {
 // Only the current time tier is eligible; missed earlier tiers are not backfilled.
 export function lateStage(seconds, asset = 'BTC', ledger = null) {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  const extraReady=asset!=='ETH' && ledger?.records?.under_45?.spent>=99;
+  const fifthSpent=ledger?.records?.under_45?.spent;
+  const extraReady=asset!=='ETH' && Number.isFinite(fifthSpent) && fifthSpent>=50;
   return lateStagesFor(asset).filter(stage=>stage.id!=='under_45_extra'||extraReady)
     .findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
@@ -109,7 +110,7 @@ export function createScalpExecutor(deps = {}) {
   let shrinkingGuards = {};
   function shrinkingCheck(ctx, distance, stageBudget) {
     const requireLongRecovery=stageBudget>=25;
-    const extraOptions=stageBudget===900?{stabilizationSeconds:5,requireStableAlways:true}:{};
+    const extraOptions=stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
     // Every late purchase must pass, including the first purchase.
     const check = isFourMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
@@ -474,8 +475,8 @@ export function createScalpExecutor(deps = {}) {
     }
     if (mode !== 'LATE_SETTLEMENT') return { shouldEnter: false };
     const ledger = lateStages[s.ticker];
-    // Preserve the fifth stage until its fee-inclusive allocation is effectively
-    // filled (less than $1 remains). A small partial fill never unlocks $900.
+    // A confirmed $50 fee-inclusive fifth-stage fill unlocks the separate $900
+    // budget. Unfilled fifth-stage spending is not added to that budget.
     const stage = lateStage(remainingSeconds(s),asset,ledger);
     // Old journals reserved the entire ticker. Never infer missing stage history.
     const record = ledger?.records?.[stage?.id];
