@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {MetalsProxy} from '../../src/research/metalsProxy.js';
-import {MetalsObserver} from '../../src/research/metalsObserver.js';
+import {MetalsObserver,metalShrinkingCheck} from '../../src/research/metalsObserver.js';
 const base=1800000000000;
 function message(at,price=3801,extra={}) {return {type:'streamUpdated',subscriptionId:1,parsed:{priceFeeds:[{
   priceFeedId:346,price:String(Math.round(price*100000)),exponent:-5,confidence:1000,
@@ -39,7 +39,9 @@ test('15/30/60-second movements require complete elapsed history and reject gaps
 test('source history stays bounded, and silver uses its own feed',()=>{
   let now=base;const p=new MetalsProxy({now:()=>now});
   for(let i=0;i<2000;i++){now=base+i*200;p.ingest(message(now,3801));}
-  assert.ok(p.history.GOLD.length<=100);assert.equal(p.snapshot('SILVER',50,'yes').price,null);
+  assert.equal(p.history.GOLD.length,451);
+  assert.equal(now-p.history.GOLD[0].sourceAt,90000);
+  assert.equal(p.snapshot('SILVER',50,'yes').price,null);
   p.ingest(message(now,51,{priceFeedId:345}));assert.equal(p.snapshot('SILVER',50,'yes').estimatedCushion,1);
 });
 test('without a key no network is opened; all endpoints use headers and secrets are not logged',()=>{
@@ -67,4 +69,57 @@ test('proxy measurements persist with hypothetical entries but never gate or alt
   assert.equal(observed.estimatedCost,plain.estimatedCost);assert.equal(observed.count,plain.count);
   assert.equal(observed.proxy.estimatedCushion,-10);assert.equal(observed.distance,null);
   assert.equal(observed.proximity,'NOT_EVALUATED');assert.equal(observed.proxySide,'yes');
+});
+
+const timingAssets=[['GOLD',346,3800,.2],['SILVER',345,47,.005],
+  ['EURUSD',327,1.1,.0001],['USDJPY',340,159,.01]];
+function denseFixture(asset,id,target,side,cushionAt=()=>.2) {
+  let now=base;
+  const p=new MetalsProxy({now:()=>now}),sign=side==='yes'?1:-1;
+  const feed=(at,cushion)=>{
+    now=at;
+    p.ingest({type:'streamUpdated',subscriptionId:['EURUSD','USDJPY'].includes(asset)?2:1,
+      parsed:{priceFeeds:[{priceFeedId:id,price:String(Math.round((target+sign*cushion)*1e8)),
+        exponent:-8,confidence:0,feedUpdateTimestamp:at*1000,marketSession:'regular'}]}});
+  };
+  for(let dt=0;dt<=45400;dt+=200)feed(base+dt,cushionAt(dt));
+  const check=(previous=null,history=p.history[asset])=>metalShrinkingCheck({
+    asset,ticker:asset+'-TIMING',side,target,proxy:p.snapshot(asset,target,side),
+    history,at:now,secondsRemaining:1,previous});
+  return {p,feed,check};
+}
+test('200ms updates preserve the exact checkpoints that one-second bucketing lost on all feeds',()=>{
+  for(const [asset,id,target,gap] of timingAssets)for(const side of ['yes','no']) {
+    const f=denseFixture(asset,id,target,side,()=>gap),h=f.p.history[asset];
+    assert.equal(h.length,228);
+    assert.ok(h.some(p=>p.sourceAt===base+30400));
+    // Reproduce the previous implementation: its nearest prior point is 600ms early.
+    const buckets=new Map(h.map(p=>[Math.floor(p.sourceAt/1000),p]));
+    assert.equal(f.check(null,[...buckets.values()]).reason,'SHRINK_HISTORY_UNAVAILABLE');
+    assert.equal(f.check().allowed,true);
+    assert.equal(f.check().reason,'SHRINK_OK');
+    f.feed(base+45400,gap*2); // A redundant timestamp must still be ignored.
+    assert.equal(f.p.history[asset].length,228);
+  }
+});
+test('retaining fast samples still blocks rapid shrink and requires two full seconds to recover',()=>{
+  for(const [asset,id,target,gap] of timingAssets)for(const side of ['yes','no']) {
+    const f=denseFixture(asset,id,target,side,dt=>
+      dt<=30400?gap:gap*(1-.4*(dt-30400)/15000));
+    const first=f.check();
+    assert.equal(first.allowed,false);assert.equal(first.reason,'SHRINK_RAPID_APPROACH');
+    for(let dt=200;dt<=1000;dt+=200)f.feed(base+45400+dt,gap*.6);
+    assert.equal(f.check(first.guardState).allowed,false);
+    for(let dt=1200;dt<=2000;dt+=200)f.feed(base+45400+dt,gap*.6);
+    assert.equal(f.check(first.guardState).allowed,true);
+  }
+});
+test('retaining fast samples does not authorize genuine history gaps or stale references',()=>{
+  for(const [asset,id,target,gap] of timingAssets) {
+    const f=denseFixture(asset,id,target,'yes',()=>gap),h=f.p.history[asset];
+    assert.equal(f.check(null,h.filter(p=>p.sourceAt<base+40000||p.sourceAt>base+43000)).allowed,false);
+    const late=metalShrinkingCheck({asset,ticker:'T',side:'yes',target,
+      proxy:f.p.snapshot(asset,target,'yes'),history:h,at:base+45400+2001,secondsRemaining:1});
+    assert.equal(late.allowed,false);assert.equal(late.reason,'MISSING_OR_STALE_PROXY');
+  }
 });

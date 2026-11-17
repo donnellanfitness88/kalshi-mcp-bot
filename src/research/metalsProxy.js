@@ -6,6 +6,8 @@ export const PROXY_FEEDS = {GOLD:{id:346,symbol:'Metal.XAU/USD',quoteUnit:'USD',
   EURUSD:{id:327,symbol:'FX.EUR/USD',quoteUnit:'USD per EUR',pipSize:.0001},
   USDJPY:{id:340,symbol:'FX.USD/JPY',quoteUnit:'JPY per USD',pipSize:.01}};
 const URLS = [0,1,2].map(i=>`wss://pyth-lazer-${i}.dourolabs.app/v1/stream`);
+const HISTORY_RETENTION_MS = 90000;
+const MAX_HISTORY_POINTS = 1000;
 const numeric = v => (typeof v==='number' || typeof v==='string' && v.trim()!=='') ? Number(v) : NaN;
 
 export class MetalsProxy {
@@ -26,9 +28,10 @@ export class MetalsProxy {
       if(last && sourceAt<=last.sourceAt)continue; // Includes duplicates from redundant sockets.
       const confidence=numeric(row.confidence)/10**(-exponent);
       const point={sourceAt,receivedAt:at,price,confidence:Number.isFinite(confidence)&&confidence>=0?confidence:null};
-      if(last && Math.floor(last.sourceAt/1000)===Math.floor(sourceAt/1000))history[history.length-1]=point;
-      else history.push(point);
-      this.history[asset]=history.filter(p=>sourceAt-p.sourceAt<=90000).slice(-100);
+      // Preserve every distinct source update. One-second bucketing discarded
+      // points required by the shrinking guard's 500ms checkpoint tolerance.
+      history.push(point);
+      this.history[asset]=history.filter(p=>sourceAt-p.sourceAt<=HISTORY_RETENTION_MS).slice(-MAX_HISTORY_POINTS);
     }
   }
   snapshot(asset,target,side) {
@@ -56,7 +59,8 @@ export class MetalsProxy {
   start(key) {
     if(!key){this.log({event:'PROXY_DISABLED',reason:'PYTH_PRO_API_KEY_NOT_SET'});return this;}
     this.stopped=false;
-    this.log({event:'PROXY_STARTED',feeds:PROXY_FEEDS,referenceType:'SPOT_PROXY_NOT_SETTLEMENT'});
+    this.log({event:'PROXY_STARTED',feeds:PROXY_FEEDS,referenceType:'SPOT_PROXY_NOT_SETTLEMENT',
+      historyPolicy:'ALL_DISTINCT_SOURCE_UPDATES',historyRetentionMs:HISTORY_RETENTION_MS,maxHistoryPoints:MAX_HISTORY_POINTS});
     URLS.forEach((url,index)=>this.connect(url,index,key));return this;
   }
   connect(url,index,key) {
