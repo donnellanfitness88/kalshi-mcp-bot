@@ -220,3 +220,54 @@ test('selected-side liquidity disappearing on final recheck prevents an order',a
   await f.executor.tick({...f.ctx('GOLD'),refreshQuote:()=>runner.refreshQuote('GOLD')});
   assert.equal(f.requests.length,0);assert.equal(reads,3);
 });
+
+import {silverEntryBuffer} from '../../src/engine/silverEntryBuffer.js';
+test('silver crossing buffer blocks a 13-second margin, equality, and respects source age',()=>{
+  const now=Date.now(),check={allowed:true,reason:'SHRINK_OK',sourceTs:now,
+    approachUsdPerSecond:.001,projectedSecondsToTarget:70,stabilized:true};
+  assert.equal(silverEntryBuffer(check,'SILVER',57,now).allowed,false);
+  assert.equal(silverEntryBuffer(check,'SILVER',50,now).allowed,false);
+  assert.equal(silverEntryBuffer(check,'SILVER',49,now).allowed,true);
+  const older={...check,sourceTs:now-1500};
+  assert.equal(silverEntryBuffer(older,'SILVER',49,now).allowed,false);
+  assert.equal(silverEntryBuffer(check,'SILVER',57,now).reason,'SILVER_CROSSING_TIME_BUFFER');
+});
+test('silver buffer cannot be cleared by stabilization alone or bypass existing blocked checks',()=>{
+  const now=Date.now(),check={allowed:true,reason:'SHRINK_OK',sourceTs:now,
+    approachUsdPerSecond:.001,projectedSecondsToTarget:70,stabilized:true};
+  assert.equal(silverEntryBuffer(check,'SILVER',57,now).allowed,false);
+  const blocked={...check,allowed:false,reason:'SHRINK_RAPID_APPROACH'};
+  assert.equal(silverEntryBuffer(blocked,'SILVER',10,now),blocked);
+  for(const a of ['BTC','GOLD','EURUSD','USDJPY'])assert.equal(silverEntryBuffer(check,a,57,now),check);
+  assert.equal(silverEntryBuffer({...check,approachUsdPerSecond:0,projectedSecondsToTarget:null},'SILVER',57,now).allowed,true);
+  assert.equal(silverEntryBuffer({...check,projectedSecondsToTarget:NaN},'SILVER',57,now).allowed,false);
+});
+test('silver delays a marginal entry and resumes when the projection clears the buffer',async()=>{
+  const f=fixture(),s=f.shared.SILVER; s.marketCloseTs=Date.now()+57000;s.yesAsk=.98;s.yesBid=.97;
+  let projection=70;
+  f.proxy.snapshot=asset=>{const at=Date.now(),speed=10/projection;
+    f.proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,
+      price:2010+speed*(30-i*.2)}));
+    return {status:'FRESH_PROXY',sourceAt:at,price:2010};};
+  await f.executor.tick(f.ctx('SILVER'));
+  assert.equal(f.requests.length,0,JSON.stringify(f.logs));
+  assert.ok(f.logs.some(e=>e.reason==='SILVER_CROSSING_TIME_BUFFER'));
+  projection=100;f.advance();await f.executor.tick(f.ctx('SILVER'));
+  assert.equal(f.requests.length,1,JSON.stringify(f.logs));
+  assert.ok(f.logs.find(e=>e.event==='ENTRY_CONFIRMED').shrinkingGuard.projectedMarginSeconds>20);
+});
+test('silver buffer also delays NO purchases and rechecks after account reads',async()=>{
+  for(const finalOnly of [false,true]) {
+    const f=fixture(),s=f.shared.SILVER;s.marketCloseTs=Date.now()+57000;
+    s.yesAsk=.03;s.yesBid=.02;let projection=finalOnly?100:70;
+    f.proxy.snapshot=asset=>{const at=Date.now(),speed=10/projection;
+      f.proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,
+        price:1990-speed*(30-i*.2)}));
+      return {status:'FRESH_PROXY',sourceAt:at,price:1990};};
+    let accountReads=0;f.api.getOrders=async()=>{if(++accountReads===2)projection=70;return [];};
+    await f.executor.tick(f.ctx('SILVER'));
+    assert.equal(f.requests.length,0,JSON.stringify(f.logs));
+    assert.ok(f.logs.some(e=>e.reason==='SILVER_CROSSING_TIME_BUFFER'));
+    if(finalOnly)assert.equal(accountReads,2);
+  }
+});

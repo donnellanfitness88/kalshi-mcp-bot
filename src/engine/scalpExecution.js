@@ -5,6 +5,7 @@ import { metalShrinkingCheck } from '../research/metalsObserver.js';
 import { startSession, startDay } from './riskManager.js';
 import { benchmarkFeed } from '../prices/cfBenchmarks.js';
 import { evaluateShrinkingCushion } from './shrinkingCushion.js';
+import { silverEntryBuffer } from './silverEntryBuffer.js';
 import { evaluateLateProximity } from './lateProximity.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -121,7 +122,7 @@ export function createScalpExecutor(deps = {}) {
       save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
       shrinkingGuards=next;
     }
-    return check;
+    return silverEntryBuffer(check,ctx.asset,remainingSeconds(ctx.s),Date.now());
   }
   const targetCache = new Map();
   async function proximity(ctx, signal) {

@@ -94,3 +94,29 @@ end-to-end one-sided YES and NO purchases for all four approved markets and
 negative cases for stale/crossed/empty books, sub-contract size and disappearing
 selected-side liquidity. The historical scalp suite retains the same 84 passing
 and 44 pre-existing failures; no new BTC regression failures were introduced.
+
+## Silver projected-crossing buffer
+
+Every new live SILVER purchase, including the first entry, stage additions and
+remaining-budget retries, must also pass a 20-second projected time margin.
+The projection uses the existing 15-second average approach speed. When that
+speed is positive, subtract the source quote's age from its projected crossing
+time, then subtract the actual seconds remaining. The resulting margin must
+be strictly greater than 20 seconds. Equality blocks entry. For example, a
+crossing projected in 70 seconds with 57 seconds remaining blocks the purchase.
+
+This is a condition-based wait, not a fixed 20-second timer. The normal retry
+loop rechecks; the current stage can qualify once the trajectory moves outside
+that buffer or the 15-second trend stops approaching, provided all original
+checks pass. Two-second stabilization cannot override this extra gate. It is
+checked again immediately before submission after account/book reads. Invalid
+or stale projection data blocks entry. The normal exclusive time tiers still
+apply: expired stages are not backfilled and no uncertain order is retried.
+
+This additional gate is live SILVER only; it does not sell existing holdings,
+change allocations, or alter BTC, gold, FX, the baseline observers, or the large
+BTC observation scenario. Entry logs include entryTimeBufferSeconds,
+projectedCrossingSecondsFromNow and projectedMarginSeconds; blocked entries use
+SILVER_CROSSING_TIME_BUFFER (or SILVER_BUFFER_DATA_UNAVAILABLE). It adds an entry
+restriction and does not guarantee a crossing time, settlement result or
+maximum loss. Historical observer totals do not include this extra live gate.
