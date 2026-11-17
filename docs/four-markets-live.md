@@ -113,10 +113,32 @@ checked again immediately before submission after account/book reads. Invalid
 or stale projection data blocks entry. The normal exclusive time tiers still
 apply: expired stages are not backfilled and no uncertain order is retried.
 
-This additional gate is live SILVER only; it does not sell existing holdings,
-change allocations, or alter BTC, gold, FX, the baseline observers, or the large
-BTC observation scenario. Entry logs include entryTimeBufferSeconds,
+The 20-second gate is live SILVER only; EURUSD uses the separate 15-second
+gate below. These gates do not sell existing holdings, change allocations, or
+alter BTC, gold, USDJPY, baseline observers or the large BTC observation scenario. Entry logs include entryTimeBufferSeconds,
 projectedCrossingSecondsFromNow and projectedMarginSeconds; blocked entries use
 SILVER_CROSSING_TIME_BUFFER (or SILVER_BUFFER_DATA_UNAVAILABLE). It adds an entry
 restriction and does not guarantee a crossing time, settlement result or
 maximum loss. Historical observer totals do not include this extra live gate.
+
+
+## EUR/USD projected-crossing buffer
+
+Every new live EURUSD purchase, including initial entries, stage additions and
+partial-fill budget retries, requires more than 15 seconds of projected margin
+beyond expiry while the 15-second average trend approaches the target. The
+same source-age adjustment and independent pre-submission recheck used for
+silver apply. A margin of exactly 15 seconds blocks entry. A non-approaching
+average trend can pass this gate, provided all original safeguards pass.
+Two-second stabilization alone cannot override an insufficient time margin.
+
+The existing SILVER buffer remains 20 seconds. No allocation, entry-price,
+time-tier, freshness, book, fee, account, shrinking-latch or settlement rule is
+removed. Block logs identify EURUSD_CROSSING_TIME_BUFFER or
+EURUSD_BUFFER_DATA_UNAVAILABLE; entry logs record the 15-second threshold and
+measured margin. This applies to new purchases and does not close holdings.
+The read-only observer baselines do not include these extra live time buffers.
+
+Validation: 105 focused tests pass, including YES/NO delay-and-resume execution,
+quote-age adjustment, exact threshold rejection and preservation of silver's
+20-second threshold and the original shrinking-cushion checks.

@@ -238,7 +238,7 @@ test('silver buffer cannot be cleared by stabilization alone or bypass existing 
   assert.equal(silverEntryBuffer(check,'SILVER',57,now).allowed,false);
   const blocked={...check,allowed:false,reason:'SHRINK_RAPID_APPROACH'};
   assert.equal(silverEntryBuffer(blocked,'SILVER',10,now),blocked);
-  for(const a of ['BTC','GOLD','EURUSD','USDJPY'])assert.equal(silverEntryBuffer(check,a,57,now),check);
+  for(const a of ['BTC','GOLD','USDJPY'])assert.equal(silverEntryBuffer(check,a,57,now),check);
   assert.equal(silverEntryBuffer({...check,approachUsdPerSecond:0,projectedSecondsToTarget:null},'SILVER',57,now).allowed,true);
   assert.equal(silverEntryBuffer({...check,projectedSecondsToTarget:NaN},'SILVER',57,now).allowed,false);
 });
@@ -269,5 +269,39 @@ test('silver buffer also delays NO purchases and rechecks after account reads',a
     assert.equal(f.requests.length,0,JSON.stringify(f.logs));
     assert.ok(f.logs.some(e=>e.reason==='SILVER_CROSSING_TIME_BUFFER'));
     if(finalOnly)assert.equal(accountReads,2);
+  }
+});
+test('EUR/USD requires more than 15 seconds while silver still requires more than 20',()=>{
+  const now=Date.now(),base={allowed:true,reason:'SHRINK_OK',sourceTs:now,
+    approachUsdPerSecond:.000001,projectedSecondsToTarget:41.25,stabilized:true};
+  assert.equal(silverEntryBuffer(base,'EURUSD',37,now).allowed,false);
+  assert.equal(silverEntryBuffer({...base,projectedSecondsToTarget:52},'EURUSD',37,now).allowed,false);
+  const wider={...base,projectedSecondsToTarget:53};
+  assert.equal(silverEntryBuffer(wider,'EURUSD',37,now).allowed,true);
+  assert.equal(silverEntryBuffer(wider,'SILVER',37,now).allowed,false);
+  assert.equal(silverEntryBuffer({...wider,sourceTs:now-1500},'EURUSD',37,now).allowed,false);
+  assert.equal(silverEntryBuffer(base,'EURUSD',37,now).reason,'EURUSD_CROSSING_TIME_BUFFER');
+  assert.equal(silverEntryBuffer(base,'EURUSD',37,now).entryTimeBufferSeconds,15);
+  assert.equal(silverEntryBuffer({...base,sourceTs:now-2001},'EURUSD',37,now).allowed,false);
+  assert.equal(silverEntryBuffer({...base,approachUsdPerSecond:0,projectedSecondsToTarget:null},'EURUSD',37,now).allowed,true);
+  const blocked={...base,allowed:false,reason:'SHRINK_PROJECTED_CROSSING'};
+  assert.equal(silverEntryBuffer(blocked,'EURUSD',10,now),blocked);
+});
+test('EUR/USD delays YES and NO final-stage entries until projection moves beyond 15 seconds',async()=>{
+  for(const side of ['yes','no']) {
+    const f=fixture(),s=f.shared.EURUSD;s.marketCloseTs=Date.now()+37000;
+    s.yesAsk=side==='yes'?.98:.03;s.yesBid=side==='yes'?.97:.02;
+    let projection=41.25;
+    f.proxy.snapshot=asset=>{const at=Date.now(),speed=.001/projection,sign=side==='yes'?1:-1;
+      f.proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,
+        price:2000+sign*(.001+speed*(30-i*.2))}));
+      return {status:'FRESH_PROXY',sourceAt:at,price:2000+sign*.001};};
+    await f.executor.tick(f.ctx('EURUSD'));assert.equal(f.requests.length,0,JSON.stringify(f.logs));
+    assert.ok(f.logs.some(e=>e.reason==='EURUSD_CROSSING_TIME_BUFFER'));
+    projection=65;f.advance();await f.executor.tick(f.ctx('EURUSD'));
+    assert.equal(f.requests.length,1,JSON.stringify(f.logs));
+    assert.equal(s.activeTrade.side,side);
+    const check=f.logs.find(e=>e.event==='ENTRY_CONFIRMED').shrinkingGuard;
+    assert.equal(check.entryTimeBufferSeconds,15);assert.ok(check.projectedMarginSeconds>15);
   }
 });
