@@ -13,7 +13,7 @@ import { state } from './state.js';
 import { definiteOrderRejection, historicalOrderRejection } from './orderRejections.js';
 import { reconcileManualExit, remainingHeldContracts } from './manualExitReconciliation.js';
 import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
-import { buildBuyBody, buildSellBody } from '../kalshi/orders.js';
+import { buildBuyBody, buildDirectionalLateBuyBody, buildSellBody } from '../kalshi/orders.js';
 import { SCALP_CONFIG, lateStagesFor, lateBudgetFor, scalpEntryPriceAllowed, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
 import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
@@ -455,11 +455,15 @@ export function createScalpExecutor(deps = {}) {
         (Number(p.position_fp) !== 0 && !tracked.some(t => t.ticker === p.ticker)))) return false;
     return scopedAccountRows(await api.getOrders({ status: 'resting' })).length === 0;
   }
+  const executablePrice=(s,direction,asset)=>isFourMarket(asset)
+    ? s.lateBook?.[direction==='UP'?'yes':'no']?.price
+    : direction==='UP'?s.yesAsk:1-s.yesBid;
   function entrySignal(s, mode) {
-    const now = Date.now();
+    const now = Date.now(), asset=assetNames().find(asset=>shared[asset]===s);
     if (!Number.isFinite(s.lastQuoteMessageTs) || now - s.lastQuoteMessageTs > 2000 ||
-        s.lastQuoteMessageTs > now || ![s.yesAsk, s.yesBid].every(Number.isFinite) ||
-        s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid) return { shouldEnter: false };
+        s.lastQuoteMessageTs > now) return { shouldEnter: false };
+    if (!isFourMarket(asset) && (![s.yesAsk, s.yesBid].every(Number.isFinite) ||
+        s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid)) return { shouldEnter: false };
     if (mode === 'SCALP') {
       return { shouldEnter: false, reason: 'ALL_SCALP_ENTRIES_DISABLED' };
     }
@@ -475,9 +479,10 @@ export function createScalpExecutor(deps = {}) {
     }
     const trade = s.activeTrade;
     const side = trade?.side ?? ledger?.side;
-    const candidates = [{ direction: 'UP', side: 'yes', price: s.yesAsk },
-      { direction: 'DOWN', side: 'no', price: 1 - s.yesBid }]
-      .filter(c => (!side || c.side === side) && c.price >= stage.minPrice - 1e-9 && c.price < 1)
+    const candidates = [{ direction: 'UP', side: 'yes', price: executablePrice(s,'UP',asset) },
+      { direction: 'DOWN', side: 'no', price: executablePrice(s,'DOWN',asset) }]
+      .filter(c => (!side || c.side === side) && Number.isFinite(c.price) && c.price >= stage.minPrice - 1e-9 && c.price < 1 &&
+        (!isFourMarket(asset) || (Number.isFinite(s.lateBook?.[c.side]?.size) && s.lateBook[c.side].size>=1)))
       .sort((a, b) => b.price - a.price);
     return candidates.length ? { shouldEnter: true, direction: candidates[0].direction, stage } : { shouldEnter: false };
   }
@@ -544,7 +549,7 @@ export function createScalpExecutor(deps = {}) {
         s.ticker !== ticker || selectedEntryMode(s) !== mode) return;
     const fresh = entrySignal(s, mode);
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
-    const price = fresh.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
+    const price = executablePrice(s,fresh.direction,asset);
     const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
       lateBudgetFor(asset) - (lateStages[ticker]?.spent ?? 0)) : null;
     const feeMultiplier=isFourMarket(asset)?s.lateFeeMultiplier:1;
@@ -566,10 +571,11 @@ export function createScalpExecutor(deps = {}) {
     const final = entrySignal(s, mode);
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
-        (final.direction === 'UP' ? s.yesAsk : 1 - s.yesBid) !== price) return;
+        executablePrice(s,final.direction,asset) !== price) return;
     if (isFourMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (!Number.isSafeInteger(count) || count<=0 || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price,feeMultiplier))) return;
-    const body = buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
+    const body = isFourMarket(asset) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
+      buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
     if (isFourMarket(asset)) body.exchange_index=exchangeForAsset(asset);
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';

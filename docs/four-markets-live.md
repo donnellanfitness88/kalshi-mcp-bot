@@ -69,3 +69,28 @@ scalp behavior; the complete file has the same 84 passing and 44 failing tests
 before and after this change. This patch does not re-enable scalps to satisfy
 those obsolete expectations. New live-market tests and the current reference,
 observer, order-client, balance and BTC-large-observer regressions pass.
+
+## Directional executable-book correction
+
+A new late purchase validates the executable offer and displayed size for the
+contract it is buying. A missing offer in the unused opposite direction does
+not, by itself, disqualify that purchase. Missing quotes stay null; the order
+builder receives the actual selected-side price and converts it to the V2 YES
+book price for NO purchases. No artificial bid or ask is substituted.
+
+The response must still arrive within two seconds. Empty and invalid/crossed
+books remain blocked, as do absent selected-side offers, less than one displayed
+contract, a price below the active stage threshold, exhausted budgets, negative
+fee-adjusted returns, account/risk mismatches and failed reference/guard checks.
+The selected price, direction, time tier and available size are rechecked after
+account reads; disappearing liquidity cannot produce an order. BTC's existing
+order builder and book validation are unchanged. Error logs distinguish
+EXECUTABLE_BOOK_STALE_RESPONSE, EXECUTABLE_BOOK_INVALID_OR_CROSSED and
+EXECUTABLE_BOOK_EMPTY. This corrects a reproducible two-sided requirement; it
+does not retrospectively identify the cause of every historical rejection.
+
+Validation: `npm run test:four-markets` passes 99 focused tests, including
+end-to-end one-sided YES and NO purchases for all four approved markets and
+negative cases for stale/crossed/empty books, sub-contract size and disappearing
+selected-side liquidity. The historical scalp suite retains the same 84 passing
+and 44 pre-existing failures; no new BTC regression failures were introduced.

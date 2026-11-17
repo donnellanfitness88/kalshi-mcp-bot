@@ -36,6 +36,19 @@ export function buildBuyBody(ticker, bet, amount, yesAsk, yesBid) {
   };
 }
 
+// A late purchase needs only the executable offer for the purchased contract.
+// BTC and legacy order builders retain their existing two-sided validation.
+export function buildDirectionalLateBuyBody(ticker, direction, count, sidePrice) {
+  if(typeof ticker!=='string'||!ticker.trim()||!['UP','DOWN'].includes(direction)||
+      !Number.isSafeInteger(count)||count<1||!Number.isFinite(sidePrice)||sidePrice<=0||sidePrice>=1)
+    throw new Error('Invalid directional late order');
+  const price=Number((direction==='UP'?sidePrice:1-sidePrice).toFixed(4));
+  if(price<=0||price>=1) throw new Error('Invalid directional order price precision');
+  return {ticker,client_order_id:crypto.randomUUID(),side:direction==='UP'?'bid':'ask',
+    count:count.toFixed(2),price:price.toFixed(4),time_in_force:'immediate_or_cancel',
+    self_trade_prevention_type:'taker_at_cross'};
+}
+
 export function buildSellBody(ticker, side, contractsHeld) {
   const count = contractQuantity(contractsHeld);
   if (count <= 0) {

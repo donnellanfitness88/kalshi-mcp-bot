@@ -18,10 +18,14 @@ export class LateMarketRunner {
     const started=this.now();
     const data=await this.observer.read('/markets/'+encodeURIComponent(s.ticker)+'/orderbook?depth=1');
     const book=metalBook(data);
-    if(this.now()-started>2000 || !book?.yes || !book?.no || !Number.isFinite(book.yesBid))
-      throw new Error('Missing or stale executable book');
-    s.yesAsk=book.yes.price;s.yesBid=book.yesBid;
-    s.yesAskSize=book.yes.size;s.noAskSize=book.no.size;
+    const elapsed=this.now()-started;
+    if(elapsed<0 || elapsed>2000) throw new Error('EXECUTABLE_BOOK_STALE_RESPONSE');
+    if(!book) throw new Error('EXECUTABLE_BOOK_INVALID_OR_CROSSED');
+    if(!book.yes && !book.no) throw new Error('EXECUTABLE_BOOK_EMPTY');
+    // Preserve absent quotes as absent. Never invent an opposite bid or offer.
+    s.lateBook=book;
+    s.yesAsk=book.yes?.price??null;s.yesBid=book.yesBid;
+    s.yesAskSize=book.yes?.size??0;s.noAskSize=book.no?.size??0;
     // Age is measured from request start, not response completion.
     s.lastQuoteMessageTs=started;
   }

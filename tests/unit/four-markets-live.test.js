@@ -16,7 +16,8 @@ function fixture() {
   const proxy={snapshot:()=>({status:'FRESH_PROXY',price:2010,sourceAt:Date.now()}),
     history:Object.fromEntries(Object.keys(LIVE_LATE_MARKETS).map(a=>[a,
       Array.from({length:151},(_,i)=>({sourceAt:now-30000+i*200,price:2010}))]))};
-  const refresh=async asset=>{shared[asset].lastQuoteMessageTs=Date.now();};
+  const refresh=async asset=>{const s=shared[asset];s.lastQuoteMessageTs=Date.now();
+    s.lateBook={yes:{price:s.yesAsk,size:s.yesAskSize},no:{price:1-s.yesBid,size:s.noAskSize}};};
   // Keep latest snapshot/history identical, with fresh contiguous data for every check.
   proxy.snapshot=asset=>{const at=Date.now();proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,price:2010}));
     return {status:'FRESH_PROXY',sourceAt:at,price:2010};};
@@ -178,6 +179,44 @@ test('runner rejects delayed books and copies executable sizes only from fresh d
   const runner=new LateMarketRunner(observer,{shared:f.shared,now:()=>now,log:()=>{}});
   await runner.refreshQuote('GOLD');assert.equal(f.shared.GOLD.yesAskSize,3);
   observer.read=async()=>{now+=2001;return {orderbook_fp:{yes_dollars:[['0.89','5']],no_dollars:[['0.10','3']]}};};
-  await assert.rejects(()=>runner.refreshQuote('GOLD'),/stale/);
+  await assert.rejects(()=>runner.refreshQuote('GOLD'),/STALE_RESPONSE/);
   assert.equal(f.shared.GOLD.lastQuoteMessageTs,0);
+});
+test('one-sided YES and NO books pass the full guarded executor without invented quotes',async()=>{
+  for(const asset of Object.keys(LIVE_LATE_MARKETS))for(const side of ['yes','no']) {
+    const f=fixture(),s=f.shared[asset];
+    const raw={orderbook_fp:{yes_dollars:side==='no'?[['0.0100','10.00']]:[],
+      no_dollars:side==='yes'?[['0.0100','10.00']]:[]}};
+    if(side==='no')f.proxy.snapshot=a=>{const at=Date.now();f.proxy.history[a]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,price:1990}));return {status:'FRESH_PROXY',sourceAt:at,price:1990};};
+    const runner=new LateMarketRunner({current:{[asset]:{ticker:s.ticker,status:'open'}},read:async()=>raw},
+      {shared:f.shared,log:()=>{}});
+    const ctx={...f.ctx(asset),refreshQuote:()=>runner.refreshQuote(asset)};
+    await f.executor.tick(ctx);
+    assert.equal(f.requests.length,1,asset+' '+side+' '+JSON.stringify(f.logs));
+    const b=f.requests[0];assert.equal(b.side,side==='yes'?'bid':'ask');
+    assert.equal(b.price,side==='yes'?'0.9900':'0.0100');
+    assert.equal(s.activeTrade.side,side);assert.ok(s.activeTrade.originalCost<=2);
+    assert.equal(side==='yes'?s.yesBid:s.yesAsk,null);
+  }
+});
+test('directional path still blocks empty, crossed, stale, sub-contract and below-threshold liquidity',async()=>{
+  for(const defect of ['empty','crossed','stale','fraction','cheap']) {
+    const f=fixture(),s=f.shared.GOLD;let now=Date.now();
+    const raw=defect==='empty'?{orderbook_fp:{yes_dollars:[],no_dollars:[]}}:
+      defect==='crossed'?{orderbook_fp:{yes_dollars:[['0.7000','10']],no_dollars:[['0.4000','10']]}}:
+      {orderbook_fp:{yes_dollars:[],no_dollars:[[defect==='cheap'?'0.1100':'0.0100',defect==='fraction'?'0.50':'10']]}};
+    const runner=new LateMarketRunner({current:{GOLD:{ticker:s.ticker,status:'open'}},
+      read:async()=>{if(defect==='stale')now+=2001;return raw;}},{shared:f.shared,now:()=>now,log:()=>{}});
+    await f.executor.tick({...f.ctx('GOLD'),refreshQuote:()=>runner.refreshQuote('GOLD')});
+    assert.equal(f.requests.length,0,defect);
+    if(['empty','crossed','stale'].includes(defect))assert.ok(f.logs.some(e=>e.error?.includes('EXECUTABLE_BOOK_')),defect);
+  }
+});
+test('selected-side liquidity disappearing on final recheck prevents an order',async()=>{
+  const f=fixture(),s=f.shared.GOLD;let reads=0;
+  const runner=new LateMarketRunner({current:{GOLD:{ticker:s.ticker,status:'open'}},read:async()=>({
+    orderbook_fp:{yes_dollars:[['0.9800','10']],no_dollars:++reads<3?[['0.0100','10']]:[]}
+  })},{shared:f.shared,log:()=>{}});
+  await f.executor.tick({...f.ctx('GOLD'),refreshQuote:()=>runner.refreshQuote('GOLD')});
+  assert.equal(f.requests.length,0);assert.equal(reads,3);
 });
