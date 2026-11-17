@@ -166,7 +166,7 @@ test('NO entry uses NO-side cushion and YES-book ask order conversion',async()=>
 });
 test('restored daily-loss cap blocks additions before sending another order',async()=>{
   const f=fixture();await f.executor.tick(f.ctx('GOLD'));const saved=f.saved();
-  saved.marketRisk.GOLD.dailyPnL=-100;saved.marketRisk.GOLD.dailyStartBalance=1000;
+  saved.marketRisk.GOLD.dailyPnL=-250;saved.marketRisk.GOLD.dailyStartBalance=1000;
   const g=fixture();g.executor.restore(saved);g.advance();
   g.shared.GOLD.yesAsk=.95;g.shared.GOLD.yesBid=.94;
   await g.executor.tick(g.ctx('GOLD'));assert.equal(g.requests.length,0);

@@ -1,7 +1,7 @@
 // Pure guard functions — return { blocked, reason } or mutate P&L counters.
 // All dollar values in USD.
 
-const RISK_DAILY_CAP           = 0.08;         // stop after 8% daily loss
+const RISK_DAILY_CAP           = 0.25;         // stop new entries after 25% daily net loss
 const RISK_SESSION_KILL        = 0.05;         // stop after 5% session loss
 const RISK_SESSION_KILL_COOLDOWN_MS = 60 * 60_000; // 1 hour cooldown after session kill, then auto-resume
 const RISK_CONSEC_BRAKE        = 3;            // stop after 3 consecutive losses
