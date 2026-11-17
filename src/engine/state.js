@@ -71,6 +71,10 @@ function createAssetState() {
 export const state = {
   BTC: createAssetState(),
   ETH: createAssetState(),
+  GOLD: createAssetState(),
+  SILVER: createAssetState(),
+  EURUSD: createAssetState(),
+  USDJPY: createAssetState(),
   balance: null, // dollars (updated every 30s)
 
   // Sim mode — auto-enabled when balance drops below $0.50.

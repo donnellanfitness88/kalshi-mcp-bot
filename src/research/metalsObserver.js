@@ -17,8 +17,8 @@ const BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 const MAX_RESPONSE_AGE_MS = 2000;
 const SHRINK_TEST = 'all_four_shrinking_no_fixed_minimum_v1';
 
-// Observation only: relative shrinkage without a fixed distance/drop floor.
-// Live BTC callers retain their existing thresholds.
+// Shared observer/live qualification for the four approved markets.
+// No fixed distance/drop floor; live BTC retains its existing thresholds.
 export function metalShrinkingCheck({asset,ticker,side,target,proxy,history,
   previous=null,at,secondsRemaining}) {
   const blocked=reason=>({allowed:false,reason,guardState:previous});

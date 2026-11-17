@@ -19,3 +19,20 @@ test('public client shares balance reads and retries only the balance GET on 429
     assert.ok(urls[1].at-urls[0].at>=1090);
   }finally{global.fetch=original;}
 });
+
+test('indexed balances coalesce only within a shard and order lookup carries its shard',async()=>{
+  const original=global.fetch,urls=[];
+  global.fetch=async(url,options)=>{
+    urls.push(url);
+    const u=new URL(url),index=u.searchParams.get('exchange_index');
+    return {ok:true,text:async()=>JSON.stringify(u.pathname.includes('/orders/')?
+      {order:{order_id:'fx-order',ticker:'KXEURUSD15M-TEST'}}:{balance:index==='0'?123:456})};
+  };
+  try {
+    const {getBalance,getOrder}=await import('../../src/kalshi/client.js');
+    assert.deepEqual(await Promise.all([getBalance(0),getBalance(0),getBalance(2)]),[123,123,456]);
+    assert.equal(urls.length,2);
+    assert.equal((await getOrder('fx-order',0)).order_id,'fx-order');
+    assert.ok(urls.at(-1).endsWith('/portfolio/orders/fx-order?exchange_index=0'));
+  }finally{global.fetch=original;}
+});

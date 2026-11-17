@@ -27,6 +27,8 @@ if (MCP_MODE) {
 console.log(`[Boot] Kalshi MCP Bot — ${MCP_MODE ? 'MCP' : 'Terminal'} mode`);
 
 import { startClock } from './engine/clock.js';
+import { state } from './engine/state.js';
+import { LIVE_LATE_MARKETS } from './engine/lateMarkets.js';
 
 async function main() {
   await startClock();
@@ -39,8 +41,13 @@ async function main() {
   }
 
   // Independent, public-data-only observer; errors cannot stop BTC execution.
-  if (process.env.METALS_OBSERVER_ENABLED !== 'false') {
-    import('./research/metalsObserver.js').then(({ startMetalsObserver }) => startMetalsObserver())
+  if (process.env.METALS_OBSERVER_ENABLED !== 'false' || process.env.LATE_MARKETS_LIVE_ENABLED !== 'false' ||
+      Object.keys(LIVE_LATE_MARKETS).some(asset=>state[asset].activeTrade)) {
+    import('./research/metalsObserver.js').then(async ({ startMetalsObserver }) => {
+      const observer=startMetalsObserver();
+      const {startLateMarketRunner}=await import('./engine/lateMarketRunner.js');
+      startLateMarketRunner(observer);
+    })
       .catch(e => console.error('[METALS_OBSERVER] Startup failed:', e.message));
   }
 

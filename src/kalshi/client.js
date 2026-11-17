@@ -75,10 +75,19 @@ async function request(method, path, body = null) {
 
 // Portfolio
 
-export const getBalance = createBalanceReader({ read: async () => {
-  const data = await request('GET', '/portfolio/balance');
-  return data.balance;
-} });
+// Each scope has its own coalescer: never reuse Exchange 2 cash for Exchange 0.
+const balanceReaders = new Map();
+export function getBalance(exchangeIndex) {
+  if (exchangeIndex !== undefined && ![0,2].includes(exchangeIndex))
+    throw new Error('Unsupported balance exchange index');
+  const key = exchangeIndex ?? 'all';
+  if (!balanceReaders.has(key)) balanceReaders.set(key,createBalanceReader({read:async()=>{
+    const query = exchangeIndex === undefined ? '' : '?exchange_index='+exchangeIndex;
+    const data = await request('GET','/portfolio/balance'+query);
+    return data.balance;
+  }}));
+  return balanceReaders.get(key)();
+}
 
 async function collectPortfolio(path, field, params = {}) {
   const rows = [], seen = new Set();
@@ -97,8 +106,9 @@ async function collectPortfolio(path, field, params = {}) {
 export async function getPositions() {
   return collectPortfolio('/portfolio/positions', 'market_positions');
 }
-export async function getOrder(orderId) {
-  const data = await request('GET', '/portfolio/orders/' + encodeURIComponent(orderId));
+export async function getOrder(orderId, exchangeIndex) {
+  const query = exchangeIndex === undefined ? '' : '?exchange_index='+exchangeIndex;
+  const data = await request('GET', '/portfolio/orders/' + encodeURIComponent(orderId) + query);
   return data.order;
 }
 

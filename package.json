@@ -14,7 +14,8 @@
     "test-auth": "node src/kalshi/test-auth.js",
     "export-brain": "node src/nn/export-brain.js",
     "research": "node run-research.mjs",
-    "research:quick": "node run-research.mjs --quick"
+    "research:quick": "node run-research.mjs --quick",
+    "test:four-markets": "node --test tests/unit/four-markets-live.test.js tests/unit/metals-proxy.test.js tests/unit/metals-cushions.test.js tests/unit/metals-observer.test.js tests/unit/fx-observer.test.js tests/unit/shrinking-cushion.test.js tests/unit/late-proximity.test.js tests/unit/btc-large-observer.test.js tests/unit/balance-client.test.js tests/unit/balance-reader.test.js tests/unit/kalshi-client.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

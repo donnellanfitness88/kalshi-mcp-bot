@@ -1,5 +1,8 @@
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
+import { MANAGED_ASSETS, isFourMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS } from './lateMarkets.js';
+import { metalShrinkingCheck } from '../research/metalsObserver.js';
+import { startSession, startDay } from './riskManager.js';
 import { benchmarkFeed } from '../prices/cfBenchmarks.js';
 import { evaluateShrinkingCushion } from './shrinkingCushion.js';
 import { evaluateLateProximity } from './lateProximity.js';
@@ -46,15 +49,15 @@ export function lateStage(seconds, asset = 'BTC') {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   return lateStagesFor(asset).findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
-export function lateStageSize(price, balance, budget) {
+export function lateStageSize(price, balance, budget, feeMultiplier = 1) {
   if (![price,balance,budget].every(Number.isFinite) || price <= 0 || price >= 1) return 0;
   const available = Math.max(0, Math.min(balance, budget));
   let count = Math.floor(available / price);
-  while (count && count * price + lateFee(count, price) > available + 1e-9) count--;
+  while (count && count * price + lateFee(count, price, feeMultiplier) > available + 1e-9) count--;
   return count;
 }
-export function lateFee(count, price) {
-  return Math.ceil((0.07 * count * price * (1 - price) + 1e-9) * 100) / 100;
+export function lateFee(count, price, feeMultiplier = 1) {
+  return Math.ceil((0.07 * feeMultiplier * count * price * (1 - price) + 1e-9) * 100) / 100;
 }
 export function scalpEntryBudget(price) {
   if (!Number.isFinite(price) || price <= 0 || price >= 1) return 0;
@@ -103,7 +106,12 @@ export function createScalpExecutor(deps = {}) {
   let shrinkingGuards = {};
   function shrinkingCheck(ctx, distance) {
     // Every late purchase must pass, including the first purchase.
-    const check = evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
+    const check = isFourMarket(ctx.asset) ? metalShrinkingCheck({
+      asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
+      proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
+      history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[ctx.asset],
+      secondsRemaining:remainingSeconds(ctx.s),at:Date.now()
+    }) : evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' ? 50 : distance.minimumDistance,
       secondsRemaining:remainingSeconds(ctx.s),
@@ -131,8 +139,20 @@ export function createScalpExecutor(deps = {}) {
           ['string', 'number'].includes(typeof raw) && String(raw).trim() !== '' &&
           Number.isFinite(Number(raw)) && Number(raw) > 0) {
         target = Number(raw);
-        targetCache.set(ctx.asset, { ticker, target, checkedAt: Date.now() });
+        targetCache.set(ctx.asset, { ticker, target, market, checkedAt: Date.now() });
       }
+    }
+    if (isFourMarket(ctx.asset)) {
+      const metadata=targetCache.get(ctx.asset)?.market;
+      const expected=LIVE_LATE_MARKETS[ctx.asset];
+      if (!metadata || metadata.exchange_index!==expected.exchangeIndex ||
+          !ticker.startsWith(expected.series+'-') || !['open','active'].includes(metadata.status) ||
+          Date.parse(metadata.close_time)!==ctx.s.marketCloseTs ||
+          Date.parse(metadata.close_time)-Date.parse(metadata.open_time)!==900000 ||
+          ctx.s.lateFeeType!=='quadratic' || !Number.isFinite(ctx.s.lateFeeMultiplier) || ctx.s.lateFeeMultiplier<0)
+        return {allowed:false,reason:'INVALID_LIVE_MARKET_METADATA'};
+      return {allowed:Number.isFinite(target),reason:Number.isFinite(target)?'PROXY_GUARD_REQUIRED':'MISSING_TARGET',
+        side:signal.direction==='UP'?'yes':'no',target,minimumDistance:0,exchangeIndex:expected.exchangeIndex};
     }
     return evaluateLateProximity({ asset: ctx.asset, ticker, stageId: signal.stage.id,
       side: signal.direction === 'UP' ? 'yes' : 'no', target,
@@ -156,8 +176,15 @@ export function createScalpExecutor(deps = {}) {
   let lateStages = {};
   const settlementPolls = new Map();
   const manualPolls = new Map();
-  const assets = () => ['BTC', 'ETH'].map(asset => shared[asset]);
-  const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards, positions: Object.fromEntries(['BTC', 'ETH'].map(asset =>
+  const assetNames = () => MANAGED_ASSETS.filter(asset=>shared[asset]);
+  const assets = () => assetNames().map(asset => shared[asset]);
+  const riskFields=['riskDay','sessionStartBalance','sessionPnL','dailyStartBalance','dailyPnL',
+    'totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
+  const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards,
+    // Retain new markets' risk counters across deployments as well as holdings.
+    marketRisk:Object.fromEntries(assetNames().filter(isFourMarket).map(asset=>[asset,
+      Object.fromEntries(riskFields.map(k=>[k,shared[asset][k]]))])),
+    positions: Object.fromEntries(assetNames().map(asset =>
     [asset, isManagedTrade(shared[asset].activeTrade) ? shared[asset].activeTrade : null])) });
   const persist = () => save(snapshot());
   const simulated = () => shared.simMode || process.env.DRY_RUN === 'true';
@@ -167,7 +194,8 @@ export function createScalpExecutor(deps = {}) {
     shrinkingGuards = structuredClone(saved.shrinkingGuards ?? {});
     lateEntryTickers = saved.lateEntryTickers ?? [];
     lateStages = structuredClone(saved.lateStages ?? {});
-    for (const asset of ['BTC', 'ETH']) {
+    for (const asset of assetNames()) {
+      if (isFourMarket(asset) && saved.marketRisk?.[asset]) Object.assign(shared[asset],saved.marketRisk[asset]);
       if (saved.positions?.[asset]) shared[asset].activeTrade = saved.positions[asset];
     }
   }
@@ -301,7 +329,7 @@ export function createScalpExecutor(deps = {}) {
       return;
     }
     let order;
-    if (p.orderId) order = await api.getOrder(p.orderId);
+    if (p.orderId) order = await api.getOrder(p.orderId, exchangeForAsset(p.asset));
     else order = (await api.getOrders({ ticker: p.body.ticker })).find(o => o.client_order_id === p.body.client_order_id);
     if (!order || !['executed', 'canceled'].includes(order.status)) throw new Error('Order remains unverified; no retry');
     if (!order.order_id || (p.orderId && order.order_id !== p.orderId) ||
@@ -389,7 +417,7 @@ export function createScalpExecutor(deps = {}) {
           (row.ticker != null && row.market_ticker != null && row.ticker !== row.market_ticker)) {
         throw new Error('Account row has missing or conflicting market identity');
       }
-      if (!/^(KXBTC15M|KXETH15M)-/.test(ticker) && !known.has(ticker)) return [];
+      if (!/^(KXBTC15M|KXETH15M|KXGOLD15M|KXSILVER15M|KXEURUSD15M|KXUSDJPY15M)-/.test(ticker) && !known.has(ticker)) return [];
       return [{ ...row, ticker }];
     });
   }
@@ -469,6 +497,11 @@ export function createScalpExecutor(deps = {}) {
   async function enter(ctx) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
+    if (isFourMarket(asset)) {
+      if (!fourMarketsEnabled() || !ctx.refreshQuote || !ctx.proxy ||
+          remainingSeconds(s)<=0 || remainingSeconds(s)>=180) return;
+      await ctx.refreshQuote();
+    }
     const held = s.activeTrade;
     if (Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
     if (Date.now() - Math.max(...assets().map(a => a.lastExitTime || 0)) < SCALP_CONFIG.reentryCooldownMs) return;
@@ -478,7 +511,8 @@ export function createScalpExecutor(deps = {}) {
     const sim = simulated();
     if (!compatibleHoldings(s, mode, sim)) return;
     s._simMode = sim;
-    const risk = checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' });
+    const risk = isFourMarket(asset) ? {blocked:false} :
+      checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' });
     if (risk.blocked) { entryBlocked(asset, risk.reason); return; }
     const signal = entrySignal(s, mode);
     if (!signal.shouldEnter) return;
@@ -495,7 +529,16 @@ export function createScalpExecutor(deps = {}) {
     }
     lastAttempt = Date.now();
     if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return; }
-    const balance = sim ? shared.paperBalance : (await api.getBalance()) / 100;
+    const balance = sim ? shared.paperBalance : (await api.getBalance(exchangeForAsset(asset))) / 100;
+    if (!Number.isFinite(balance) || balance<=0) { entryBlocked(asset,'INSUFFICIENT_EXCHANGE_BALANCE'); return; }
+    if (isFourMarket(asset)) {
+      if (s.sessionStartBalance===null) startSession(s,balance);
+      if (s.dailyStartBalance===null) startDay(s,balance);
+      const liveRisk=checkRiskGuards(s,balance);
+      persist();
+      if (liveRisk.blocked) { entryBlocked(asset,liveRisk.reason); return; }
+      await ctx.refreshQuote();
+    }
     // Revalidate the actual close time, ticker and quote after slow account reads.
     if (s.activeTrade !== held || !compatibleHoldings(s, mode, sim) ||
         s.ticker !== ticker || selectedEntryMode(s) !== mode) return;
@@ -504,11 +547,14 @@ export function createScalpExecutor(deps = {}) {
     const price = fresh.direction === 'UP' ? s.yesAsk : 1 - s.yesBid;
     const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
       lateBudgetFor(asset) - (lateStages[ticker]?.spent ?? 0)) : null;
-    const count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget) : scalpSize(price, balance, mode);
+    const feeMultiplier=isFourMarket(asset)?s.lateFeeMultiplier:1;
+    let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
+    if (isFourMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
     }
     // The final account check may cross a time tier or receive a changed quote.
+    if (isFourMarket(asset)) await ctx.refreshQuote();
     const distanceCheck = mode === 'LATE_SETTLEMENT' ? await proximity(ctx, fresh) : null;
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
@@ -521,9 +567,11 @@ export function createScalpExecutor(deps = {}) {
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
         (final.direction === 'UP' ? s.yesAsk : 1 - s.yesBid) !== price) return;
-    if (!count || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price))) return;
+    if (isFourMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
+    if (!Number.isSafeInteger(count) || count<=0 || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price,feeMultiplier))) return;
     const body = buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
+    if (isFourMarket(asset)) body.exchange_index=exchangeForAsset(asset);
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
@@ -547,7 +595,7 @@ export function createScalpExecutor(deps = {}) {
       throw error;
     }
     for (const item of reduction.orders) {
-      const order = await api.getOrder(item.orderId);
+      const order = await api.getOrder(item.orderId, exchangeForAsset(asset));
       if (!order || order.ticker !== trade.ticker || !['executed', 'canceled'].includes(order.status) ||
           decimal(order.fill_count_fp, 'manual order fill count') !== item.count) {
         throw new Error('Manual closing order not fully reconciled');
@@ -569,6 +617,10 @@ export function createScalpExecutor(deps = {}) {
     saved.positions[asset] = held ? next : null;
     if (!held && trade.mode === 'LATE_SETTLEMENT' && lateStages[trade.ticker]) {
       saved.lateStages = { ...lateStages, [trade.ticker]: { ...lateStages[trade.ticker], closed: true } };
+    }
+    if (!held && isFourMarket(asset)) {
+      const nextRisk={...s};recordTradePnL(nextRisk,next.realizedNet);nextRisk.lastExitTime=Date.now();
+      saved.marketRisk[asset]=Object.fromEntries(riskFields.map(k=>[k,nextRisk[k]]));
     }
     save(saved);
     lateStages = saved.lateStages;
@@ -622,6 +674,10 @@ export function createScalpExecutor(deps = {}) {
     if (lateStages[trade.ticker]) saved.lateStages = {
       ...lateStages, [trade.ticker]: { ...lateStages[trade.ticker], closed: true }
     };
+    if (isFourMarket(asset)) {
+      const nextRisk={...s}; recordTradePnL(nextRisk,pnl); nextRisk.lastExitTime=Date.now();
+      saved.marketRisk[asset]=Object.fromEntries(riskFields.map(k=>[k,nextRisk[k]]));
+    }
     save(saved);
     lateStages = saved.lateStages;
     if (trade.sim) shared.paperBalance += pnl;
