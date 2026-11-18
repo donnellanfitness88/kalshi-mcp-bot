@@ -46,7 +46,7 @@ function checkGates(s, balance, btcVelocity) {
   if (liquidity === 'LOW')                              return { blocked: true, reason: 'MKTCOND' };
   if (liquidity === 'MEDIUM' && regime === 'CHOPPY')    return { blocked: true, reason: 'MKTCOND' };
 
-  if (dailyStartBalance && dailyPnL <= -(dailyStartBalance * 0.08))
+  if (!s.ticker?.startsWith('KXBTC15M-') && dailyStartBalance && dailyPnL <= -(dailyStartBalance * 0.08))
     return { blocked: true, reason: 'DAILYCAP' };
   if (sessionStartBalance && sessionPnL <= -(sessionStartBalance * 0.05))
     return { blocked: true, reason: 'SESSIONKILL' };

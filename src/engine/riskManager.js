@@ -55,7 +55,7 @@ export function checkRiskGuards(s, balance, fastCooldown = false, { skipLossCool
       console.log(`[Risk] SESSIONKILL cooldown elapsed — resuming trading`);
     }
 
-    if (s.dailyStartBalance !== null &&
+    if (!s.ticker?.startsWith('KXBTC15M-') && s.dailyStartBalance !== null &&
         s.dailyPnL <= -(s.dailyStartBalance * RISK_DAILY_CAP)) {
       return { blocked: true, reason: 'DAILYCAP' };
     }
