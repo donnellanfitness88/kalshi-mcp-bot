@@ -39,8 +39,8 @@ test('15/30/60-second movements require complete elapsed history and reject gaps
 test('source history stays bounded, and silver uses its own feed',()=>{
   let now=base;const p=new MetalsProxy({now:()=>now});
   for(let i=0;i<2000;i++){now=base+i*200;p.ingest(message(now,3801));}
-  assert.equal(p.history.GOLD.length,451);
-  assert.equal(now-p.history.GOLD[0].sourceAt,90000);
+  assert.equal(p.history.GOLD.length,1551);
+  assert.equal(now-p.history.GOLD[0].sourceAt,310000);
   assert.equal(p.snapshot('SILVER',50,'yes').price,null);
   p.ingest(message(now,51,{priceFeedId:345}));assert.equal(p.snapshot('SILVER',50,'yes').estimatedCushion,1);
 });

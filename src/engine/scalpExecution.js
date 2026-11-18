@@ -5,6 +5,7 @@ import { metalShrinkingCheck } from '../research/metalsObserver.js';
 import { startSession, startDay } from './riskManager.js';
 import { benchmarkFeed } from '../prices/cfBenchmarks.js';
 import { evaluateShrinkingCushion } from './shrinkingCushion.js';
+import { repeatedCrossingGuard } from './repeatedCrossingGuard.js';
 import { entryCrossingBuffer } from './silverEntryBuffer.js';
 import { evaluateLateProximity } from './lateProximity.js';
 import fs from 'node:fs';
@@ -133,7 +134,11 @@ export function createScalpExecutor(deps = {}) {
       save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
       shrinkingGuards=next;
     }
-    return entryCrossingBuffer(check,ctx.asset,remainingSeconds(ctx.s),Date.now());
+    const now = Date.now();
+    const projected = entryCrossingBuffer(check, ctx.asset, remainingSeconds(ctx.s, now), now);
+    if (!projected?.allowed || !isFourMarket(ctx.asset)) return projected;
+    return repeatedCrossingGuard(projected, ctx.asset, distance.side, distance.target,
+      ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset]);
   }
   const targetCache = new Map();
   async function proximity(ctx, signal) {

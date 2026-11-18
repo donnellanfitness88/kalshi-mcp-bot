@@ -65,7 +65,7 @@ test('every tier uses the requested fee-inclusive incremental budget',async()=>{
 });
 test('new markets never use BTC fixed distance: small positive proxy cushion qualifies',async()=>{
   const f=fixture();f.proxy.snapshot=asset=>{
-    const at=Date.now();f.proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,price:2000.0001}));
+    const at=Date.now();f.proxy.history[asset]=Array.from({length:1551},(_,i)=>({sourceAt:at-310000+i*200,price:2000.0001}));
     return {status:'FRESH_PROXY',sourceAt:at,price:2000.0001};};
   await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,1,JSON.stringify(f.logs));
 });
@@ -323,8 +323,8 @@ test('USD/JPY buffer blocks YES and NO purchases, including a deteriorating fina
     s.yesAsk=side==='yes'?.99:.02;s.yesBid=side==='yes'?.98:.01;
     let projection=finalOnly?220:174.5;
     f.proxy.snapshot=asset=>{const at=Date.now(),speed=.012/projection,sign=side==='yes'?1:-1;
-      f.proxy.history[asset]=Array.from({length:151},(_,i)=>({sourceAt:at-30000+i*200,
-        price:2000+sign*(.012+speed*(30-i*.2))}));
+      f.proxy.history[asset]=Array.from({length:1551},(_,i)=>({sourceAt:at-310000+i*200,
+        price:2000+sign*(.012+speed*(310-i*.2))}));
       return {status:'FRESH_PROXY',sourceAt:at,price:2000+sign*.012};};
     let reads=0,deteriorate=true;f.api.getOrders=async()=>{if(++reads===2 && deteriorate)projection=174.5;return [];};
     await f.executor.tick(f.ctx('USDJPY'));
@@ -365,9 +365,9 @@ test('large-stage warning persists across restart then resumes after full trend 
     blocked:true,triggeredAt:Date.now()-30000,triggerReason:'SHRINK_RAPID_APPROACH'}};
   f.executor.restore(JSON.parse(JSON.stringify(snap)));
   let recovering=false;
-  f.proxy.snapshot=asset=>{const at=Date.now();f.proxy.history[asset]=Array.from({length:301},(_,i)=>{
-    const sec=i*.2,cushion=recovering?2:sec<=45?4-sec*3/45:sec<58?1+(sec-45)/13:2;
-    return {sourceAt:at-60000+i*200,price:2000+cushion};});
+  f.proxy.snapshot=asset=>{const at=Date.now();f.proxy.history[asset]=Array.from({length:1551},(_,i)=>{
+    const sec=Math.max(0,i*.2-250),cushion=recovering?2:sec<=45?4-sec*3/45:sec<58?1+(sec-45)/13:2;
+    return {sourceAt:at-310000+i*200,price:2000+cushion};});
     return {status:'FRESH_PROXY',sourceAt:at,price:2002};};
   await f.executor.tick(f.ctx('GOLD'));assert.equal(f.requests.length,0);
   f.executor.restore(JSON.parse(JSON.stringify(f.executor.snapshot())));

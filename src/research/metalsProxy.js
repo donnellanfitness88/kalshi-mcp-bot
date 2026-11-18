@@ -6,8 +6,8 @@ export const PROXY_FEEDS = {GOLD:{id:346,symbol:'Metal.XAU/USD',quoteUnit:'USD',
   EURUSD:{id:327,symbol:'FX.EUR/USD',quoteUnit:'USD per EUR',pipSize:.0001},
   USDJPY:{id:340,symbol:'FX.USD/JPY',quoteUnit:'JPY per USD',pipSize:.01}};
 const URLS = [0,1,2].map(i=>`wss://pyth-lazer-${i}.dourolabs.app/v1/stream`);
-const HISTORY_RETENTION_MS = 90000;
-const MAX_HISTORY_POINTS = 1000;
+const HISTORY_RETENTION_MS = 310000;
+const MAX_HISTORY_POINTS = 4000;
 const numeric = v => (typeof v==='number' || typeof v==='string' && v.trim()!=='') ? Number(v) : NaN;
 
 export class MetalsProxy {
