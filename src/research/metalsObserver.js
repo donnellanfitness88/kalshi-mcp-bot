@@ -1,3 +1,6 @@
+import { PullbackHistory, observeWick, updateWickTotals, wickOutcome } from './btcWickStudy.js';
+import { entryCrossingBuffer } from '../engine/silverEntryBuffer.js';
+import { repeatedCrossingGuard } from '../engine/repeatedCrossingGuard.js';
 import { NinetyStudy } from './ninetyStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -181,10 +184,32 @@ export class MetalsObserver {
     const at=this.now(), stage=metalsStage((Date.parse(market.close_time)-at)/1000);
     if(at-started>MAX_RESPONSE_AGE_MS || at>=Date.parse(market.close_time)) return;
     const book=metalBook(data), currentRow=this.state.markets[market.ticker];
+    const proxyHistory=this.proxy?.history?.[asset]??[];
+    const history=proxyHistory.map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}));
+    this.wickHistories??={};
+    const pullbacks=this.wickHistories[asset]??=new PullbackHistory();
+    pullbacks.ingest(history,at);
     this.ninetyStudy ??= new NinetyStudy();
     const observation=this.ninetyStudy.sample({asset,row:currentRow,book,proxy:this.proxy,at,started,estimate:estimateMetalEntry});
     if(!stage && !observation) return;
     const next=structuredClone(this.state), row=next.markets[market.ticker];
+    if(stage && row.feeType==='quadratic') {
+      const close=Date.parse(row.closeTime);
+      const secondsRemaining=(close-at)/1000;
+      observeWick(row,book,history,at,pullbacks,{
+        floor:0,
+        // Express the exploratory settlement screen in each market's existing buffer units.
+        flipMinimum:guard=>guard.crossingMinimum,
+        guard:(side,previous)=>{
+          const check=metalShrinkingCheck({asset,ticker:row.ticker,side,target:row.target,
+            proxy:this.proxy?.snapshot(asset,row.target,side),history:proxyHistory,
+            previous,at,secondsRemaining,requireLongRecovery:true,requireLongAlways:true,
+            stabilizationSeconds:5});
+          return repeatedCrossingGuard(entryCrossingBuffer(check,asset,secondsRemaining,at),
+            asset,side,row.target,close,at,proxyHistory);
+        }
+      });
+    }
     if(observation) {
       row.study90=observation;
       this.persist(next,{event:'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
@@ -311,11 +336,21 @@ export class MetalsObserver {
         referenceType:'SPOT_PROXY_NOT_SETTLEMENT'
       };
     }
+    let wickResult;
+    if(r.wickStudy) {
+      next.fourWickTotals??={};
+      const totals=next.fourWickTotals[r.asset]??={};
+      updateWickTotals(totals,r);
+      wickResult={event:'FOUR_WICK_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
+        reference:'PYTH_SPOT_PROXY',settlementModel:'equal-weight last sample per completed second, research proxy',
+        ...wickOutcome(r),totals};
+    }
     const closed=Object.values(next.markets).filter(m=>m.result).sort((a,b)=>b.settledAt-a.settledAt);
     for(const old of closed.slice(512)) delete next.markets[old.ticker];
     this.persist(next,{event:'SETTLED_ESTIMATE',asset:r.asset,ticker:r.ticker,result:r.result,
       candidates:r.candidates.length,estimatedCost:r.estimatedCost,hypotheticalPayout:r.hypotheticalPayout,
       hypotheticalNet:r.hypotheticalNet,filtersNotEvaluated:['proximity','shrinking-cushion','account-risk','available-cash']});
+    if(wickResult)this.emit(wickResult);
     const quote=r.study90;
     const net=quote?.plan && !quote.ambiguous
       ? (quote.side===r.result?quote.plan.count:0)-quote.plan.estimatedCost : null;

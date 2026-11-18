@@ -136,3 +136,27 @@ test('atomic observer files restore history without touching a trading journal',
     assert.equal(s.load().version,1);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('four wick studies use their own proxy at greater than 90 cents and settle independently',async()=>{
+  const f=fixture();
+  const history={};
+  for(const asset of Object.keys(METALS)) {
+    history[asset]=Array.from({length:326},(_,i)=>({price:3800.01,sourceAt:base-65000+i*200}));
+  }
+  f.observer.proxy={history,snapshot:()=>({status:'FRESH_PROXY',price:3800.01,sourceAt:base})};
+  f.price(.93);
+  await f.observer.tick();
+  for(const row of Object.values(f.saved().markets)) {
+    for(const variant of [0,5,10]) {
+      assert.equal(row.wickStudy.plans[variant].price,.93);
+      assert.equal(row.wickStudy.plans[variant].requiredWickFloor,0);
+    }
+    assert.equal(row.wickStudy.plans.settlement,undefined);
+    assert.equal(row.wickStudy.plans.volatility,undefined);
+  }
+  f.result('no'); f.time(base+180000);
+  for(let i=0;i<4;i++){f.time(base+180000+i*61000);await f.observer.settleOne();}
+  const events=f.logs.filter(x=>x.event==='FOUR_WICK_SETTLED');
+  assert.equal(new Set(events.map(x=>x.asset)).size,4);
+  assert.ok(events.every(x=>x.net[0]<0 && x.totals.incomplete===1));
+});
