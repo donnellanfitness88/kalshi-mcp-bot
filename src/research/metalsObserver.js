@@ -1,3 +1,4 @@
+import { NinetyStudy } from './ninetyStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {MetalsProxy} from './metalsProxy.js';
@@ -162,7 +163,7 @@ export class MetalsObserver {
     if(!market) return;
     const seconds=(Date.parse(market.close_time)-this.now())/1000;
     if(seconds<=0) { this.current[asset]=null; this.nextDiscovery[asset]=0; return; }
-    if(!metalsStage(seconds)) return;
+    // Reuse the same public book read for both studies during staged windows.
     // Some newly opened markets publish their strike after initial discovery.
     // Refresh missing targets without discarding prior observations or candidates.
     if(!Number.isFinite(number(this.state.markets[market.ticker]?.target)) && this.now()>=(this.nextTargetRead[asset]??0)) {
@@ -178,8 +179,17 @@ export class MetalsObserver {
     }
     const started=this.now(), data=await this.read('/markets/'+encodeURIComponent(market.ticker)+'/orderbook?depth=1');
     const at=this.now(), stage=metalsStage((Date.parse(market.close_time)-at)/1000);
-    if(at-started>MAX_RESPONSE_AGE_MS || !stage) return;
-    const book=metalBook(data), next=structuredClone(this.state), row=next.markets[market.ticker];
+    if(at-started>MAX_RESPONSE_AGE_MS || at>=Date.parse(market.close_time)) return;
+    const book=metalBook(data), currentRow=this.state.markets[market.ticker];
+    this.ninetyStudy ??= new NinetyStudy();
+    const observation=this.ninetyStudy.sample({asset,row:currentRow,book,proxy:this.proxy,at,started,estimate:estimateMetalEntry});
+    if(!stage && !observation) return;
+    const next=structuredClone(this.state), row=next.markets[market.ticker];
+    if(observation) {
+      row.study90=observation;
+      this.persist(next,{event:'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
+    }
+    if(!stage) return;
     const candidate=!row.candidates.some(c=>c.stageId===stage.id) && row.feeType==='quadratic'
       ? estimateMetalEntry({book,stage,side:row.side,feeMultiplier:row.feeMultiplier}) : null;
     const proxySide=candidate?.side??row.side;
@@ -306,6 +316,12 @@ export class MetalsObserver {
     this.persist(next,{event:'SETTLED_ESTIMATE',asset:r.asset,ticker:r.ticker,result:r.result,
       candidates:r.candidates.length,estimatedCost:r.estimatedCost,hypotheticalPayout:r.hypotheticalPayout,
       hypotheticalNet:r.hypotheticalNet,filtersNotEvaluated:['proximity','shrinking-cushion','account-risk','available-cash']});
+    const quote=r.study90;
+    const net=quote?.plan && !quote.ambiguous
+      ? (quote.side===r.result?quote.plan.count:0)-quote.plan.estimatedCost : null;
+    this.emit({event:'FOUR90_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
+      observedAt:quote?.at??null,modelNet:net,trendNet:net===null||quote.signedFourHourReturn===null
+        ? null : quote.signedFourHourReturn>0?net:0});
     if(cushionSettlement)this.emit(cushionSettlement);
     if(shrinkSettlement)this.emit(shrinkSettlement);
   }
