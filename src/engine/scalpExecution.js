@@ -196,7 +196,7 @@ export function createScalpExecutor(deps = {}) {
   const assetNames = () => MANAGED_ASSETS.filter(asset=>shared[asset]);
   const assets = () => assetNames().map(asset => shared[asset]);
   const riskFields=['riskDay','sessionStartBalance','sessionPnL','dailyStartBalance','dailyPnL',
-    'usdJpyDailyReset','totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
+    'usdJpyDailyReset','eurUsdDailyReset','totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
   const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards,
     // Retain new markets' risk counters across deployments as well as holdings.
     marketRisk:Object.fromEntries(assetNames().filter(isFourMarket).map(asset=>[asset,
@@ -559,6 +559,20 @@ export function createScalpExecutor(deps = {}) {
       if (s.sessionStartBalance===null) startSession(s,balance);
       if (s.dailyStartBalance===null) startDay(s,balance);
       let liveRisk=checkRiskGuards(s,balance);
+      const eurResetDay = '2026-11-18';
+      if (!sim && asset === 'EURUSD' && s.riskDay === eurResetDay &&
+          s.eurUsdDailyReset?.day !== eurResetDay && liveRisk.reason === 'DAILYCAP') {
+        s.eurUsdDailyReset = {
+          day: eurResetDay,
+          previousDailyPnL: s.dailyPnL,
+          previousBaseline: s.dailyStartBalance
+        };
+        startDay(s, balance);
+        persist();
+        liveRisk = checkRiskGuards(s, balance);
+        log({event: 'EURUSD_DAILY_RESET', asset, newBaseline: balance,
+          ...s.eurUsdDailyReset, remainingBlock: liveRisk.reason ?? null});
+      }
       const resetDay='2026-11-17';
       if (!sim && asset==='USDJPY' && s.riskDay===resetDay &&
           s.usdJpyDailyReset?.day!==resetDay && liveRisk.reason==='DAILYCAP') {
