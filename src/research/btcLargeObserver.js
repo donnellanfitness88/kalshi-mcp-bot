@@ -1,3 +1,4 @@
+import { PullbackHistory, observeWick, wickOutcome, updateWickTotals } from './btcWickStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {metalBook,estimateMetalEntry} from './metalsObserver.js';
@@ -56,6 +57,7 @@ export class BtcLargeObserver {
     Object.assign(this,{feed,read,store,now,log});
     this.state=store.load()??{version:1,markets:{},totals:{windows:0,entries:0,wins:0,losses:0,net:0}};
     if(this.state.version!==1||!this.state.markets||!this.state.totals)throw new Error('Invalid BTC observation journal');
+    this.pullbacks=new PullbackHistory();
     this.nextDiscovery=0;this.nextSettlement=0;this.current=null;this.busy=false;
   }
   emit(event){this.log({at:this.now(),observationOnly:true,...event});}
@@ -78,10 +80,12 @@ export class BtcLargeObserver {
     }
   }
   async observe() {
+    const recent=this.feed?.getHistory?.('BTC')??[];
+    this.pullbacks.ingest(recent,this.now());
     const market=this.current;if(!market)return;
     let seconds=(Date.parse(market.close_time)-this.now())/1000;
     if(seconds<=0){this.current=null;this.nextDiscovery=0;return;}
-    if(seconds>=90||this.state.markets[market.ticker].candidate)return;
+    if(seconds>=180)return;
     const initial=this.state.markets[market.ticker];
     if(!Number.isFinite(initial.target)&&this.now()>=(this.nextTarget??0)) {
       this.nextTarget=this.now()+15000;
@@ -92,8 +96,10 @@ export class BtcLargeObserver {
     }
     const started=this.now(),data=await this.read('/markets/'+market.ticker+'/orderbook?depth=1');
     const at=this.now();seconds=(Date.parse(market.close_time)-at)/1000;
-    if(at-started>2000||seconds<=0||seconds>=90)return;
+    if(at-started>2000||seconds<=0||seconds>=180)return;
     const book=metalBook(data),next=structuredClone(this.state),row=next.markets[market.ticker];
+    observeWick(row,book,this.feed?.getHistory?.('BTC')??[],at,this.pullbacks);
+    if(seconds>=90||row.candidate){this.persist(next);return;}
     const estimate=estimateMetalEntry({book,stage:{budget:2500,minPrice:.99},feeMultiplier:row.feeMultiplier});
     const proposed=estimate&&estimate.count-estimate.estimatedCost>1e-9?estimate:null;
     let check={allowed:false,reason:'NO_EXECUTABLE_PRICE_OR_VOLUME'};
@@ -122,10 +128,12 @@ export class BtcLargeObserver {
     r.result=market.result;r.settledAt=this.now();r.estimatedCost=c?.estimatedCost??0;
     r.payout=c?.side===r.result?c.count:0;r.net=r.payout-r.estimatedCost;
     const t=next.totals;t.windows++;t.entries+=c?1:0;t.wins+=r.net>0?1:0;t.losses+=r.net<0?1:0;t.net+=r.net;
+    updateWickTotals(next.wickTotals??={},r);
     const closed=Object.values(next.markets).filter(r=>r.result).sort((a,b)=>b.settledAt-a.settledAt);
     for(const old of closed.slice(512))delete next.markets[old.ticker];
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
+      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
