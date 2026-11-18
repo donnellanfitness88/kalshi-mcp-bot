@@ -53,6 +53,11 @@ export function lateStage(seconds, asset = 'BTC', ledger = null) {
   return lateStagesFor(asset).filter(stage=>stage.id!=='under_45_extra'||extraReady)
     .findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
+export function productionLateStage(seconds, asset, ledger) {
+  if ((asset === 'BTC' || isFourMarket(asset)) && seconds >= 60) return null;
+  return lateStage(seconds, asset, ledger);
+}
+
 export function lateStageSize(price, balance, budget, feeMultiplier = 1) {
   if (![price,balance,budget].every(Number.isFinite) || price <= 0 || price >= 1) return 0;
   const available = Math.max(0, Math.min(balance, budget));
@@ -100,6 +105,7 @@ export function scalpAck(result, pending) {
 }
 
 export function createScalpExecutor(deps = {}) {
+  const selectLateStage = deps.selectLateStage ?? lateStage;
   const api = { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements, ...deps.api };
   const shared = deps.state ?? state;
   const save = deps.save ?? saveJournal;
@@ -477,7 +483,7 @@ export function createScalpExecutor(deps = {}) {
     const ledger = lateStages[s.ticker];
     // A confirmed $50 fee-inclusive fifth-stage fill unlocks the separate $900
     // budget. Unfilled fifth-stage spending is not added to that budget.
-    const stage = lateStage(remainingSeconds(s),asset,ledger);
+    const stage = selectLateStage(remainingSeconds(s), asset, ledger);
     // Old journals reserved the entire ticker. Never infer missing stage history.
     const record = ledger?.records?.[stage?.id];
     if (!stage || ledger?.closed || (lateEntryTickers.includes(s.ticker) && !ledger) ||
@@ -784,6 +790,6 @@ export function createScalpExecutor(deps = {}) {
   }
   return { tick, restore, snapshot };
 }
-export const scalpExecutor = createScalpExecutor();
+export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage });
 export function restoreScalpExecution() { scalpExecutor.restore(loadJournal()); }
 
