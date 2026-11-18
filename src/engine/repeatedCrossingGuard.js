@@ -3,7 +3,7 @@ const minimum = { EURUSD: 0.00030, USDJPY: 0.030, GOLD: 4, SILVER: 0.10 };
 export function repeatedCrossingGuard(check, asset, side, target, close, now, history) {
   const buffer = minimum[asset];
   if (!check?.allowed || buffer === undefined) return check;
-  const start = close - 300000;
+  const start = close - 180000;
   const latest = history?.at(-1);
   if (!Number.isFinite(close) || now < start || now >= close || !Number.isFinite(target) ||
       target <= 0 || !['yes', 'no'].includes(side) || !Number.isFinite(latest?.sourceAt) ||
@@ -22,7 +22,8 @@ export function repeatedCrossingGuard(check, asset, side, target, close, now, hi
       previousTime = point.sourceAt;
       continue;
     }
-    if (previousTime === undefined ? point.sourceAt !== start : point.sourceAt - previousTime > 2500)
+    if (point.sourceAt > (previousTime === undefined ? start : Math.max(start, previousTime)) + 2500 ||
+        (previousTime === undefined && point.sourceAt !== start))
       complete = false;
     previousTime = point.sourceAt;
     const sign = Math.sign(point.price - target);
