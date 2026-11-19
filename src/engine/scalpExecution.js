@@ -21,9 +21,10 @@ import { SCALP_CONFIG, lateStagesFor, lateBudgetFor, scalpEntryPriceAllowed, eva
 import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
-const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90,budget:10});
+const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
 const wickAsset = asset => asset==='BTC' || isFourMarket(asset);
-const totalBudget = asset => lateBudgetFor(asset)+(wickAsset(asset)?wickStage.budget:0);
+const wickBudgetFor = asset => asset === 'SILVER' ? 1 : 50;
+const totalBudget = asset => lateBudgetFor(asset) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
 function saveJournal(value) {
   fs.mkdirSync(path.dirname(journalPath), { recursive: true });
@@ -260,7 +261,7 @@ export function createScalpExecutor(deps = {}) {
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
-      const stageLimit = p.stageId === wickStage.id ? wickStage.budget : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget;
+      const stageLimit = p.stageId === wickStage.id ? wickBudgetFor(p.asset) : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget;
       if (p.stageId && stageRecord && stageRecord.spent + cost > stageLimit + 1e-9) {
         throw new Error('Late fill exceeds remaining stage budget');
       }
@@ -569,7 +570,7 @@ export function createScalpExecutor(deps = {}) {
         const q = wickBook?.[side];
         if ((!heldSide || side===heldSide) && Number.isFinite(q?.price) &&
             q.price>=wickStage.minPrice && q.price<1 && Number.isFinite(q.size) && q.size>=1)
-          return {shouldEnter:true,direction:side==='yes'?'UP':'DOWN',stage:wickStage};
+          return {shouldEnter:true,direction:side==='yes'?'UP':'DOWN',stage:{...wickStage,budget:wickBudgetFor(asset)}};
       }
       return {shouldEnter:false};
     }

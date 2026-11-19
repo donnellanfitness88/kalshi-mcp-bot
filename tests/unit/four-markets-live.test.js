@@ -495,7 +495,9 @@ test('five-second live wick uses its own fee-inclusive budget once per ticker', 
     await f.executor.tick(f.ctx(asset));
     assert.equal(f.requests.length,before+1,JSON.stringify(f.logs));
     const record = f.saved().lateStages[f.shared[asset].ticker].records.wick_5s;
-    assert.ok(record.spent>0 && record.spent<=10);
+    const budget = asset === 'SILVER' ? 1 : 50;
+    assert.ok(record.spent > 0 && record.spent <= budget);
+    if (asset !== 'SILVER') assert.ok(record.spent > 10);
     await f.executor.tick(f.ctx(asset));
     assert.equal(f.requests.length,before+1);
   }
