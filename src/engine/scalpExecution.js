@@ -1,7 +1,8 @@
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
 import { MANAGED_ASSETS, isFourMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS } from './lateMarkets.js';
-import { metalShrinkingCheck } from '../research/metalsObserver.js';
+import { wickMetrics } from '../research/btcWickStudy.js';
+import { metalBook, metalShrinkingCheck } from '../research/metalsObserver.js';
 import { startSession, startDay } from './riskManager.js';
 import { benchmarkFeed } from '../prices/cfBenchmarks.js';
 import { evaluateShrinkingCushion } from './shrinkingCushion.js';
@@ -14,12 +15,15 @@ import { fileURLToPath } from 'node:url';
 import { state } from './state.js';
 import { definiteOrderRejection, historicalOrderRejection } from './orderRejections.js';
 import { reconcileManualExit, remainingHeldContracts } from './manualExitReconciliation.js';
-import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements } from '../kalshi/client.js';
+import { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getMarketOrderbook, getAllSettlements } from '../kalshi/client.js';
 import { buildBuyBody, buildDirectionalLateBuyBody, buildSellBody } from '../kalshi/orders.js';
 import { SCALP_CONFIG, lateStagesFor, lateBudgetFor, scalpEntryPriceAllowed, evaluateScalpEntry, evaluateScalpExit, evaluateScalpProfit, createScalpPosition } from './scalpStrategy.js';
 import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
+const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90,budget:10});
+const wickAsset = asset => asset==='BTC' || isFourMarket(asset);
+const totalBudget = asset => lateBudgetFor(asset)+(wickAsset(asset)?wickStage.budget:0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
 function saveJournal(value) {
   fs.mkdirSync(path.dirname(journalPath), { recursive: true });
@@ -107,7 +111,7 @@ export function scalpAck(result, pending) {
 
 export function createScalpExecutor(deps = {}) {
   const selectLateStage = deps.selectLateStage ?? lateStage;
-  const api = { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getAllSettlements, ...deps.api };
+  const api = { getBalance, getPositions, getOrders, getOrder, getAllFills, placeOrder, getMarket, getMarketOrderbook, getAllSettlements, ...deps.api };
   const shared = deps.state ?? state;
   const save = deps.save ?? saveJournal;
   const log = deps.log ?? (message => console.log('[SCALP] ' + JSON.stringify(message)));
@@ -115,30 +119,40 @@ export function createScalpExecutor(deps = {}) {
   const getReferenceQuote = deps.getReferenceQuote ?? (asset => benchmarkFeed.getQuote(asset));
   const getReferenceHistory = deps.getReferenceHistory ?? (asset => benchmarkFeed.getHistory(asset));
   let shrinkingGuards = {};
-  function shrinkingCheck(ctx, distance, stageBudget) {
-    const requireLongRecovery=stageBudget>=25;
-    const extraOptions=stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
+  function shrinkingCheck(ctx, distance, stageBudget, wick = false) {
+    const key = wick ? 'wick:'+ctx.asset+':'+distance.side : ctx.asset;
+    const requireLongRecovery=wick || stageBudget>=25;
+    const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isFourMarket(ctx.asset)} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
     // Every late purchase must pass, including the first purchase.
     const check = isFourMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
-      history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[ctx.asset],
+      history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[key],
       secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,...extraOptions,at:Date.now()
     }) : evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
-      minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' ? 50 : distance.minimumDistance,
+      minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' && !wick ? 50 : distance.minimumDistance,
       secondsRemaining:remainingSeconds(ctx.s),
-      previous:shrinkingGuards[ctx.asset],requireLongRecovery,...extraOptions,now:Date.now() });
-    if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[ctx.asset])) {
-      const next={...shrinkingGuards,[ctx.asset]:check.guardState};
+      previous:shrinkingGuards[key],requireLongRecovery,...extraOptions,now:Date.now() });
+    if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[key])) {
+      const next={...shrinkingGuards,[key]:check.guardState};
       save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
       shrinkingGuards=next;
     }
     const now = Date.now();
     const projected = entryCrossingBuffer(check, ctx.asset, remainingSeconds(ctx.s, now), now);
-    if (!projected?.allowed || !isFourMarket(ctx.asset)) return projected;
-    return repeatedCrossingGuard(projected, ctx.asset, distance.side, distance.target,
-      ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset]);
+    const checked = projected?.allowed && isFourMarket(ctx.asset)
+      ? repeatedCrossingGuard(projected, ctx.asset, distance.side, distance.target,
+          ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset])
+      : projected;
+    if (!wick || !checked?.allowed) return checked;
+    const rows = isFourMarket(ctx.asset)
+      ? ctx.proxy.history[ctx.asset].map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}))
+      : getReferenceHistory(ctx.asset);
+    const floor = checked.crossingBufferRequired ? checked.crossingMinimum : distance.minimumDistance;
+    const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor);
+    return metrics?.heldMs >= 5000 ? {...checked,wickHeldMs:metrics.heldMs}
+      : {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
   }
   const targetCache = new Map();
   async function proximity(ctx, signal) {
@@ -227,7 +241,7 @@ export function createScalpExecutor(deps = {}) {
       const cost = fill.count * fill.price + fill.fees;
       const ledger = lateStages[p.body.ticker];
       if (p.stageId && (!ledger || cost > p.stageBudget + 1e-9 ||
-          ledger.spent + cost > lateBudgetFor(p.asset) + 1e-9)) {
+          ledger.spent + cost > totalBudget(p.asset) + 1e-9)) {
         throw new Error('Late fill exceeds reserved budget; reconciliation required');
       }
       let next;
@@ -246,7 +260,7 @@ export function createScalpExecutor(deps = {}) {
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
-      const stageLimit = lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget;
+      const stageLimit = p.stageId === wickStage.id ? wickStage.budget : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget;
       if (p.stageId && stageRecord && stageRecord.spent + cost > stageLimit + 1e-9) {
         throw new Error('Late fill exceeds remaining stage budget');
       }
@@ -518,18 +532,48 @@ export function createScalpExecutor(deps = {}) {
     }
     return phase;
   }
-  async function enter(ctx) {
+  async function enter(ctx, wick = false) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
+    const originalTicker = s.ticker;
+    const wickWindowOpen = () => remainingSeconds(s)>0 && remainingSeconds(s)<180;
+    if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
+        lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
     if (isFourMarket(asset)) {
       if (!fourMarketsEnabled() || !ctx.refreshQuote || !ctx.proxy ||
           remainingSeconds(s)<=0 || remainingSeconds(s)>=180) return;
-      await ctx.refreshQuote();
+      if (!wick) await ctx.refreshQuote();
     }
     const held = s.activeTrade;
     if (Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
     if (Date.now() - Math.max(...assets().map(a => a.lastExitTime || 0)) < SCALP_CONFIG.reentryCooldownMs) return;
-    const mode = selectedEntryMode(s);
+    const mode = wick ? 'LATE_SETTLEMENT' : selectedEntryMode(s);
+    let wickBook, bookAt;
+    async function readWickBook() {
+      bookAt = Date.now();
+      if (isFourMarket(asset)) {
+        await ctx.refreshQuote();
+        wickBook = s.lateBook;
+      } else {
+        wickBook = metalBook(await api.getMarketOrderbook(originalTicker,1));
+      }
+    }
+    function readSignal() {
+      if (!wick) return entrySignal(s, mode);
+      const ledger = lateStages[originalTicker];
+      if (s.ticker!==originalTicker || !wickWindowOpen() || Date.now()-bookAt>2000 ||
+          ledger?.closed || ledger?.attempted.includes(wickStage.id) ||
+          (!ledger && lateEntryTickers.includes(originalTicker))) return {shouldEnter:false};
+      const heldSide = s.activeTrade?.side ?? ledger?.side;
+      for (const side of ['yes','no']) {
+        const q = wickBook?.[side];
+        if ((!heldSide || side===heldSide) && Number.isFinite(q?.price) &&
+            q.price>=wickStage.minPrice && q.price<1 && Number.isFinite(q.size) && q.size>=1)
+          return {shouldEnter:true,direction:side==='yes'?'UP':'DOWN',stage:wickStage};
+      }
+      return {shouldEnter:false};
+    }
+    const priceFor = direction => wick ? wickBook?.[direction==='UP'?'yes':'no']?.price : executablePrice(s,direction,asset);
     if (!['SCALP', 'LATE_SETTLEMENT'].includes(mode) || !s.ticker || (held && mode !== 'LATE_SETTLEMENT')) return;
     const ticker = s.ticker;
     const sim = simulated();
@@ -538,7 +582,8 @@ export function createScalpExecutor(deps = {}) {
     const risk = isFourMarket(asset) ? {blocked:false} :
       checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' });
     if (risk.blocked) { entryBlocked(asset, risk.reason); return; }
-    const signal = entrySignal(s, mode);
+    if (wick) await readWickBook();
+    const signal = readSignal();
     if (!signal.shouldEnter) return;
     if (mode === 'LATE_SETTLEMENT') {
       const key = `${s.ticker}:${signal.stage.id}`;
@@ -548,7 +593,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') {
       const check = await proximity(ctx, signal);
       if (!check.allowed) { entryBlocked(asset, check.reason, { proximity: check }); return; }
-      const shrink = shrinkingCheck(ctx,check,signal.stage.budget);
+      const shrink = shrinkingCheck(ctx,check,signal.stage.budget,wick);
       if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
     lastAttempt = Date.now();
@@ -582,39 +627,42 @@ export function createScalpExecutor(deps = {}) {
       }
       persist();
       if (liveRisk.blocked) { entryBlocked(asset,liveRisk.reason); return; }
-      await ctx.refreshQuote();
+      if (!wick) await ctx.refreshQuote();
     }
+    if (wick) await readWickBook();
     // Revalidate the actual close time, ticker and quote after slow account reads.
     if (s.activeTrade !== held || !compatibleHoldings(s, mode, sim) ||
-        s.ticker !== ticker || selectedEntryMode(s) !== mode) return;
-    const fresh = entrySignal(s, mode);
+        s.ticker !== ticker || (!wick && selectedEntryMode(s) !== mode)) return;
+    const fresh = readSignal();
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
-    const price = executablePrice(s,fresh.direction,asset);
+    const price = priceFor(fresh.direction);
     const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
-      lateBudgetFor(asset) - (lateStages[ticker]?.spent ?? 0)) : null;
+      (wick ? totalBudget(asset) : lateBudgetFor(asset)+(lateStages[ticker]?.records?.wick_5s?.spent ?? 0)) - (lateStages[ticker]?.spent ?? 0)) : null;
     const feeMultiplier=isFourMarket(asset)?s.lateFeeMultiplier:1;
     let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
-    if (isFourMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
+    if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
     }
     // The final account check may cross a time tier or receive a changed quote.
-    if (isFourMarket(asset)) await ctx.refreshQuote();
+    if (wick) await readWickBook();
+    else if (isFourMarket(asset)) await ctx.refreshQuote();
     const distanceCheck = mode === 'LATE_SETTLEMENT' ? await proximity(ctx, fresh) : null;
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
     }
-    const shrinkCheck = distanceCheck ? shrinkingCheck(ctx,distanceCheck,fresh.stage.budget) : null;
+    const shrinkCheck = distanceCheck ? shrinkingCheck(ctx,distanceCheck,fresh.stage.budget,wick) : null;
     if (shrinkCheck && !shrinkCheck.allowed) {
       entryBlocked(asset,shrinkCheck.reason,{shrinkingGuard:shrinkCheck}); return;
     }
-    const final = entrySignal(s, mode);
+    const final = readSignal();
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
-        executablePrice(s,final.direction,asset) !== price) return;
-    if (isFourMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
+        priceFor(final.direction) !== price) return;
+    if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
+    if (wick) count=Math.min(count,Math.floor(wickBook[final.direction==='UP'?'yes':'no'].size));
     if (!Number.isSafeInteger(count) || count<=0 || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price,feeMultiplier))) return;
-    const body = isFourMarket(asset) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
+    const body = (wick || isFourMarket(asset)) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
       buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
     if (isFourMarket(asset)) body.exchange_index=exchangeForAsset(asset);
@@ -800,6 +848,8 @@ export function createScalpExecutor(deps = {}) {
       }
       else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else await enter(ctx);
+      if (deps.liveWick && !pending && (!ctx.s.activeTrade || ctx.s.activeTrade.mode==='LATE_SETTLEMENT'))
+        await enter(ctx,true);
     } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', asset: ctx.asset, ticker: ctx.s.activeTrade?.ticker ?? ctx.s.ticker, error: error.message,
       clientOrderId: pending?.body.client_order_id,
       ...(pending ? { orderId: pending.orderId, requested: pending.body.count,
@@ -809,6 +859,6 @@ export function createScalpExecutor(deps = {}) {
   }
   return { tick, restore, snapshot };
 }
-export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage });
+export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage, liveWick:true });
 export function restoreScalpExecution() { scalpExecutor.restore(loadJournal()); }
 

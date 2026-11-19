@@ -224,10 +224,10 @@ export async function getMarket(ticker) {
   return data.market;
 }
 
-export async function getMarketOrderbook(ticker) {
+export async function getMarketOrderbook(ticker, depth = 0) {
   return request(
     'GET',
-    `/markets/${encodeURIComponent(ticker)}/orderbook?depth=0`
+    `/markets/${encodeURIComponent(ticker)}/orderbook?depth=${encodeURIComponent(depth)}`
   );
 }
 

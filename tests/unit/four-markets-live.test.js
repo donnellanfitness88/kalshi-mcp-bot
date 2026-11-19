@@ -5,7 +5,7 @@ import {LIVE_LATE_MARKETS,MANAGED_ASSETS} from '../../src/engine/lateMarkets.js'
 import {LateMarketRunner} from '../../src/engine/lateMarketRunner.js';
 process.env.SCALP_ENABLED='true';process.env.DRY_RUN='false';
 process.env.LATE_MARKETS_LIVE_ENABLED='true';
-function fixture() {
+function fixture(options={}) {
   const now=Date.now(),shared={simMode:false,paperBalance:1000,balance:1000,disabledAssets:['ETH']};
   for(const asset of MANAGED_ASSETS)shared[asset]={ticker:(LIVE_LATE_MARKETS[asset]?.series??'KXBTC15M')+'-TEST',
     activeTrade:null,farmArmed:true,lastExitTime:0,lastLossTime:0,consecutiveLosses:0,
@@ -32,7 +32,7 @@ function fixture() {
     getOrders:async()=>[],getBalance:async index=>{balances.push(index);return 100000;},
     placeOrder:async body=>{requests.push({...body});return {order_id:'order-'+requests.length,
       fill_count:body.count,remaining_count:'0.00',average_fill_price:body.price,average_fee_paid:'0.0100'};}};
-  const executor=createScalpExecutor({state:shared,api:Object.fromEntries(['getMarket','getPositions','getOrders','getBalance','placeOrder','getOrder','getAllFills','getAllSettlements'].map(k=>[k,(...args)=>api[k](...args)])),now:()=>retry,
+  const executor=createScalpExecutor({...options,state:shared,api:Object.fromEntries(['getMarket','getMarketOrderbook','getPositions','getOrders','getBalance','placeOrder','getOrder','getAllFills','getAllSettlements'].map(k=>[k,(...args)=>api[k](...args)])),now:()=>retry,
     save:value=>saved=structuredClone(value),log:event=>logs.push(event)});
   const ctx=asset=>({asset,s:shared[asset],balance:1000,proxy,refreshQuote:()=>refresh(asset)});
   return {shared,requests,balances,logs,api,proxy,executor,ctx,saved:()=>saved,advance:()=>retry+=3001};
@@ -479,4 +479,44 @@ test('a warned sixth stage needs five stable seconds, persists on restart and re
   assert.ok(f.executor.snapshot().lateStages[s.ticker].records.under_45_extra.spent<900);
   extraHistory(f,t=>10-t*.01);f.advance();await f.executor.tick(f.ctx('GOLD'));
   assert.equal(f.requests.length,2);assert.equal(f.executor.snapshot().shrinkingGuards.GOLD.blocked,true);
+});
+
+test('five-second live wick uses its own fee-inclusive budget once per ticker', async () => {
+  const f = fixture({liveWick:true, selectLateStage:()=>null});
+  const place=f.api.placeOrder;
+  f.api.placeOrder=async body=>({...await place(body),average_fee_paid:'0.0064'});
+  f.proxy.snapshot = asset => {
+    const at = Date.now();
+    f.proxy.history[asset] = Array.from({length:1001}, (_,i)=>({sourceAt:at-(1000-i)*200,price:2010}));
+    return {status:'FRESH_PROXY',sourceAt:at,price:2010};
+  };
+  for (const asset of Object.keys(LIVE_LATE_MARKETS)) {
+    const before = f.requests.length;
+    await f.executor.tick(f.ctx(asset));
+    assert.equal(f.requests.length,before+1,JSON.stringify(f.logs));
+    const record = f.saved().lateStages[f.shared[asset].ticker].records.wick_5s;
+    assert.ok(record.spent>0 && record.spent<=10);
+    await f.executor.tick(f.ctx(asset));
+    assert.equal(f.requests.length,before+1);
+  }
+});
+test('wick requires contiguous history and never submits from a quote alone', async () => {
+  const f=fixture({liveWick:true,selectLateStage:()=>null});
+  await f.executor.tick(f.ctx('GOLD'));
+  assert.equal(f.requests.length,0);
+});
+
+test('BTC wick uses directional book depth and stays separate from stage five spend', async () => {
+  const quote=()=>({source:'CF_BENCHMARKS',price:2100,sourceTs:Date.now(),receivedAt:Date.now()});
+  const f=fixture({liveWick:true,selectLateStage:()=>null,getReferenceQuote:quote,
+    getReferenceHistory:()=>{const now=Date.now();return Array.from({length:401},(_,i)=>({sourceTs:now-(400-i)*200,price:2100}));}});
+  f.api.getMarket=async ticker=>({ticker,strike_type:'greater_or_equal',floor_strike:2000});
+  f.api.getMarketOrderbook=async()=>({orderbook_fp:{no_dollars:[['0.0950','3.00']],yes_dollars:[]}});
+  await f.executor.tick(f.ctx('BTC'));
+  assert.equal(f.requests.length,1,JSON.stringify(f.logs));
+  assert.equal(f.requests[0].count,'3.00');
+  assert.equal(f.requests[0].price,'0.9050');
+  const records=f.saved().lateStages[f.shared.BTC.ticker].records;
+  assert.ok(records.wick_5s.spent>0 && records.wick_5s.spent<10);
+  assert.equal(records.under_45,undefined);
 });
