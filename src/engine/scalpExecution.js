@@ -45,6 +45,56 @@ export function remainingSeconds(s, now = Date.now()) {
   if (Number.isFinite(s.marketCloseTs)) return (s.marketCloseTs - now) / 1000;
   return s.secsLeft - Math.max(0, now - (s.clockUpdatedAt ?? now)) / 1000;
 }
+function completedMinuteStart(now) {
+  return Math.floor(now / 60000) * 60000 - 60000;
+}
+
+let btcMinuteRangeCache;
+async function getBtcMinuteRange(now) {
+  const start = completedMinuteStart(now);
+  if (btcMinuteRangeCache?.start === start &&
+      (btcMinuteRangeCache.range !== null || now < btcMinuteRangeCache.retryAt)) {
+    return btcMinuteRangeCache;
+  }
+
+  let range = null;
+  const query = new URLSearchParams({
+    start: new Date(start).toISOString(),
+    end: new Date(start + 60000).toISOString(),
+    granularity: '60'
+  });
+  try {
+    const response = await fetch('https://api.exchange.coinbase.com/products/BTC-USD/candles?' + query, {
+      signal: AbortSignal.timeout(2000)
+    });
+    const candles = response.ok ? await response.json() : null;
+    const candle = Array.isArray(candles) ? candles.find(row => Array.isArray(row) && row[0] === start / 1000) : null;
+    if (candle && Number.isFinite(candle[1]) && Number.isFinite(candle[2]) && candle[2] > candle[1]) {
+      range = candle[2] - candle[1];
+    }
+  } catch {
+    // Retry after a short delay if the completed candle is unavailable.
+  }
+  btcMinuteRangeCache = { start, range, retryAt: Date.now() + 3000 };
+  return btcMinuteRangeCache;
+}
+
+function btcWickVolatilityCheck(candle, distance, secondsRemaining, now) {
+  const minimumRatio = 0.50;
+  if (candle?.start !== completedMinuteStart(now) || !Number.isFinite(candle?.range) ||
+      candle.range <= 0 || !Number.isFinite(distance) || !Number.isFinite(secondsRemaining) || secondsRemaining <= 0) {
+    return { allowed: false, reason: 'BTC_WICK_VOLATILITY_UNAVAILABLE' };
+  }
+  const scaledRange = candle.range * Math.sqrt(secondsRemaining / 60);
+  const ratio = distance / scaledRange;
+  return {
+    allowed: ratio >= minimumRatio,
+    reason: ratio >= minimumRatio ? 'BTC_WICK_VOLATILITY_OK' : 'BTC_WICK_VOLATILITY_CUSHION',
+    range: candle.range, scaledRange, ratio, minimumRatio, distance, secondsRemaining,
+    candleStart: candle.start
+  };
+}
+
 export function entryPhase(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return 'CLOSED';
   if (seconds > SCALP_CONFIG.entryMinSecondsRemaining) return 'SCALP';
@@ -648,6 +698,8 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
     }
+    const btcWickRange = wick && asset === 'BTC' ? deps.getBtcMinuteRange : null;
+    const btcCandle = btcWickRange ? await btcWickRange(Date.now()) : null;
     // The final account check may cross a time tier or receive a changed quote.
     if (wick) await readWickBook();
     else if (isFourMarket(asset)) await ctx.refreshQuote();
@@ -663,6 +715,14 @@ export function createScalpExecutor(deps = {}) {
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
         priceFor(final.direction) !== price) return;
+    const now = Date.now();
+    const volatilityGuard = btcWickRange
+      ? btcWickVolatilityCheck(btcCandle, distanceCheck?.distance, remainingSeconds(s, now), now)
+      : null;
+    if (volatilityGuard && !volatilityGuard.allowed) {
+      entryBlocked(asset, volatilityGuard.reason, { volatilityGuard });
+      return;
+    }
     if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (wick) count=Math.min(count,Math.floor(wickBook[final.direction==='UP'?'yes':'no'].size));
     if (!Number.isSafeInteger(count) || count<=0 || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price,feeMultiplier))) return;
@@ -673,7 +733,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
-      stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, shrinkingGuard: shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+      stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, shrinkingGuard: volatilityGuard ? { ...shrinkCheck, volatilityGuard } : shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
   async function reconcileExternal(ctx, suppliedPositions) {
     const { asset, s } = ctx;
@@ -863,6 +923,6 @@ export function createScalpExecutor(deps = {}) {
   }
   return { tick, restore, snapshot };
 }
-export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage, liveWick:true });
+export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage, liveWick: true, getBtcMinuteRange });
 export function restoreScalpExecution() { scalpExecutor.restore(loadJournal()); }
 
