@@ -566,10 +566,13 @@ export function createScalpExecutor(deps = {}) {
           ledger?.closed || ledger?.attempted.includes(wickStage.id) ||
           (!ledger && lateEntryTickers.includes(originalTicker))) return {shouldEnter:false};
       const heldSide = s.activeTrade?.side ?? ledger?.side;
+      const insideFinalTwoMinutes = remainingSeconds(s) < 120;
       for (const side of ['yes','no']) {
         const q = wickBook?.[side];
         if ((!heldSide || side===heldSide) && Number.isFinite(q?.price) &&
-            q.price>=wickStage.minPrice && q.price<1 && Number.isFinite(q.size) && q.size>=1)
+            q.price>=wickStage.minPrice && q.price<1 &&
+            (insideFinalTwoMinutes || q.price<=0.979) &&
+            Number.isFinite(q.size) && q.size>=1)
           return {shouldEnter:true,direction:side==='yes'?'UP':'DOWN',stage:{...wickStage,budget:wickBudgetFor(asset)}};
       }
       return {shouldEnter:false};
