@@ -197,6 +197,12 @@ export function createScalpExecutor(deps = {}) {
           ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset])
       : projected;
     if (!wick || !checked?.allowed) return checked;
+    const silverWickMinimum = 0.05;
+    if (ctx.asset === 'SILVER' && (!Number.isFinite(checked.currentCushion) ||
+        checked.currentCushion + 1e-9 < silverWickMinimum)) {
+      return {...checked, allowed: false, reason: 'SILVER_WICK_CUSHION_TOO_SMALL',
+        silverWickMinimum};
+    }
     const rows = isFourMarket(ctx.asset)
       ? ctx.proxy.history[ctx.asset].map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}))
       : getReferenceHistory(ctx.asset);
