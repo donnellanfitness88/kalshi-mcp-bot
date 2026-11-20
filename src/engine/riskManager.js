@@ -1,7 +1,7 @@
 // Pure guard functions — return { blocked, reason } or mutate P&L counters.
 // All dollar values in USD.
 
-const RISK_DAILY_CAP           = 0.25;         // stop new entries after 25% daily net loss
+const RISK_DAILY_CAP_USD = 500;
 const RISK_SESSION_KILL        = 0.05;         // stop after 5% session loss
 const RISK_SESSION_KILL_COOLDOWN_MS = 60 * 60_000; // 1 hour cooldown after session kill, then auto-resume
 const RISK_CONSEC_BRAKE        = 3;            // stop after 3 consecutive losses
@@ -55,8 +55,7 @@ export function checkRiskGuards(s, balance, fastCooldown = false, { skipLossCool
       console.log(`[Risk] SESSIONKILL cooldown elapsed — resuming trading`);
     }
 
-    if (!s.ticker?.startsWith('KXBTC15M-') && s.dailyStartBalance !== null &&
-        s.dailyPnL <= -(s.dailyStartBalance * RISK_DAILY_CAP)) {
+    if (s.dailyPnL <= -RISK_DAILY_CAP_USD) {
       return { blocked: true, reason: 'DAILYCAP' };
     }
   }
