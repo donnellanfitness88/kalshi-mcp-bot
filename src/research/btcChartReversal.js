@@ -97,8 +97,7 @@ export function chartOutcome(row) {
     (entry.side === row.result ? entry.count : 0) - entry.estimatedCost : null };
 }
 
-const scalpEntryCap = .31;
-const scalpExitTarget = .60;
+const scalpNetTarget = .03;
 const scalpDelayMs = 1000;
 const scalpEntryMs = 30000;
 const scalpHoldMs = 240000;
@@ -128,34 +127,37 @@ export function observeWickRejectionScalp(scalp, book, bidSize, at, requestedAt,
     const ask = book[scalp.side]?.price;
     const age = at - scalp.confirmedAt;
     if (requestedAt < scalp.confirmedAt + scalpDelayMs || age > scalpEntryMs ||
-        !(ask > 0 && ask <= scalpEntryCap)) return;
+        !(ask > 0 && ask < 1)) return;
     const entry = estimateMetalEntry({ book, side: scalp.side,
       stage: { budget: paperBudget, minPrice: .001 }, feeMultiplier });
-    if (entry) scalp.entry = { ...entry, at };
+    if (entry && entry.count - entry.estimatedCost >= scalpNetTarget * entry.count - 1e-9) {
+      scalp.entry = { ...entry, at };
+    }
     return;
   }
   const bid = book[scalp.side + 'Bid'];
   const size = bidSize(scalp.side);
+  const count = scalp.entry.count;
+  const estimatedFee = Math.ceil(7 * feeMultiplier * count * bid * (1 - bid) - 1e-9) / 100;
+  const net = count * bid - estimatedFee - scalp.entry.estimatedCost;
+  const targetMet = net >= scalpNetTarget * count - 1e-9;
   const pending = scalp.pendingExit;
   if (pending) {
     if (requestedAt < pending.at + scalpDelayMs) return;
     const outcome = !Number.isFinite(bid) || bid <= 0 ? 'missing_bid' :
-      bid < pending.limit ? 'bid_below_limit' :
+      (pending.reason === 'target' ? !targetMet : bid < pending.limit) ? 'bid_below_limit' :
       !Number.isFinite(size) || size < scalp.entry.count ? 'insufficient_size' : 'filled';
     (scalp.exitAttempts ??= []).push({ ...pending, checkedAt: at, delayMs: at - pending.at,
       observedBid: bid ?? null, observedSize: size ?? null, outcome });
     scalp.pendingExit = null;
     if (outcome === 'filled') {
-      const count = scalp.entry.count;
-      const estimatedFee = Math.ceil(7 * feeMultiplier * count * bid * (1 - bid) - 1e-9) / 100;
-      scalp.exit = { at, bid, estimatedFee, reason: pending.reason,
-        net: count * bid - estimatedFee - scalp.entry.estimatedCost };
+      scalp.exit = { at, bid, estimatedFee, reason: pending.reason, net };
     }
     return;
   }
   const timeExit = at - scalp.confirmedAt >= scalpHoldMs;
-  if (Number.isFinite(bid) && bid > 0 && size >= scalp.entry.count && (timeExit || bid >= scalpExitTarget)) {
-    scalp.pendingExit = { at, limit: timeExit ? bid : scalpExitTarget,
+  if (Number.isFinite(bid) && bid > 0 && size >= scalp.entry.count && (timeExit || targetMet)) {
+    scalp.pendingExit = { at, limit: timeExit ? bid : null,
       reason: timeExit ? 'time' : 'target' };
   }
 }
