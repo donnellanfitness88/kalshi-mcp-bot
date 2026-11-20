@@ -1,3 +1,4 @@
+import { isCryptoWick, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
 import { MANAGED_ASSETS, isFourMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS } from './lateMarkets.js';
@@ -22,9 +23,10 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
-const wickAsset = asset => asset==='BTC' || isFourMarket(asset);
-const wickBudgetFor = () => 200;
-const totalBudget = asset => lateBudgetFor(asset) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
+const wickAsset = asset => asset==='BTC' || isFourMarket(asset) || isCryptoWick(asset);
+const wickBudgetFor = asset => isCryptoWick(asset) ? 10 : 200;
+const hasIndependentRisk = asset => isFourMarket(asset) || isCryptoWick(asset);
+const totalBudget = asset => (isCryptoWick(asset) ? 0 : lateBudgetFor(asset)) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
 function saveJournal(value) {
   fs.mkdirSync(path.dirname(journalPath), { recursive: true });
@@ -245,6 +247,17 @@ export function createScalpExecutor(deps = {}) {
         targetCache.set(ctx.asset, { ticker, target, market, checkedAt: Date.now() });
       }
     }
+    if (isCryptoWick(ctx.asset)) {
+      const metadata = targetCache.get(ctx.asset)?.market;
+      const valid = metadata?.exchange_index === exchangeForAsset(ctx.asset) &&
+        ticker.startsWith('KX' + ctx.asset + '15M-') && ['open', 'active'].includes(metadata.status) &&
+        Date.parse(metadata.close_time) === ctx.s.marketCloseTs &&
+        Date.parse(metadata.close_time) - Date.parse(metadata.open_time) === 900000 &&
+        ctx.s.lateFeeType === 'quadratic' && Number.isFinite(ctx.s.lateFeeMultiplier) &&
+        ctx.s.lateFeeMultiplier >= 0 && Number.isFinite(target);
+      return { allowed: valid, reason: valid ? 'CRYPTO_WICK_TARGET_OK' : 'INVALID_CRYPTO_WICK_MARKET',
+        side: signal.direction === 'UP' ? 'yes' : 'no', target };
+    }
     if (isFourMarket(ctx.asset)) {
       const metadata=targetCache.get(ctx.asset)?.market;
       const expected=LIVE_LATE_MARKETS[ctx.asset];
@@ -285,7 +298,7 @@ export function createScalpExecutor(deps = {}) {
     'usdJpyDailyReset','eurUsdDailyReset','totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
   const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards,
     // Retain new markets' risk counters across deployments as well as holdings.
-    marketRisk:Object.fromEntries(assetNames().filter(isFourMarket).map(asset=>[asset,
+    marketRisk:Object.fromEntries(assetNames().filter(hasIndependentRisk).map(asset=>[asset,
       Object.fromEntries(riskFields.map(k=>[k,shared[asset][k]]))])),
     positions: Object.fromEntries(assetNames().map(asset =>
     [asset, isManagedTrade(shared[asset].activeTrade) ? shared[asset].activeTrade : null])) });
@@ -298,7 +311,7 @@ export function createScalpExecutor(deps = {}) {
     lateEntryTickers = saved.lateEntryTickers ?? [];
     lateStages = structuredClone(saved.lateStages ?? {});
     for (const asset of assetNames()) {
-      if (isFourMarket(asset) && saved.marketRisk?.[asset]) Object.assign(shared[asset],saved.marketRisk[asset]);
+      if (hasIndependentRisk(asset) && saved.marketRisk?.[asset]) Object.assign(shared[asset],saved.marketRisk[asset]);
       if (saved.positions?.[asset]) shared[asset].activeTrade = saved.positions[asset];
     }
   }
@@ -520,7 +533,7 @@ export function createScalpExecutor(deps = {}) {
           (row.ticker != null && row.market_ticker != null && row.ticker !== row.market_ticker)) {
         throw new Error('Account row has missing or conflicting market identity');
       }
-      if (!/^(KXBTC15M|KXETH15M|KXGOLD15M|KXSILVER15M|KXEURUSD15M|KXUSDJPY15M)-/.test(ticker) && !known.has(ticker)) return [];
+      if (!/^(KXBTC15M|KXETH15M|KXGOLD15M|KXSILVER15M|KXEURUSD15M|KXUSDJPY15M)-/.test(ticker) && !/^KX(SOL|XRP|DOGE|BNB|HYPE|NEAR|ZEC)15M-/.test(ticker) && !known.has(ticker)) return [];
       return [{ ...row, ticker }];
     });
   }
@@ -607,6 +620,8 @@ export function createScalpExecutor(deps = {}) {
   async function enter(ctx, wick = false) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
+    const cryptoWick = isCryptoWick(asset);
+    if (cryptoWick && (!wick || !cryptoWickEnabled())) return;
     const originalTicker = s.ticker;
     const wickWindowOpen = () => remainingSeconds(s)>0 && remainingSeconds(s)<180;
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
@@ -654,7 +669,7 @@ export function createScalpExecutor(deps = {}) {
     const sim = simulated();
     if (!compatibleHoldings(s, mode, sim)) return;
     s._simMode = sim;
-    const risk = isFourMarket(asset) ? {blocked:false} :
+    const risk = hasIndependentRisk(asset) ? {blocked:false} :
       checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' });
     if (risk.blocked) { entryBlocked(asset, risk.reason); return; }
     if (wick) await readWickBook();
@@ -665,16 +680,31 @@ export function createScalpExecutor(deps = {}) {
       if (retryNow() - (lateChecks.get(key) ?? -Infinity) < SCALP_CONFIG.lateRetryMs) return;
       lateChecks.set(key, retryNow());
     }
+    const checkCryptoTier = distance => cryptoWickTier({
+      history: ctx.getReferenceHistory?.() ?? [], asset, ticker, side: distance.side,
+      target: distance.target, close: s.marketCloseTs, now: Date.now(), guards: shrinkingGuards,
+    });
+    let initialTier;
     if (mode === 'LATE_SETTLEMENT') {
       const check = await proximity(ctx, signal);
       if (!check.allowed) { entryBlocked(asset, check.reason, { proximity: check }); return; }
-      const shrink = shrinkingCheck(ctx,check,signal.stage.budget,wick);
+      initialTier = cryptoWick ? checkCryptoTier(check) : null;
+      if (cryptoWick && !initialTier) { entryBlocked(asset, 'CRYPTO_WICK_TIER_UNCONFIRMED'); return; }
+      const shrink = cryptoWick ? initialTier : shrinkingCheck(ctx,check,signal.stage.budget,wick);
       if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
     lastAttempt = Date.now();
     if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance(exchangeForAsset(asset))) / 100;
     if (!Number.isFinite(balance) || balance<=0) { entryBlocked(asset,'INSUFFICIENT_EXCHANGE_BALANCE'); return; }
+    if (cryptoWick) {
+      const day = new Date().toISOString().slice(0, 10);
+      if (s.sessionStartBalance === null) startSession(s,balance);
+      if (s.dailyStartBalance === null || s.riskDay !== day) { startDay(s,balance); s.riskDay = day; }
+      persist();
+      const liveRisk = checkRiskGuards(s,balance);
+      if (liveRisk.blocked) { entryBlocked(asset,liveRisk.reason); return; }
+    }
     if (isFourMarket(asset)) {
       if (s.sessionStartBalance===null) startSession(s,balance);
       if (s.dailyStartBalance===null) startDay(s,balance);
@@ -711,9 +741,9 @@ export function createScalpExecutor(deps = {}) {
     const fresh = readSignal();
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
     const price = priceFor(fresh.direction);
-    const stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
+    let stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
       (wick ? totalBudget(asset) : lateBudgetFor(asset)+(lateStages[ticker]?.records?.wick_5s?.spent ?? 0)) - (lateStages[ticker]?.spent ?? 0)) : null;
-    const feeMultiplier=isFourMarket(asset)?s.lateFeeMultiplier:1;
+    const feeMultiplier=hasIndependentRisk(asset)?s.lateFeeMultiplier:1;
     let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
     if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
@@ -728,7 +758,13 @@ export function createScalpExecutor(deps = {}) {
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
     }
-    const shrinkCheck = distanceCheck ? shrinkingCheck(ctx,distanceCheck,fresh.stage.budget,wick) : null;
+    const shrinkCheck = cryptoWick ? checkCryptoTier(distanceCheck) :
+      distanceCheck ? shrinkingCheck(ctx,distanceCheck,fresh.stage.budget,wick) : null;
+    if (cryptoWick && !shrinkCheck) { entryBlocked(asset, 'CRYPTO_WICK_TIER_UNCONFIRMED'); return; }
+    if (cryptoWick) {
+      stageBudget = Math.min(stageBudget, initialTier.budget, shrinkCheck.budget);
+      count = lateStageSize(price, balance, stageBudget, feeMultiplier);
+    }
     if (shrinkCheck && !shrinkCheck.allowed) {
       entryBlocked(asset,shrinkCheck.reason,{shrinkingGuard:shrinkCheck}); return;
     }
@@ -750,7 +786,7 @@ export function createScalpExecutor(deps = {}) {
     const body = (wick || isFourMarket(asset)) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
       buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
-    if (isFourMarket(asset)) body.exchange_index=exchangeForAsset(asset);
+    if (hasIndependentRisk(asset)) body.exchange_index=exchangeForAsset(asset);
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
@@ -797,7 +833,7 @@ export function createScalpExecutor(deps = {}) {
     if (!held && trade.mode === 'LATE_SETTLEMENT' && lateStages[trade.ticker]) {
       saved.lateStages = { ...lateStages, [trade.ticker]: { ...lateStages[trade.ticker], closed: true } };
     }
-    if (!held && isFourMarket(asset)) {
+    if (!held && hasIndependentRisk(asset)) {
       const nextRisk={...s};recordTradePnL(nextRisk,next.realizedNet);nextRisk.lastExitTime=Date.now();
       saved.marketRisk[asset]=Object.fromEntries(riskFields.map(k=>[k,nextRisk[k]]));
     }
@@ -853,7 +889,7 @@ export function createScalpExecutor(deps = {}) {
     if (lateStages[trade.ticker]) saved.lateStages = {
       ...lateStages, [trade.ticker]: { ...lateStages[trade.ticker], closed: true }
     };
-    if (isFourMarket(asset)) {
+    if (hasIndependentRisk(asset)) {
       const nextRisk={...s}; recordTradePnL(nextRisk,pnl); nextRisk.lastExitTime=Date.now();
       saved.marketRisk[asset]=Object.fromEntries(riskFields.map(k=>[k,nextRisk[k]]));
     }

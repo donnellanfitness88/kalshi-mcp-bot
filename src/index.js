@@ -33,6 +33,9 @@ import { LIVE_LATE_MARKETS } from './engine/lateMarkets.js';
 async function main() {
   await startClock();
 
+  import('./engine/cryptoWickRunner.js').then(({ startCryptoWickRunner }) => startCryptoWickRunner())
+    .catch(e => console.error('[CRYPTO_WICK] Startup failed:', e.message));
+
   // Read-only BTC large-entry scenario; reuses the existing reference connection.
   if(process.env.BTC_LARGE_OBSERVER_ENABLED!=='false') {
     Promise.all([import('./research/btcLargeObserver.js'),import('./prices/cfBenchmarks.js')])

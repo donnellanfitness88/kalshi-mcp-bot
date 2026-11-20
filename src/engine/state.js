@@ -1,3 +1,4 @@
+import { CRYPTO_WICK_ASSETS } from './cryptoWickTiers.js';
 // Shared mutable state for both assets — read by MCP tools and terminal
 
 function createAssetState() {
@@ -75,6 +76,7 @@ export const state = {
   SILVER: createAssetState(),
   EURUSD: createAssetState(),
   USDJPY: createAssetState(),
+  ...Object.fromEntries(CRYPTO_WICK_ASSETS.map(asset => [asset, createAssetState()])),
   balance: null, // dollars (updated every 30s)
 
   // Sim mode — auto-enabled when balance drops below $0.50.
