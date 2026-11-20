@@ -80,7 +80,7 @@ async function getBtcMinuteRange(now) {
 }
 
 function btcWickVolatilityCheck(candle, distance, secondsRemaining, now) {
-  const minimumRatio = 0.50;
+  const minimumRatio = 1.20;
   if (candle?.start !== completedMinuteStart(now) || !Number.isFinite(candle?.range) ||
       candle.range <= 0 || !Number.isFinite(distance) || !Number.isFinite(secondsRemaining) || secondsRemaining <= 0) {
     return { allowed: false, reason: 'BTC_WICK_VOLATILITY_UNAVAILABLE' };
