@@ -197,6 +197,12 @@ export function createScalpExecutor(deps = {}) {
           ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset])
       : projected;
     if (!wick || !checked?.allowed) return checked;
+    if (ctx.asset === 'USDJPY') {
+      const change60 = checked.longRecovery?.cushionChange60;
+      if (!Number.isFinite(change60) || change60 <= 1e-9) {
+        return {...checked, allowed: false, reason: 'USDJPY_WICK_CUSHION_NOT_WIDENING'};
+      }
+    }
     const silverWickMinimum = 0.05;
     if (ctx.asset === 'SILVER' && (!Number.isFinite(checked.currentCushion) ||
         checked.currentCushion + 1e-9 < silverWickMinimum)) {
