@@ -6,10 +6,11 @@ const swingLookback = 6;
 const paperBudget = 20;
 
 export class FiveMinuteBars {
-  constructor() {
-    this.closed = [];
+  constructor(savedBars = []) {
+    this.closed = savedBars.slice(-24).map(bar => ({ ...bar }));
     this.current = null;
-    this.lastTs = -Infinity;
+    // The feed can replay its in-memory ticks. Completed candles are immutable.
+    this.lastTs = (this.closed.at(-1)?.end ?? -Infinity) - 1;
   }
 
   ingest(history, now) {

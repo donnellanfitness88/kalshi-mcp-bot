@@ -60,7 +60,7 @@ export class BtcLargeObserver {
     this.state=store.load()??{version:1,markets:{},totals:{windows:0,entries:0,wins:0,losses:0,net:0}};
     if(this.state.version!==1||!this.state.markets||!this.state.totals)throw new Error('Invalid BTC observation journal');
     this.pullbacks=new PullbackHistory();
-    this.chartBars=new FiveMinuteBars();
+    this.chartBars=new FiveMinuteBars(this.state.chartCandles);
     this.nextDiscovery=0;this.nextSettlement=0;this.current=null;this.busy=false;
   }
   emit(event){this.log({at:this.now(),observationOnly:true,...event});}
@@ -87,6 +87,19 @@ export class BtcLargeObserver {
     const recent=this.feed?.getHistory?.('BTC')??[];
     this.pullbacks.ingest(recent,this.now());
     const bars=this.chartBars.ingest(recent,this.now());
+    const latestBar=bars.at(-1);
+    if (latestBar && latestBar.end!==this.state.chartCandles?.at(-1)?.end) {
+      const savedBars=structuredClone(bars);
+      let consecutiveComplete=0;
+      for (let i=savedBars.length-1; i>=0; i--) {
+        const bar=savedBars[i], following=savedBars[i+1];
+        if (!bar.complete || (following && bar.end!==following.start)) break;
+        consecutiveComplete++;
+      }
+      this.persist({...this.state,chartCandles:savedBars},
+        {event:'CHART_CANDLE_SAVED',candleEnd:latestBar.end,
+          complete:latestBar.complete,consecutiveComplete,requiredComplete:11});
+    }
     const chart=chartReversal(bars);
     const market=this.current;if(!market)return;
     let seconds=(Date.parse(market.close_time)-this.now())/1000;
