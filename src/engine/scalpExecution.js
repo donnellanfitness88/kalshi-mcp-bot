@@ -196,6 +196,15 @@ export function createScalpExecutor(deps = {}) {
       ? repeatedCrossingGuard(projected, ctx.asset, distance.side, distance.target,
           ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset])
       : projected;
+    if (!wick && checked?.allowed && ctx.asset === 'USDJPY') {
+      const records = lateStages[ctx.s.ticker]?.records ?? {};
+      const hasLadderFill = Object.entries(records).some(
+        ([stageId, record]) => stageId !== wickStage.id && record.spent > 0
+      );
+      if (hasLadderFill && (!Number.isFinite(checked.dropUsd) || checked.dropUsd >= -1e-9)) {
+        return {...checked, allowed: false, reason: 'USDJPY_LADDER_ADD_CUSHION_NOT_WIDENING'};
+      }
+    }
     if (!wick || !checked?.allowed) return checked;
     if (ctx.asset === 'USDJPY') {
       const change60 = checked.longRecovery?.cushionChange60;
