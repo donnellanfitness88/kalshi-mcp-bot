@@ -1,3 +1,4 @@
+import { observeSettlementDefense, observePaperSpike, experimentOutcome } from './btcWickExperiments.js';
 import { PullbackHistory, observeWick, wickOutcome, updateWickTotals } from './btcWickStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,7 +11,7 @@ export const BTC_LARGE_RULES={budget:2500,maxSeconds:90,minPrice:.99,
   maxReferenceAgeMs:2000,maxBookAgeMs:2000};
 const BASE='https://api.elections.kalshi.com/trade-api/v2';
 export async function publicBtcObservationRead(route) {
-  if(route!=='/series/KXBTC15M'&&route!=='/markets?series_ticker=KXBTC15M&status=open&limit=100'&&
+  if(!/^\/markets\/trades\?ticker=KXBTC15M-[A-Z0-9-]+&limit=100$/.test(route)&&route!=='/series/KXBTC15M'&&route!=='/markets?series_ticker=KXBTC15M&status=open&limit=100'&&
     !/^\/markets\/KXBTC15M-[A-Z0-9-]+(?:\/orderbook\?depth=1)?$/.test(route))
     throw new Error('BTC observer route not allowed');
   const response=await fetch(BASE+route,{method:'GET',redirect:'error',signal:AbortSignal.timeout(8000)});
@@ -94,11 +95,33 @@ export class BtcLargeObserver {
       if(fresh?.ticker===market.ticker&&Number.isFinite(target)&&target>0){
         const next=structuredClone(this.state);next.markets[market.ticker].target=target;this.persist(next);}
     }
-    const started=this.now(),data=await this.read('/markets/'+market.ticker+'/orderbook?depth=1');
+    const started=this.now();
+    const tradeRequest = initial.spike?.entry ? Promise.resolve(null) :
+      this.read('/markets/trades?ticker='+market.ticker+'&limit=100')
+        .catch(error => { this.emit({event:'SPIKE_TRADE_READ_ERROR',message:error.message}); return null; });
+    const [data, trades] = await Promise.all([
+      this.read('/markets/'+market.ticker+'/orderbook?depth=1'), tradeRequest
+    ]);
     const at=this.now();seconds=(Date.parse(market.close_time)-at)/1000;
     if(at-started>2000||seconds<=0||seconds>=180)return;
     const book=metalBook(data),next=structuredClone(this.state),row=next.markets[market.ticker];
-    observeWick(row,book,this.feed?.getHistory?.('BTC')??[],at,this.pullbacks);
+    const history = this.feed?.getHistory?.('BTC') ?? [];
+    observeWick(row,book,history,at,this.pullbacks);
+    if (seconds <= 45 && !row.defense) {
+      row.defenseStudy ??= {ticker:row.ticker,closeTime:row.closeTime,target:row.target,
+        feeMultiplier:row.feeMultiplier};
+      observeWick(row.defenseStudy,book,history,at,this.pullbacks);
+      observeSettlementDefense(row,history);
+    }
+    if (book && !row.spike?.exit) {
+      const bidSize = side => {
+        const levels = data.orderbook_fp?.[side+'_dollars'] ?? data.orderbook?.[side+'_dollars'];
+        const bid = book[side+'Bid'];
+        return (levels ?? []).find(([price]) => Math.abs(Number(price)-bid)<1e-9)?.[1];
+      };
+      observePaperSpike(row,{...book,yesBidSize:Number(bidSize('yes')??0),
+        noBidSize:Number(bidSize('no')??0)},history,trades?.trades??[],at);
+    }
     if(seconds>=90||row.candidate){this.persist(next);return;}
     const estimate=estimateMetalEntry({book,stage:{budget:2500,minPrice:.99},feeMultiplier:row.feeMultiplier});
     const proposed=estimate&&estimate.count-estimate.estimatedCost>1e-9?estimate:null;
@@ -133,7 +156,7 @@ export class BtcLargeObserver {
     for(const old of closed.slice(512))delete next.markets[old.ticker];
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
-      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,
+      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
