@@ -1,3 +1,4 @@
+import { FiveMinuteBars, chartReversal, captureChartEntry, chartOutcome } from './btcChartReversal.js';
 import { observeSettlementDefense, observePaperSpike, experimentOutcome } from './btcWickExperiments.js';
 import { PullbackHistory, observeWick, wickOutcome, updateWickTotals } from './btcWickStudy.js';
 import fs from 'node:fs';
@@ -59,12 +60,14 @@ export class BtcLargeObserver {
     this.state=store.load()??{version:1,markets:{},totals:{windows:0,entries:0,wins:0,losses:0,net:0}};
     if(this.state.version!==1||!this.state.markets||!this.state.totals)throw new Error('Invalid BTC observation journal');
     this.pullbacks=new PullbackHistory();
+    this.chartBars=new FiveMinuteBars();
     this.nextDiscovery=0;this.nextSettlement=0;this.current=null;this.busy=false;
   }
   emit(event){this.log({at:this.now(),observationOnly:true,...event});}
   persist(next,event){this.store.save(next);this.state=next;if(event)this.emit(event);}
   async discover() {
-    if(this.now()<this.nextDiscovery)return;this.nextDiscovery=this.now()+60000;
+    if(this.now()<this.nextDiscovery && Date.parse(this.current?.close_time)>this.now())return;
+    if(this.now()<this.nextDiscovery && !this.current)return;this.nextDiscovery=this.now()+(this.current ? 60000 : 5000);
     if(!this.series){const {series}=await this.read('/series/KXBTC15M');
       if(series?.ticker!=='KXBTC15M'||series.frequency!=='fifteen_min'||series.fee_type!=='quadratic'||
         !Number.isFinite(Number(series.fee_multiplier)))throw new Error('Unexpected BTC fee metadata');this.series=series;}
@@ -83,10 +86,22 @@ export class BtcLargeObserver {
   async observe() {
     const recent=this.feed?.getHistory?.('BTC')??[];
     this.pullbacks.ingest(recent,this.now());
+    const bars=this.chartBars.ingest(recent,this.now());
+    const chart=chartReversal(bars);
     const market=this.current;if(!market)return;
     let seconds=(Date.parse(market.close_time)-this.now())/1000;
     if(seconds<=0){this.current=null;this.nextDiscovery=0;return;}
-    if(seconds>=180)return;
+    const activeChart=chart && this.now()-chart.confirmedAt<=30000 &&
+      chart.confirmedAt>=Date.parse(market.open_time);
+    const chartRow=this.state.markets[market.ticker];
+    if (activeChart && !chartRow.chartReversal) {
+      const next=structuredClone(this.state);
+      next.markets[market.ticker].chartReversal=chart;
+      this.persist(next,{event:'CHART_REVERSAL',ticker:market.ticker,...chart});
+    }
+    const savedChart=this.state.markets[market.ticker].chartReversal;
+    const chartNeedsQuote=savedChart && !savedChart.entry && this.now()-savedChart.confirmedAt<=30000;
+    if(seconds>=180 && !chartNeedsQuote)return;
     const initial=this.state.markets[market.ticker];
     if(!Number.isFinite(initial.target)&&this.now()>=(this.nextTarget??0)) {
       this.nextTarget=this.now()+15000;
@@ -96,15 +111,21 @@ export class BtcLargeObserver {
         const next=structuredClone(this.state);next.markets[market.ticker].target=target;this.persist(next);}
     }
     const started=this.now();
-    const tradeRequest = initial.spike?.entry ? Promise.resolve(null) :
+    const tradeRequest = seconds>=180 || initial.spike?.entry ? Promise.resolve(null) :
       this.read('/markets/trades?ticker='+market.ticker+'&limit=100')
         .catch(error => { this.emit({event:'SPIKE_TRADE_READ_ERROR',message:error.message}); return null; });
     const [data, trades] = await Promise.all([
       this.read('/markets/'+market.ticker+'/orderbook?depth=1'), tradeRequest
     ]);
     const at=this.now();seconds=(Date.parse(market.close_time)-at)/1000;
-    if(at-started>2000||seconds<=0||seconds>=180)return;
+    if(at-started>2000||seconds<=0)return;
     const book=metalBook(data),next=structuredClone(this.state),row=next.markets[market.ticker];
+    const chartEntered=captureChartEntry(row,book,at,started);
+    if (seconds>=180) {
+      if (chartEntered) this.persist(next,{event:'CHART_PAPER_ENTRY',ticker:row.ticker,...row.chartReversal.entry});
+      return;
+    }
+    if (chartEntered) this.persist(next,{event:'CHART_PAPER_ENTRY',ticker:row.ticker,...row.chartReversal.entry});
     const history = this.feed?.getHistory?.('BTC') ?? [];
     observeWick(row,book,history,at,this.pullbacks);
     if (seconds <= 45 && !row.defense) {
@@ -121,6 +142,10 @@ export class BtcLargeObserver {
       };
       observePaperSpike(row,{...book,yesBidSize:Number(bidSize('yes')??0),
         noBidSize:Number(bidSize('no')??0)},history,trades?.trades??[],at);
+    }
+    if (row.chartReversal && row.spike?.signal?.side===row.chartReversal.side &&
+        row.spike.signal.at>=row.chartReversal.confirmedAt) {
+      row.chartReversal.spikeConfirmationAt ??= row.spike.signal.at;
     }
     if(seconds>=90||row.candidate){this.persist(next);return;}
     const estimate=estimateMetalEntry({book,stage:{budget:2500,minPrice:.99},feeMultiplier:row.feeMultiplier});
@@ -156,7 +181,7 @@ export class BtcLargeObserver {
     for(const old of closed.slice(512))delete next.markets[old.ticker];
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
-      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),
+      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
