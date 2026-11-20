@@ -53,7 +53,7 @@ function connect() {
       const sourceTs = fast.includes(asset) ? sourceTime : Math.floor(sourceTime / 1000) * 1000;
       if (sourceTs <= (rows.at(-1)?.sourceTs ?? 0)) return;
       rows.push({ sourceTs, price });
-      history.set(asset, rows.filter(row => row.sourceTs >= at - 65000));
+      history.set(asset, rows.filter(row => row.sourceTs >= at - 125000));
     } catch { /* Malformed messages leave the last valid reading to expire. */ }
   });
   socket.on('error', error => console.warn('[CRYPTO_WICK] CF socket', error.message));

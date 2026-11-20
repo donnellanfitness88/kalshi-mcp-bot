@@ -689,7 +689,11 @@ export function createScalpExecutor(deps = {}) {
       const check = await proximity(ctx, signal);
       if (!check.allowed) { entryBlocked(asset, check.reason, { proximity: check }); return; }
       initialTier = cryptoWick ? checkCryptoTier(check) : null;
-      if (cryptoWick && !initialTier) { entryBlocked(asset, 'CRYPTO_WICK_TIER_UNCONFIRMED'); return; }
+      if (cryptoWick && !initialTier?.allowed) {
+        entryBlocked(asset, initialTier?.reason ?? 'CRYPTO_WICK_TIER_UNCONFIRMED',
+          initialTier ? { shrinkingGuard: initialTier } : undefined);
+        return;
+      }
       const shrink = cryptoWick ? initialTier : shrinkingCheck(ctx,check,signal.stage.budget,wick);
       if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
@@ -760,7 +764,11 @@ export function createScalpExecutor(deps = {}) {
     }
     const shrinkCheck = cryptoWick ? checkCryptoTier(distanceCheck) :
       distanceCheck ? shrinkingCheck(ctx,distanceCheck,fresh.stage.budget,wick) : null;
-    if (cryptoWick && !shrinkCheck) { entryBlocked(asset, 'CRYPTO_WICK_TIER_UNCONFIRMED'); return; }
+    if (cryptoWick && !shrinkCheck?.allowed) {
+      entryBlocked(asset, shrinkCheck?.reason ?? 'CRYPTO_WICK_TIER_UNCONFIRMED',
+        shrinkCheck ? { shrinkingGuard: shrinkCheck } : undefined);
+      return;
+    }
     if (cryptoWick) {
       stageBudget = Math.min(stageBudget, initialTier.budget, shrinkCheck.budget);
       count = lateStageSize(price, balance, stageBudget, feeMultiplier);
