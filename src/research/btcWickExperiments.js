@@ -68,12 +68,28 @@ export function observePaperSpike(row, book, history, trades, at) {
     const bid = side === 'yes' ? book?.yesBid : book?.noBid;
     const size = side === 'yes' ? book?.yesBidSize : book?.noBidSize;
     const age = at - spike.entry.at;
-    if (age < 4000 || !Number.isFinite(bid) || size < spike.entry.count) return;
-    const proceeds = bid * spike.entry.count - fee(spike.entry.count, bid, row.feeMultiplier);
-    const net = proceeds - spike.entry.estimatedCost;
+    const usableBid = Number.isFinite(bid) && Number.isFinite(size) && size >= spike.entry.count;
+    const netAtBid = () => bid * spike.entry.count -
+      fee(spike.entry.count, bid, row.feeMultiplier) - spike.entry.estimatedCost;
+    const pending = spike.pendingExit;
+    if (pending) {
+      if (at - pending.at < 1000) return;
+      const filled = usableBid && bid >= pending.limit;
+      const outcome = !Number.isFinite(bid) ? 'missing_bid' :
+        bid < pending.limit ? 'bid_below_limit' :
+        !usableBid ? 'insufficient_size' : 'filled';
+      (spike.exitAttempts ??= []).push({ ...pending, checkedAt: at,
+        delayMs: at - pending.at, observedBid: bid ?? null,
+        observedSize: size ?? null, outcome });
+      spike.pendingExit = null;
+      if (filled) spike.exit = { at, bid, net: netAtBid(), reason: pending.reason };
+      return;
+    }
+    if (age < 4000 || !usableBid) return;
+    const net = netAtBid();
     const perContract = net / spike.entry.count;
     if (age < 15000 && perContract < .03 && perContract > -.03) return;
-    spike.exit = { at, bid, net, reason: age >= 15000 ? 'time' : net > 0 ? 'target' : 'stop' };
+    spike.pendingExit = { at, limit: bid, reason: age >= 15000 ? 'time' : net > 0 ? 'target' : 'stop' };
     return;
   }
   if (spike.signal) {
