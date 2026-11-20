@@ -23,7 +23,7 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
 const wickAsset = asset => asset==='BTC' || isFourMarket(asset);
-const wickBudgetFor = asset => asset === 'SILVER' ? 1 : 100;
+const wickBudgetFor = asset => asset === 'SILVER' ? 50 : 200;
 const totalBudget = asset => lateBudgetFor(asset) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
 function saveJournal(value) {
