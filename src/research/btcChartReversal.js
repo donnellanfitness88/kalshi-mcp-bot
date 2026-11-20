@@ -96,3 +96,76 @@ export function chartOutcome(row) {
   return { ...chart, result: row.result, estimatedNet: entry ?
     (entry.side === row.result ? entry.count : 0) - entry.estimatedCost : null };
 }
+
+const scalpEntryCap = .31;
+const scalpExitTarget = .60;
+const scalpDelayMs = 1000;
+const scalpEntryMs = 30000;
+const scalpHoldMs = 240000;
+
+export function wickRejectionSignal(bars) {
+  if (bars.length < 7) return null;
+  const window = bars.slice(-7);
+  if (window.some((bar, i) => !bar.complete || (i && bar.start !== window[i - 1].end))) return null;
+  const candle = window.at(-1);
+  const prior = window.slice(0, -1);
+  const high = Math.max(...prior.map(bar => bar.high));
+  const low = Math.min(...prior.map(bar => bar.low));
+  const bearish = candle.high > high && candle.close < high;
+  const bullish = candle.low < low && candle.close > low;
+  if (bearish === bullish) return null;
+  return { confirmedAt: candle.end, side: bearish ? 'no' : 'yes',
+    swingLevel: bearish ? high : low, referenceClose: candle.close };
+}
+
+export function wickScalpNeedsBook(scalp, now) {
+  return !scalp.exit && (scalp.entry || now - scalp.confirmedAt <= scalpEntryMs);
+}
+
+export function observeWickRejectionScalp(scalp, book, bidSize, at, requestedAt, feeMultiplier) {
+  if (scalp.exit || !book) return;
+  if (!scalp.entry) {
+    const ask = book[scalp.side]?.price;
+    const age = at - scalp.confirmedAt;
+    if (requestedAt < scalp.confirmedAt + scalpDelayMs || age > scalpEntryMs ||
+        !(ask > 0 && ask <= scalpEntryCap)) return;
+    const entry = estimateMetalEntry({ book, side: scalp.side,
+      stage: { budget: paperBudget, minPrice: .001 }, feeMultiplier });
+    if (entry) scalp.entry = { ...entry, at };
+    return;
+  }
+  const bid = book[scalp.side + 'Bid'];
+  const size = bidSize(scalp.side);
+  const pending = scalp.pendingExit;
+  if (pending) {
+    if (requestedAt < pending.at + scalpDelayMs) return;
+    const outcome = !Number.isFinite(bid) || bid <= 0 ? 'missing_bid' :
+      bid < pending.limit ? 'bid_below_limit' :
+      !Number.isFinite(size) || size < scalp.entry.count ? 'insufficient_size' : 'filled';
+    (scalp.exitAttempts ??= []).push({ ...pending, checkedAt: at, delayMs: at - pending.at,
+      observedBid: bid ?? null, observedSize: size ?? null, outcome });
+    scalp.pendingExit = null;
+    if (outcome === 'filled') {
+      const count = scalp.entry.count;
+      const estimatedFee = Math.ceil(7 * feeMultiplier * count * bid * (1 - bid) - 1e-9) / 100;
+      scalp.exit = { at, bid, estimatedFee, reason: pending.reason,
+        net: count * bid - estimatedFee - scalp.entry.estimatedCost };
+    }
+    return;
+  }
+  const timeExit = at - scalp.confirmedAt >= scalpHoldMs;
+  if (Number.isFinite(bid) && bid > 0 && size >= scalp.entry.count && (timeExit || bid >= scalpExitTarget)) {
+    scalp.pendingExit = { at, limit: timeExit ? bid : scalpExitTarget,
+      reason: timeExit ? 'time' : 'target' };
+  }
+}
+
+export function wickRejectionScalpOutcomes(row) {
+  return Object.values(row.wickRejectionScalps ?? {}).map(scalp => {
+    const entry = scalp.entry;
+    return { ...scalp, result: row.result,
+      closedBy: scalp.exit ? 'simulated_bid' : entry ? 'settlement' : 'no_entry',
+      estimatedNet: !entry ? null : scalp.exit?.net ??
+        (entry.side === row.result ? entry.count : 0) - entry.estimatedCost };
+  });
+}

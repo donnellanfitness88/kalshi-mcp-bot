@@ -1,3 +1,4 @@
+import { wickRejectionSignal, wickScalpNeedsBook, observeWickRejectionScalp, wickRejectionScalpOutcomes } from './btcChartReversal.js';
 import { FiveMinuteBars, chartReversal, captureChartEntry, chartOutcome } from './btcChartReversal.js';
 import { observeSettlementDefense, observePaperSpike, experimentOutcome } from './btcWickExperiments.js';
 import { PullbackHistory, observeWick, wickOutcome, updateWickTotals } from './btcWickStudy.js';
@@ -101,6 +102,7 @@ export class BtcLargeObserver {
           complete:latestBar.complete,consecutiveComplete,requiredComplete:11});
     }
     const chart=chartReversal(bars);
+    const wickScalp=wickRejectionSignal(bars);
     const market=this.current;if(!market)return;
     let seconds=(Date.parse(market.close_time)-this.now())/1000;
     if(seconds<=0){this.current=null;this.nextDiscovery=0;return;}
@@ -112,9 +114,20 @@ export class BtcLargeObserver {
       next.markets[market.ticker].chartReversal=chart;
       this.persist(next,{event:'CHART_REVERSAL',ticker:market.ticker,...chart});
     }
+    const now=this.now();
+    if (wickScalp && wickScalp.confirmedAt > Date.parse(market.open_time) &&
+        now-wickScalp.confirmedAt <= 30000 && seconds > 60 &&
+        !this.state.markets[market.ticker].wickRejectionScalps?.[wickScalp.confirmedAt]) {
+      const next=structuredClone(this.state);
+      const scalps=next.markets[market.ticker].wickRejectionScalps ??= {};
+      scalps[wickScalp.confirmedAt]=wickScalp;
+      this.persist(next,{event:'WICK_REJECTION_SCALP_SIGNAL',ticker:market.ticker,...wickScalp});
+    }
+    const scalpNeedsQuote=Object.values(this.state.markets[market.ticker].wickRejectionScalps ?? {})
+      .some(scalp=>wickScalpNeedsBook(scalp,now));
     const savedChart=this.state.markets[market.ticker].chartReversal;
     const chartNeedsQuote=savedChart && !savedChart.entry && this.now()-savedChart.confirmedAt<=30000;
-    if(seconds>=180 && !chartNeedsQuote)return;
+    if(seconds>=180 && !chartNeedsQuote && !scalpNeedsQuote)return;
     const initial=this.state.markets[market.ticker];
     if(!Number.isFinite(initial.target)&&this.now()>=(this.nextTarget??0)) {
       this.nextTarget=this.now()+15000;
@@ -133,9 +146,18 @@ export class BtcLargeObserver {
     const at=this.now();seconds=(Date.parse(market.close_time)-at)/1000;
     if(at-started>2000||seconds<=0)return;
     const book=metalBook(data),next=structuredClone(this.state),row=next.markets[market.ticker];
+    const bidSize = side => {
+      const levels = data.orderbook_fp?.[side+'_dollars'] ?? data.orderbook?.[side+'_dollars'];
+      const bid = book[side+'Bid'];
+      return (levels ?? []).find(([price]) => Math.abs(Number(price)-bid)<1e-9)?.[1];
+    };
+    for (const scalp of Object.values(row.wickRejectionScalps ?? {})) {
+      if (wickScalpNeedsBook(scalp,at)) observeWickRejectionScalp(scalp,book,bidSize,at,started,row.feeMultiplier);
+    }
     const chartEntered=captureChartEntry(row,book,at,started);
     if (seconds>=180) {
       if (chartEntered) this.persist(next,{event:'CHART_PAPER_ENTRY',ticker:row.ticker,...row.chartReversal.entry});
+      else if (scalpNeedsQuote) this.persist(next);
       return;
     }
     if (chartEntered) this.persist(next,{event:'CHART_PAPER_ENTRY',ticker:row.ticker,...row.chartReversal.entry});
@@ -148,11 +170,6 @@ export class BtcLargeObserver {
       observeSettlementDefense(row,history);
     }
     if (book && !row.spike?.exit) {
-      const bidSize = side => {
-        const levels = data.orderbook_fp?.[side+'_dollars'] ?? data.orderbook?.[side+'_dollars'];
-        const bid = book[side+'Bid'];
-        return (levels ?? []).find(([price]) => Math.abs(Number(price)-bid)<1e-9)?.[1];
-      };
       observePaperSpike(row,{...book,yesBidSize:Number(bidSize('yes')??0),
         noBidSize:Number(bidSize('no')??0)},history,trades?.trades??[],at);
     }
@@ -194,7 +211,7 @@ export class BtcLargeObserver {
     for(const old of closed.slice(512))delete next.markets[old.ticker];
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
-      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),
+      wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),wickRejectionScalps:wickRejectionScalpOutcomes(r),
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
