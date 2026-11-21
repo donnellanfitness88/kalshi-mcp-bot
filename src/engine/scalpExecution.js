@@ -1,3 +1,4 @@
+import { advanceBtcStructureScalp } from '../research/btcRangeScalp.js';
 import { CRYPTO_WICK_TIERS, isCryptoWick, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
@@ -28,6 +29,7 @@ const btcChartTargetPerContract = 0.03;
 const btcChartHoldMs = 120000;
 const btcChartLegacyHoldMs = 240000;
 const btcChartConfirmationMs = 5000;
+const btcChartSetupWindowMs = 90000;
 const btcChartMaxReferenceGapMs = 1500;
 const btcChartMinEntryPrice = 0.05;
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
@@ -55,24 +57,37 @@ export function remainingSeconds(s, now = Date.now()) {
   if (Number.isFinite(s.marketCloseTs)) return (s.marketCloseTs - now) / 1000;
   return s.secsLeft - Math.max(0, now - (s.clockUpdatedAt ?? now)) / 1000;
 }
-function btcChartReferenceConfirmed(signal, history, now) {
-  if (now - signal.confirmedAt < btcChartConfirmationMs) return false;
-  const points = history.filter(point => point.sourceTs >= signal.confirmedAt && point.sourceTs <= now);
-  if (!points.length || now - points.at(-1).sourceTs > btcChartMaxReferenceGapMs ||
-      points.at(-1).sourceTs - signal.confirmedAt < btcChartConfirmationMs) return false;
-  return points.every((point, index) => {
-    const previousAt = index ? points[index - 1].sourceTs : signal.confirmedAt;
-    return point.sourceTs - previousAt <= btcChartMaxReferenceGapMs &&
-      (signal.side === 'yes' ? point.price > signal.swingLevel : point.price < signal.swingLevel);
-  });
+function btcChartStructure(signal, history, close, now) {
+  const points = history.filter(point => Number.isSafeInteger(point.sourceTs) &&
+    point.sourceTs >= signal.confirmedAt && point.sourceTs <= now &&
+    Number.isFinite(point.price) && point.price > 0);
+  const latest = points.at(-1);
+  if (!latest || now - latest.sourceTs > btcChartMaxReferenceGapMs) return null;
+
+  const candidates = [];
+  for (const [leg, side, sign] of [['up', 'yes', 1], ['down', 'no', -1]]) {
+    const study = {};
+    advanceBtcStructureScalp(study, leg, points, signal.confirmedAt, close, now);
+    const structure = study[leg + 'Signal'];
+    if (!structure || study.invalidated || latest.sourceTs - structure.at < btcChartConfirmationMs) continue;
+    if (side === signal.side && sign * (latest.price - signal.swingLevel) <= 0) continue;
+    const afterBreak = points.filter(point => point.sourceTs >= structure.at);
+    if (!afterBreak.every((point, index) =>
+      point.sourceTs - (afterBreak[index - 1]?.sourceTs ?? structure.at) <= btcChartMaxReferenceGapMs &&
+      sign * (point.price - structure.breakLevel) > 0)) continue;
+    candidates.push({ ...structure, side });
+  }
+  return candidates.sort((a, b) => b.at - a.at)[0] ?? null;
 }
 
-function btcChartQuote(book, signal) {
-  const ask = book?.[signal.side];
-  const bid = book?.[signal.side + 'Bid'];
-  if (!ask || !Number.isFinite(bid) || bid <= 0 || bid > ask.price) return null;
-  const fee = price => 0.07 * signal.feeMultiplier * price * (1 - price);
-  return { ...ask, bid, cushionAfterFees: bid - ask.price - fee(ask.price) - fee(bid) };
+function btcChartStructureStop(trade, history, now) {
+  const structure = trade.chartSignal.structure;
+  if (!structure) return null;
+  const sign = trade.side === 'yes' ? 1 : -1;
+  return history.find(point => Number.isSafeInteger(point.sourceTs) &&
+    point.sourceTs >= (trade.chartSignal.entrySubmittedAt ?? structure.at) && point.sourceTs <= now &&
+    Number.isFinite(point.price) && point.price > 0 &&
+    sign * (point.price - structure.retestPrice) <= 0) ?? null;
 }
 
 function completedMinuteStart(now) {
@@ -319,12 +334,10 @@ export function createScalpExecutor(deps = {}) {
   let lateEntryTickers = [];
   let btcChartAttemptedTickers = [];
   let btcChartSignal = null;
-  let btcChartOpeningQuote = null;
 
   function queueBtcWickSignal(signal) {
     if (!btcChartSignal || signal.confirmedAt > btcChartSignal.confirmedAt) {
       btcChartSignal = signal;
-      btcChartOpeningQuote = null;
     }
   }
   let lateStages = {};
@@ -859,7 +872,7 @@ export function createScalpExecutor(deps = {}) {
     const eligible = () => {
       const now = Date.now();
       return btcChartSignal === signal && s.ticker === signal.ticker && !s.activeTrade && remainingSeconds(s, now) > 60 &&
-        now >= signal.confirmedAt + 1000 && now <= signal.confirmedAt + 30000 &&
+        now >= signal.confirmedAt + 1000 && now <= signal.confirmedAt + btcChartSetupWindowMs &&
         process.env.SCALP_ENABLED === 'true' && !simulated() && s.farmArmed &&
         !shared.disabledAssets.includes(asset) && compatibleHoldings(s, 'SCALP', false);
     };
@@ -870,28 +883,25 @@ export function createScalpExecutor(deps = {}) {
       return;
     }
     if (!Number.isFinite(signal.feeMultiplier) || signal.feeMultiplier <= 0) return;
-    const readQuote = async () => {
-      const requestedAt = Date.now();
-      const book = metalBook(await api.getMarketOrderbook(signal.ticker, 1));
-      if (!eligible() || Date.now() - requestedAt > 2000) return null;
-      return btcChartQuote(book, signal);
+    const structureFor = () => {
+      const now = Date.now();
+      return btcChartStructure(signal, getReferenceHistory(asset),
+        now + remainingSeconds(s, now) * 1000, now);
     };
-    if (!btcChartOpeningQuote) {
-      btcChartOpeningQuote = await readQuote();
-      return;
-    }
-    const referenceConfirmed = () => btcChartReferenceConfirmed(
-      signal, getReferenceHistory(asset), Date.now()
-    );
-    const quoteConfirmed = quote => quote && quote.price >= btcChartMinEntryPrice &&
-      quote.bid > btcChartOpeningQuote.bid &&
-      quote.cushionAfterFees + 1e-9 >= btcChartOpeningQuote.cushionAfterFees;
-    if (!referenceConfirmed() || !quoteConfirmed(await readQuote())) return;
-    if (!await accountFlat()) return;
+    const structure = structureFor();
+    if (!structure || !await accountFlat()) return;
     const balance = (await api.getBalance(exchangeForAsset(asset))) / 100;
-    if (!Number.isFinite(balance) || balance <= 0) return;
-    const quote = await readQuote();
-    if (!quoteConfirmed(quote) || !referenceConfirmed()) return;
+    if (!Number.isFinite(balance) || balance <= 0 || !eligible()) return;
+    const requestedAt = Date.now();
+    const book = metalBook(await api.getMarketOrderbook(signal.ticker, 1));
+    if (!eligible() || Date.now() - requestedAt > 2000) return;
+    const latest = structureFor();
+    if (latest?.side !== structure.side || latest.at !== structure.at) return;
+    const quote = book?.[structure.side];
+    const bid = book?.[structure.side + 'Bid'];
+    if (!quote || !Number.isFinite(quote.price) || quote.price < btcChartMinEntryPrice ||
+        quote.price >= 1 || !Number.isFinite(quote.size) ||
+        !Number.isFinite(bid) || bid <= 0 || bid > quote.price) return;
     const risk = checkRiskGuards(s, balance);
     if (risk.blocked) {
       entryBlocked(asset, risk.reason, { strategy: btcChartTrade });
@@ -904,15 +914,14 @@ export function createScalpExecutor(deps = {}) {
     if (count < 1 ||
         count * (1 - quote.price) - lateFee(count, quote.price, signal.feeMultiplier) <
           btcChartTargetPerContract * count) return;
-    const direction = signal.side === 'yes' ? 'UP' : 'DOWN';
+    const direction = structure.side === 'yes' ? 'UP' : 'DOWN';
     const body = buildDirectionalLateBuyBody(signal.ticker, direction, count, quote.price);
-    await submit({ kind: 'entry', asset, mode: 'SCALP', side: signal.side, direction, body,
-      chartSignal: { ...signal, holdMs: btcChartHoldMs },
-      chartConfirmation: {
-        elapsedMs: Date.now() - signal.confirmedAt, openingBid: btcChartOpeningQuote.bid,
-        openingAsk: btcChartOpeningQuote.price, confirmedBid: quote.bid, confirmedAsk: quote.price
-      },
-      sim: false, entrySecondsRemaining: remainingSeconds(s), startedAt: Date.now() });
+    const startedAt = Date.now();
+    await submit({ kind: 'entry', asset, mode: 'SCALP', side: structure.side, direction, body,
+      chartSignal: { ...signal, side: structure.side, wickSide: signal.side, structure,
+        entrySubmittedAt: startedAt, holdMs: btcChartHoldMs },
+      chartConfirmation: { wickSide: signal.side, ...structure, bid, ask: quote.price },
+      sim: false, entrySecondsRemaining: remainingSeconds(s), startedAt });
   }
 
   async function reconcileExternal(ctx, suppliedPositions) {
@@ -1033,6 +1042,13 @@ export function createScalpExecutor(deps = {}) {
       return;
     }
     if (process.env.DRY_RUN === 'true') return;
+    if (!trade.chartSignal.stopTriggeredAt) {
+      const stop = btcChartStructureStop(trade, getReferenceHistory(ctx.asset), Date.now());
+      if (stop) {
+        trade.chartSignal.stopTriggeredAt = stop.sourceTs;
+        persist();
+      }
+    }
     const positions = await api.getPositions();
     if (remainingHeldContracts(positions, trade) !== trade.count) {
       await reconcileExternal(ctx, positions);
@@ -1045,14 +1061,17 @@ export function createScalpExecutor(deps = {}) {
     const bid = book?.[trade.side + 'Bid'];
     if (!Number.isFinite(bid) || bid <= 0 || bid >= 1) return;
     const holdMs = trade.chartSignal.holdMs ?? btcChartLegacyHoldMs;
-    const timeExit = Date.now() - trade.chartSignal.confirmedAt >= holdMs;
+    const stopExit = Boolean(trade.chartSignal.stopTriggeredAt);
+    const timerStart = trade.chartSignal.entrySubmittedAt ?? trade.chartSignal.confirmedAt;
+    const timeExit = Date.now() - timerStart >= holdMs;
     const net = trade.count * bid - lateFee(trade.count, bid, trade.chartSignal.feeMultiplier)
       - trade.amount - trade.entryFees;
-    if (!timeExit && net < btcChartTargetPerContract * trade.count) return;
+    if (!stopExit && !timeExit && net < btcChartTargetPerContract * trade.count) return;
     const body = buildSellBody(trade.ticker, trade.side, trade.count);
     body.price = (trade.side === 'yes' ? bid : 1 - bid).toFixed(4);
     await submit({ kind: 'exit', asset, side: trade.side, body, sim: false,
-      reason: timeExit ? 'BTC_CHART_TIME_EXIT' : 'BTC_CHART_PROFIT_EXIT', startedAt: Date.now() });
+      reason: stopExit ? 'BTC_CHART_STRUCTURE_STOP' : timeExit ? 'BTC_CHART_TIME_EXIT' :
+        'BTC_CHART_PROFIT_EXIT', startedAt: Date.now() });
   }
 
   async function exit(ctx) {
