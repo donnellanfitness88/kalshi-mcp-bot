@@ -136,7 +136,7 @@ export function observeWickRejectionScalp(scalp, book, bidSize, at, requestedAt,
     return;
   }
   const bid = book[scalp.side + 'Bid'];
-  const size = bidSize(scalp.side);
+  const size = Number(bidSize(scalp.side));
   const count = scalp.entry.count;
   const estimatedFee = Math.ceil(7 * feeMultiplier * count * bid * (1 - bid) - 1e-9) / 100;
   const net = count * bid - estimatedFee - scalp.entry.estimatedCost;

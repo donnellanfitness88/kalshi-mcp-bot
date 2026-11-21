@@ -56,8 +56,8 @@ export function evaluateBtcLarge({history,quote,target,side,secondsRemaining,now
 
 export class BtcLargeObserver {
   constructor({feed,read=publicBtcObservationRead,store=btcLargeStore(),now=Date.now,
-    log=e=>console.log('[BTC_LARGE_OBSERVER] '+JSON.stringify(e))}={}) {
-    Object.assign(this,{feed,read,store,now,log});
+    onWickSignal, log=e=>console.log('[BTC_LARGE_OBSERVER] '+JSON.stringify(e))}={}) {
+    Object.assign(this,{feed,read,store,now,log,onWickSignal});
     this.state=store.load()??{version:1,markets:{},totals:{windows:0,entries:0,wins:0,losses:0,net:0}};
     if(this.state.version!==1||!this.state.markets||!this.state.totals)throw new Error('Invalid BTC observation journal');
     this.pullbacks=new PullbackHistory();
@@ -122,6 +122,9 @@ export class BtcLargeObserver {
       const scalps=next.markets[market.ticker].wickRejectionScalps ??= {};
       scalps[wickScalp.confirmedAt]=wickScalp;
       this.persist(next,{event:'WICK_REJECTION_SCALP_SIGNAL',ticker:market.ticker,...wickScalp});
+      this.onWickSignal?.({
+        ...wickScalp, ticker: market.ticker, feeMultiplier: Number(this.series.fee_multiplier)
+      });
     }
     const scalpNeedsQuote=Object.values(this.state.markets[market.ticker].wickRejectionScalps ?? {})
       .some(scalp=>wickScalpNeedsBook(scalp,now));
