@@ -4,7 +4,9 @@ import { wickMetrics } from '../research/btcWickStudy.js';
 export const CRYPTO_WICK_ASSETS = ['SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC'];
 export const isCryptoWick = asset => CRYPTO_WICK_ASSETS.includes(asset);
 export const cryptoWickEnabled = () => process.env.CRYPTO_WICK_LIVE_ENABLED === 'true';
-export const CRYPTO_WICK_TIERS = [
+export const CRYPTO_WICK_TIERS = [{ bps: 32.5, budget: 100 }];
+
+const ETH_WICK_PAPER_TIERS = [
   { bps: 50, budget: 100 },
   { bps: 37.5, budget: 50 },
   { bps: 32.5, budget: 20 },
@@ -52,7 +54,9 @@ export function cryptoWickTier({ history, asset, ticker, side, target, close, no
   const cooldown = cryptoWickCooldown({ history, asset, ticker, side, target, now, remaining, guards });
   if (cooldown) return cooldown;
   let qualified = null;
-  for (const tier of CRYPTO_WICK_TIERS) {
+  const isEthPaper = asset === 'ETH';
+  const tiers = isEthPaper ? ETH_WICK_PAPER_TIERS : CRYPTO_WICK_TIERS;
+  for (const tier of tiers) {
     const floor = target * tier.bps / 10000;
     const key = ticker + ':' + side + ':' + tier.bps;
     const check = evaluateShrinkingCushion({
@@ -60,7 +64,7 @@ export function cryptoWickTier({ history, asset, ticker, side, target, close, no
       now, previous: guards[key], requireLongRecovery: true, stabilizationSeconds: 5,
     });
     if (check.guardState) guards[key] = check.guardState;
-    if (qualified || !check.allowed) continue;
+    if (qualified || !check.allowed || (!isEthPaper && check.currentCushion <= floor + 1e-9)) continue;
     const wick = wickMetrics(history, now, target, side === 'yes' ? 1 : -1, close, floor);
     if (wick?.heldMs >= 5000) qualified = { ...check, ...tier, floor, wickHeldMs: wick.heldMs };
   }
