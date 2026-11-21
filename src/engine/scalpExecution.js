@@ -25,7 +25,11 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 const btcChartBudget = 10;
 const btcChartTrade = 'btc_wick_rejection';
 const btcChartTargetPerContract = 0.03;
-const btcChartHoldMs = 240000;
+const btcChartHoldMs = 120000;
+const btcChartLegacyHoldMs = 240000;
+const btcChartConfirmationMs = 5000;
+const btcChartMaxReferenceGapMs = 1500;
+const btcChartMinEntryPrice = 0.05;
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
 const wickAsset = asset => asset==='BTC' || isFourMarket(asset) || isCryptoWick(asset);
 const wickBudgetFor = asset => isCryptoWick(asset) ? CRYPTO_WICK_TIERS[0].budget : 200;
@@ -51,6 +55,26 @@ export function remainingSeconds(s, now = Date.now()) {
   if (Number.isFinite(s.marketCloseTs)) return (s.marketCloseTs - now) / 1000;
   return s.secsLeft - Math.max(0, now - (s.clockUpdatedAt ?? now)) / 1000;
 }
+function btcChartReferenceConfirmed(signal, history, now) {
+  if (now - signal.confirmedAt < btcChartConfirmationMs) return false;
+  const points = history.filter(point => point.sourceTs >= signal.confirmedAt && point.sourceTs <= now);
+  if (!points.length || now - points.at(-1).sourceTs > btcChartMaxReferenceGapMs ||
+      points.at(-1).sourceTs - signal.confirmedAt < btcChartConfirmationMs) return false;
+  return points.every((point, index) => {
+    const previousAt = index ? points[index - 1].sourceTs : signal.confirmedAt;
+    return point.sourceTs - previousAt <= btcChartMaxReferenceGapMs &&
+      (signal.side === 'yes' ? point.price > signal.swingLevel : point.price < signal.swingLevel);
+  });
+}
+
+function btcChartQuote(book, signal) {
+  const ask = book?.[signal.side];
+  const bid = book?.[signal.side + 'Bid'];
+  if (!ask || !Number.isFinite(bid) || bid <= 0 || bid > ask.price) return null;
+  const fee = price => 0.07 * signal.feeMultiplier * price * (1 - price);
+  return { ...ask, bid, cushionAfterFees: bid - ask.price - fee(ask.price) - fee(bid) };
+}
+
 function completedMinuteStart(now) {
   return Math.floor(now / 60000) * 60000 - 60000;
 }
@@ -295,10 +319,12 @@ export function createScalpExecutor(deps = {}) {
   let lateEntryTickers = [];
   let btcChartAttemptedTickers = [];
   let btcChartSignal = null;
+  let btcChartOpeningQuote = null;
 
   function queueBtcWickSignal(signal) {
     if (!btcChartSignal || signal.confirmedAt > btcChartSignal.confirmedAt) {
       btcChartSignal = signal;
+      btcChartOpeningQuote = null;
     }
   }
   let lateStages = {};
@@ -376,7 +402,8 @@ export function createScalpExecutor(deps = {}) {
       save(saved);
       s.activeTrade = next; lateStages = nextStages; pending = null;
       log({ event: 'ENTRY_CONFIRMED', asset: p.asset, ...fill, sim: p.sim, mode: p.mode,
-        side: p.side, stage: p.stageId, strategy: next.strategy, ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard, totalContracts: next.count, totalCost: next.originalCost });
+        side: p.side, stage: p.stageId, strategy: next.strategy, chartConfirmation: p.chartConfirmation,
+        ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard, totalContracts: next.count, totalCost: next.originalCost });
       return;
     } else if (p.kind === 'entry' && p.stageId && !fill.count) {
       const saved = snapshot(); saved.pending = null;
@@ -831,7 +858,7 @@ export function createScalpExecutor(deps = {}) {
         s.activeTrade || btcChartAttemptedTickers.includes(signal.ticker)) return;
     const eligible = () => {
       const now = Date.now();
-      return s.ticker === signal.ticker && !s.activeTrade && remainingSeconds(s, now) > 60 &&
+      return btcChartSignal === signal && s.ticker === signal.ticker && !s.activeTrade && remainingSeconds(s, now) > 60 &&
         now >= signal.confirmedAt + 1000 && now <= signal.confirmedAt + 30000 &&
         process.env.SCALP_ENABLED === 'true' && !simulated() && s.farmArmed &&
         !shared.disabledAssets.includes(asset) && compatibleHoldings(s, 'SCALP', false);
@@ -842,16 +869,29 @@ export function createScalpExecutor(deps = {}) {
       entryBlocked(asset, localRisk.reason, { strategy: btcChartTrade });
       return;
     }
+    if (!Number.isFinite(signal.feeMultiplier) || signal.feeMultiplier <= 0) return;
+    const readQuote = async () => {
+      const requestedAt = Date.now();
+      const book = metalBook(await api.getMarketOrderbook(signal.ticker, 1));
+      if (!eligible() || Date.now() - requestedAt > 2000) return null;
+      return btcChartQuote(book, signal);
+    };
+    if (!btcChartOpeningQuote) {
+      btcChartOpeningQuote = await readQuote();
+      return;
+    }
+    const referenceConfirmed = () => btcChartReferenceConfirmed(
+      signal, getReferenceHistory(asset), Date.now()
+    );
+    const quoteConfirmed = quote => quote && quote.price >= btcChartMinEntryPrice &&
+      quote.bid > btcChartOpeningQuote.bid &&
+      quote.cushionAfterFees + 1e-9 >= btcChartOpeningQuote.cushionAfterFees;
+    if (!referenceConfirmed() || !quoteConfirmed(await readQuote())) return;
     if (!await accountFlat()) return;
     const balance = (await api.getBalance(exchangeForAsset(asset))) / 100;
-    if (!Number.isFinite(balance) || balance <= 0 ||
-        !Number.isFinite(signal.feeMultiplier) || signal.feeMultiplier <= 0) return;
-    const bookRequestedAt = Date.now();
-    const book = metalBook(await api.getMarketOrderbook(signal.ticker, 1));
-    const quote = book?.[signal.side];
-    if (!eligible() || Date.now() - bookRequestedAt > 2000 ||
-        !Number.isFinite(quote?.price) || quote.price < 0.001 || quote.price >= 1 ||
-        !Number.isFinite(quote.size)) return;
+    if (!Number.isFinite(balance) || balance <= 0) return;
+    const quote = await readQuote();
+    if (!quoteConfirmed(quote) || !referenceConfirmed()) return;
     const risk = checkRiskGuards(s, balance);
     if (risk.blocked) {
       entryBlocked(asset, risk.reason, { strategy: btcChartTrade });
@@ -867,7 +907,12 @@ export function createScalpExecutor(deps = {}) {
     const direction = signal.side === 'yes' ? 'UP' : 'DOWN';
     const body = buildDirectionalLateBuyBody(signal.ticker, direction, count, quote.price);
     await submit({ kind: 'entry', asset, mode: 'SCALP', side: signal.side, direction, body,
-      chartSignal: signal, sim: false, entrySecondsRemaining: remainingSeconds(s), startedAt: Date.now() });
+      chartSignal: { ...signal, holdMs: btcChartHoldMs },
+      chartConfirmation: {
+        elapsedMs: Date.now() - signal.confirmedAt, openingBid: btcChartOpeningQuote.bid,
+        openingAsk: btcChartOpeningQuote.price, confirmedBid: quote.bid, confirmedAsk: quote.price
+      },
+      sim: false, entrySecondsRemaining: remainingSeconds(s), startedAt: Date.now() });
   }
 
   async function reconcileExternal(ctx, suppliedPositions) {
@@ -999,7 +1044,8 @@ export function createScalpExecutor(deps = {}) {
         s.activeTrade !== trade || remainingSeconds(s) <= 0) return;
     const bid = book?.[trade.side + 'Bid'];
     if (!Number.isFinite(bid) || bid <= 0 || bid >= 1) return;
-    const timeExit = Date.now() - trade.chartSignal.confirmedAt >= btcChartHoldMs;
+    const holdMs = trade.chartSignal.holdMs ?? btcChartLegacyHoldMs;
+    const timeExit = Date.now() - trade.chartSignal.confirmedAt >= holdMs;
     const net = trade.count * bid - lateFee(trade.count, bid, trade.chartSignal.feeMultiplier)
       - trade.amount - trade.entryFees;
     if (!timeExit && net < btcChartTargetPerContract * trade.count) return;
