@@ -7,7 +7,7 @@ export const cryptoWickEnabled = () => process.env.CRYPTO_WICK_LIVE_ENABLED === 
 export const CRYPTO_WICK_TIERS = [
   { bps: 50, budget: 100 },
   { bps: 37.5, budget: 50 },
-  { bps: 25, budget: 20 },
+  { bps: 32.5, budget: 20 },
 ];
 
 const cooldownSeconds = 60;
