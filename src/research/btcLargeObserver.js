@@ -1,3 +1,5 @@
+import { advanceBtcRangeScalp, btcRangeScalpNeedsBook, btcRangeScalpOutcome,
+  BTC_RANGE_SCALP_RULES, sampleBtcRangeScalp } from './btcRangeScalp.js';
 import { wickRejectionSignal, wickScalpNeedsBook, observeWickRejectionScalp, wickRejectionScalpOutcomes } from './btcChartReversal.js';
 import { FiveMinuteBars, chartReversal, captureChartEntry, chartOutcome } from './btcChartReversal.js';
 import { observeSettlementDefense, observePaperSpike, experimentOutcome } from './btcWickExperiments.js';
@@ -346,6 +348,45 @@ export class BtcLargeObserver {
         ticker, ...sample });
     }
   }
+  async observeRangeScalp() {
+    const market = this.current;
+    if (!market) return;
+    const ticker = market.ticker;
+    const row = this.state.markets[ticker];
+    const close = Date.parse(market.close_time);
+    const now = this.now();
+    if (!row || now >= close) return;
+    if (this.rangeScalpTicker !== ticker) {
+      this.rangeScalpTicker = ticker;
+      this.rangeScalp = structuredClone(row.rangeScalp ?? {});
+    }
+    const study = structuredClone(this.rangeScalp);
+    const open = Math.max(Date.parse(market.open_time), row.startedAt);
+    const prior = { ...study };
+    advanceBtcRangeScalp(study, this.feed?.getHistory?.('BTC') ?? [], open, close, now);
+    const changes = [];
+    for (const phase of ['downSignal', 'supportTouch', 'upSignal', 'invalidated']) {
+      if (!prior[phase] && study[phase]) {
+        changes.push({ phase, ...(phase === 'invalidated' ? { reason: study[phase] } : study[phase]) });
+      }
+    }
+    if (btcRangeScalpNeedsBook(study, now, close)) {
+      try {
+        const data = await this.read('/markets/' + ticker + '/orderbook?depth=1');
+        changes.push(...sampleBtcRangeScalp(
+          study, metalBook(data), row.feeMultiplier, now, this.now(), close));
+      } catch (error) {
+        this.emit({ event: 'RANGE_SCALP_QUOTE_ERROR', ticker, message: error.message });
+      }
+    }
+    if (changes.length || prior.downExitReason !== study.downExitReason ||
+        prior.upExitReason !== study.upExitReason) {
+      this.persist({ ...this.state, markets: { ...this.state.markets,
+        [ticker]: { ...row, rangeScalp: study } } });
+      for (const change of changes) this.emit({ event: 'RANGE_SCALP_PAPER', ticker, ...change });
+    }
+    this.rangeScalp = study;
+  }
   async settleOne() {
     if(this.now()<this.nextSettlement)return;this.nextSettlement=this.now()+60000;
     const pending=Object.values(this.state.markets).filter(r=>!r.result&&Date.parse(r.closeTime)<=this.now());
@@ -370,17 +411,18 @@ export class BtcLargeObserver {
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
       wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),wickRejectionScalps:wickRejectionScalpOutcomes(r),
-      failedRetest:r.failedRetest,failedPullback:r.failedPullback,
+      failedRetest:r.failedRetest,failedPullback:r.failedPullback,rangeScalp:btcRangeScalpOutcome(r.rangeScalp,r.result),
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
   async tick(){if(this.busy)return;this.busy=true;try{
     try{await this.discover();await this.observe();}catch(e){this.emit({event:'READ_ERROR',message:e.message});}
     try{await this.observeFailedRetest();}catch(e){this.emit({event:'FAILED_RETEST_READ_ERROR',message:e.message});}
+    try{await this.observeRangeScalp();}catch(e){this.emit({event:'RANGE_SCALP_READ_ERROR',message:e.message});}
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
   }finally{this.busy=false;}}
   start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
-    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,
+    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,rangeScalpPaper:BTC_RANGE_SCALP_RULES,
     executionModel:'ONE_SNAPSHOT_PER_WINDOW_TOP_LEVEL_VOLUME_NO_FILL_RETRIES'});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;}
   stop(){clearInterval(this.timer);}
