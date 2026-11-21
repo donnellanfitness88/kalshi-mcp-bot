@@ -11,6 +11,60 @@ import {evaluateShrinkingCushion} from '../engine/shrinkingCushion.js';
 export const BTC_LARGE_RULES={budget:2500,maxSeconds:90,minPrice:.99,
   minimumCushion:50,momentumSeconds:2,rangeSeconds:60,rangeMultiple:1.5,
   maxReferenceAgeMs:2000,maxBookAgeMs:2000};
+export const BTC_FAILED_RETEST_RULES = Object.freeze({
+  breakBelowTarget: 5, nearTarget: 10, minBounce: 10, turnDown: 5, breakBelowLow: 5,
+  reclaimTarget: 3, maxReferenceGapMs: 2000, maxQuoteDelayMs: 7000, paperBudget: 10,
+});
+
+export function advanceBtcFailedRetest(tracker, points, target, open, close, now) {
+  const rules = BTC_FAILED_RETEST_RULES;
+  const events = [];
+  for (const { sourceTs, price } of points) {
+    if (tracker.done) break;
+    if (!Number.isFinite(price) || price <= 0 || !Number.isSafeInteger(sourceTs) ||
+        sourceTs < open || sourceTs >= close || sourceTs > now || sourceTs <= tracker.lastAt) continue;
+    const gap = tracker.lastAt && sourceTs - tracker.lastAt > rules.maxReferenceGapMs;
+    tracker.lastAt = sourceTs;
+    if (gap || price >= target + rules.reclaimTarget) {
+      if (tracker.early) {
+        tracker.done = true;
+        events.push({ phase: 'invalidated', signalAt: sourceTs, reference: price,
+          reason: gap ? 'REFERENCE_GAP' : 'TARGET_RECLAIMED' });
+        break;
+      }
+      tracker.seenTarget = false;
+      tracker.low = null;
+      tracker.high = null;
+    }
+    if (price >= target) tracker.seenTarget = true;
+    if (!tracker.seenTarget) continue;
+    if (tracker.early) {
+      if (price < tracker.low - rules.breakBelowLow) {
+        tracker.done = true;
+        events.push({ phase: 'confirmed', signalAt: sourceTs, reference: price,
+          priorLow: tracker.low, bounceHigh: tracker.high });
+      }
+      continue;
+    }
+    if (tracker.high == null && (tracker.low == null || price < tracker.low)) {
+      if (price <= target - rules.breakBelowTarget) tracker.low = price;
+      continue;
+    }
+    if (price >= target - rules.nearTarget && price >= tracker.low + rules.minBounce) {
+      tracker.high = Math.max(tracker.high ?? price, price);
+    }
+    if (tracker.high == null || price > tracker.high - rules.turnDown) continue;
+    tracker.early = true;
+    events.push({ phase: 'turn', signalAt: sourceTs, reference: price,
+      priorLow: tracker.low, bounceHigh: tracker.high });
+    if (price < tracker.low - rules.breakBelowLow) {
+      tracker.done = true;
+      events.push({ ...events.at(-1), phase: 'confirmed' });
+    }
+  }
+  return events;
+}
+
 const BASE='https://api.elections.kalshi.com/trade-api/v2';
 export async function publicBtcObservationRead(route) {
   if(!/^\/markets\/trades\?ticker=KXBTC15M-[A-Z0-9-]+&limit=100$/.test(route)&&route!=='/series/KXBTC15M'&&route!=='/markets?series_ticker=KXBTC15M&status=open&limit=100'&&
@@ -199,6 +253,74 @@ export class BtcLargeObserver {
     }
     this.persist(next,event);
   }
+  async observeFailedRetest() {
+    const market = this.current;
+    if (!market) return;
+    const ticker = market.ticker, close = Date.parse(market.close_time);
+    const now = this.now();
+    const row = this.state.markets[ticker];
+    if (!row || now >= close || row.failedRetest?.confirmed || row.failedRetest?.invalidated) return;
+    if (this.failedRetestTicker !== ticker) {
+      this.failedRetestTicker = ticker;
+      this.failedRetestTracker = row.failedRetest?.turn
+        ? { early: true, seenTarget: true, lastAt: row.failedRetest.turn.signalAt,
+            low: row.failedRetest.turn.priorLow, high: row.failedRetest.turn.bounceHigh }
+        : { lastAt: 0 };
+      this.failedRetestTarget = null;
+      this.nextFailedRetestTarget = 0;
+    }
+    if (!this.failedRetestTarget && now >= this.nextFailedRetestTarget) {
+      this.nextFailedRetestTarget = now + 15000;
+      const { market: details } = await this.read('/markets/' + ticker);
+      const target = Number(details?.floor_strike);
+      if (details?.ticker === ticker && details.strike_type === 'greater_or_equal' &&
+          Date.parse(details.close_time) === close && Number.isFinite(target) && target > 0) {
+        this.failedRetestTarget = target;
+      }
+    }
+    if (!this.failedRetestTarget) return;
+    const at = this.now();
+    const target = this.failedRetestTarget;
+    const tracker = { ...this.failedRetestTracker };
+    const events = advanceBtcFailedRetest(tracker,
+      this.feed?.getHistory?.('BTC') ?? [], target, Math.max(Date.parse(market.open_time), row.startedAt),
+      close, at);
+    if (!events.length) {
+      this.failedRetestTracker = tracker;
+      return;
+    }
+    const rules = BTC_FAILED_RETEST_RULES;
+    let book, quoteAt;
+    if (events.some(event => event.phase !== 'invalidated' && at - event.signalAt <= rules.maxQuoteDelayMs)) {
+      try {
+        const data = await this.read('/markets/' + ticker + '/orderbook?depth=1');
+        const receivedAt = this.now();
+        if (receivedAt - at <= 2000 && receivedAt < close) {
+          book = metalBook(data);
+          quoteAt = receivedAt;
+        }
+      } catch (error) {
+        this.emit({ event: 'FAILED_RETEST_QUOTE_ERROR', ticker, message: error.message });
+      }
+    }
+    const next = structuredClone(this.state);
+    const study = next.markets[ticker].failedRetest ??= {};
+    const samples = events.map(event => {
+      const quote = event.phase !== 'invalidated' && quoteAt != null &&
+          quoteAt - event.signalAt <= rules.maxQuoteDelayMs
+        ? book?.no : null;
+      const entry = quote ? estimateMetalEntry({ book: { no: quote }, side: 'no',
+        stage: { budget: rules.paperBudget, minPrice: .001 }, feeMultiplier: row.feeMultiplier }) : null;
+      const sample = { ...event, target, quoteAt: quote ? quoteAt : null,
+        quoteDelayMs: quote ? quoteAt - event.signalAt : null,
+        downAsk: quote?.price ?? null, displayedSize: quote?.size ?? null, entry };
+      study[event.phase] = sample;
+      return sample;
+    });
+    this.persist(next);
+    this.failedRetestTracker = tracker;
+    for (const sample of samples) this.emit({ event: 'FAILED_RETEST_PAPER', ticker, ...sample });
+  }
   async settleOne() {
     if(this.now()<this.nextSettlement)return;this.nextSettlement=this.now()+60000;
     const pending=Object.values(this.state.markets).filter(r=>!r.result&&Date.parse(r.closeTime)<=this.now());
@@ -212,17 +334,27 @@ export class BtcLargeObserver {
     updateWickTotals(next.wickTotals??={},r);
     const closed=Object.values(next.markets).filter(r=>r.result).sort((a,b)=>b.settledAt-a.settledAt);
     for(const old of closed.slice(512))delete next.markets[old.ticker];
+    if (r.failedRetest) {
+      const { turn, confirmed, invalidated } = r.failedRetest;
+      const outcome = sample => sample?.entry
+        ? (r.result === 'no' ? sample.entry.count : 0) - sample.entry.estimatedCost : null;
+      r.failedRetest.outcome = { turnNet: outcome(turn), confirmedNet: outcome(confirmed),
+        confirmed: Boolean(confirmed), invalidated: invalidated?.reason ?? null };
+    }
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
       wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),wickRejectionScalps:wickRejectionScalpOutcomes(r),
+      failedRetest:r.failedRetest,
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
   async tick(){if(this.busy)return;this.busy=true;try{
     try{await this.discover();await this.observe();}catch(e){this.emit({event:'READ_ERROR',message:e.message});}
+    try{await this.observeFailedRetest();}catch(e){this.emit({event:'FAILED_RETEST_READ_ERROR',message:e.message});}
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
   }finally{this.busy=false;}}
   start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
+    failedRetestPaper:BTC_FAILED_RETEST_RULES,
     executionModel:'ONE_SNAPSHOT_PER_WINDOW_TOP_LEVEL_VOLUME_NO_FILL_RETRIES'});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;}
   stop(){clearInterval(this.timer);}
