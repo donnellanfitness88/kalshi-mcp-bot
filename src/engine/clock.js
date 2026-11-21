@@ -379,7 +379,7 @@ if (now % 60000 < 1000) {
     if (!s.ticker || s.yesAsk === null) {
       if (isManagedTrade(s.activeTrade) || scalpExecutor.snapshot().pending ||
           (asset === 'BTC' && s.ticker && process.env.SCALP_ENABLED === 'true' &&
-           s.marketCloseTs > now && s.marketCloseTs - now < 240000)) {
+           s.marketCloseTs > now && s.marketCloseTs - now < 180000)) {
         await scalpExecutor.tick({ asset, s, balance: state.balance ?? 0 });
       }
       continue;

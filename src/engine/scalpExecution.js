@@ -623,8 +623,7 @@ export function createScalpExecutor(deps = {}) {
     const cryptoWick = isCryptoWick(asset);
     if (cryptoWick && (!wick || !cryptoWickEnabled())) return;
     const originalTicker = s.ticker;
-    const wickMaxSeconds = asset === 'BTC' ? 240 : 180;
-    const wickWindowOpen = () => remainingSeconds(s)>0 && remainingSeconds(s)<wickMaxSeconds;
+    const wickWindowOpen = () => remainingSeconds(s)>0 && remainingSeconds(s)<180;
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
         lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
     if (isFourMarket(asset)) {
