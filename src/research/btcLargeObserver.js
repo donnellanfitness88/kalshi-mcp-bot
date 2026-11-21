@@ -16,47 +16,54 @@ export const BTC_FAILED_RETEST_RULES = Object.freeze({
   reclaimTarget: 3, maxReferenceGapMs: 2000, maxQuoteDelayMs: 7000, paperBudget: 10,
 });
 
-export function advanceBtcFailedRetest(tracker, points, target, open, close, now) {
+export function advanceBtcFailedRetest(tracker, points, target, open, close, now, side = 'no') {
   const rules = BTC_FAILED_RETEST_RULES;
   const events = [];
-  for (const { sourceTs, price } of points) {
+  // Mirror bullish prices so both directions use the same thresholds.
+  const direction = side === 'yes' ? -1 : 1;
+  const level = direction * target;
+  const extrema = () => side === 'yes'
+    ? { priorHigh: -tracker.low, pullbackLow: -tracker.high }
+    : { priorLow: tracker.low, bounceHigh: tracker.high };
+  for (const { sourceTs, price: reference } of points) {
     if (tracker.done) break;
-    if (!Number.isFinite(price) || price <= 0 || !Number.isSafeInteger(sourceTs) ||
+    if (!Number.isFinite(reference) || reference <= 0 || !Number.isSafeInteger(sourceTs) ||
         sourceTs < open || sourceTs >= close || sourceTs > now || sourceTs <= tracker.lastAt) continue;
+    const price = direction * reference;
     const gap = tracker.lastAt && sourceTs - tracker.lastAt > rules.maxReferenceGapMs;
     tracker.lastAt = sourceTs;
-    if (gap || price >= target + rules.reclaimTarget) {
+    if (gap || price >= level + rules.reclaimTarget) {
       if (tracker.early) {
         tracker.done = true;
-        events.push({ phase: 'invalidated', signalAt: sourceTs, reference: price,
-          reason: gap ? 'REFERENCE_GAP' : 'TARGET_RECLAIMED' });
+        events.push({ phase: 'invalidated', signalAt: sourceTs, reference,
+          reason: gap ? 'REFERENCE_GAP' : side === 'yes' ? 'TARGET_LOST' : 'TARGET_RECLAIMED' });
         break;
       }
       tracker.seenTarget = false;
       tracker.low = null;
       tracker.high = null;
     }
-    if (price >= target) tracker.seenTarget = true;
+    if (price >= level) tracker.seenTarget = true;
     if (!tracker.seenTarget) continue;
     if (tracker.early) {
       if (price < tracker.low - rules.breakBelowLow) {
         tracker.done = true;
-        events.push({ phase: 'confirmed', signalAt: sourceTs, reference: price,
-          priorLow: tracker.low, bounceHigh: tracker.high });
+        events.push({ phase: 'confirmed', signalAt: sourceTs, reference,
+          ...extrema() });
       }
       continue;
     }
     if (tracker.high == null && (tracker.low == null || price < tracker.low)) {
-      if (price <= target - rules.breakBelowTarget) tracker.low = price;
+      if (price <= level - rules.breakBelowTarget) tracker.low = price;
       continue;
     }
-    if (price >= target - rules.nearTarget && price >= tracker.low + rules.minBounce) {
+    if (price >= level - rules.nearTarget && price >= tracker.low + rules.minBounce) {
       tracker.high = Math.max(tracker.high ?? price, price);
     }
     if (tracker.high == null || price > tracker.high - rules.turnDown) continue;
     tracker.early = true;
-    events.push({ phase: 'turn', signalAt: sourceTs, reference: price,
-      priorLow: tracker.low, bounceHigh: tracker.high });
+    events.push({ phase: 'turn', signalAt: sourceTs, reference,
+      ...extrema() });
     if (price < tracker.low - rules.breakBelowLow) {
       tracker.done = true;
       events.push({ ...events.at(-1), phase: 'confirmed' });
@@ -259,13 +266,24 @@ export class BtcLargeObserver {
     const ticker = market.ticker, close = Date.parse(market.close_time);
     const now = this.now();
     const row = this.state.markets[ticker];
-    if (!row || now >= close || row.failedRetest?.confirmed || row.failedRetest?.invalidated) return;
+    if (!row || now >= close) return;
+    const studies = { no: 'failedRetest', yes: 'failedPullback' };
+    const activeSides = ['no', 'yes'].filter(side => {
+      const study = row[studies[side]];
+      return !study?.confirmed && !study?.invalidated;
+    });
+    if (!activeSides.length) return;
     if (this.failedRetestTicker !== ticker) {
       this.failedRetestTicker = ticker;
-      this.failedRetestTracker = row.failedRetest?.turn
-        ? { early: true, seenTarget: true, lastAt: row.failedRetest.turn.signalAt,
-            low: row.failedRetest.turn.priorLow, high: row.failedRetest.turn.bounceHigh }
-        : { lastAt: 0 };
+      this.failedRetestTrackers = {};
+      for (const side of activeSides) {
+        const turn = row[studies[side]]?.turn;
+        this.failedRetestTrackers[side] = turn
+          ? { early: true, seenTarget: true, lastAt: turn.signalAt,
+              low: side === 'yes' ? -turn.priorHigh : turn.priorLow,
+              high: side === 'yes' ? -turn.pullbackLow : turn.bounceHigh }
+          : { lastAt: 0 };
+      }
       this.failedRetestTarget = null;
       this.nextFailedRetestTarget = 0;
     }
@@ -281,12 +299,15 @@ export class BtcLargeObserver {
     if (!this.failedRetestTarget) return;
     const at = this.now();
     const target = this.failedRetestTarget;
-    const tracker = { ...this.failedRetestTracker };
-    const events = advanceBtcFailedRetest(tracker,
-      this.feed?.getHistory?.('BTC') ?? [], target, Math.max(Date.parse(market.open_time), row.startedAt),
-      close, at);
+    const trackers = structuredClone(this.failedRetestTrackers);
+    const history = this.feed?.getHistory?.('BTC') ?? [];
+    const open = Math.max(Date.parse(market.open_time), row.startedAt);
+    const events = activeSides.flatMap(side =>
+      advanceBtcFailedRetest(trackers[side], history, target, open, close, at, side)
+        .map(event => ({ ...event, side })));
+    events.sort((a, b) => a.signalAt - b.signalAt);
     if (!events.length) {
-      this.failedRetestTracker = tracker;
+      this.failedRetestTrackers = trackers;
       return;
     }
     const rules = BTC_FAILED_RETEST_RULES;
@@ -304,22 +325,26 @@ export class BtcLargeObserver {
       }
     }
     const next = structuredClone(this.state);
-    const study = next.markets[ticker].failedRetest ??= {};
     const samples = events.map(event => {
       const quote = event.phase !== 'invalidated' && quoteAt != null &&
           quoteAt - event.signalAt <= rules.maxQuoteDelayMs
-        ? book?.no : null;
-      const entry = quote ? estimateMetalEntry({ book: { no: quote }, side: 'no',
+        ? book?.[event.side] : null;
+      const entry = quote ? estimateMetalEntry({ book: { [event.side]: quote }, side: event.side,
         stage: { budget: rules.paperBudget, minPrice: .001 }, feeMultiplier: row.feeMultiplier }) : null;
       const sample = { ...event, target, quoteAt: quote ? quoteAt : null,
         quoteDelayMs: quote ? quoteAt - event.signalAt : null,
-        downAsk: quote?.price ?? null, displayedSize: quote?.size ?? null, entry };
+        [event.side === 'yes' ? 'upAsk' : 'downAsk']: quote?.price ?? null,
+        displayedSize: quote?.size ?? null, entry };
+      const study = next.markets[ticker][studies[event.side]] ??= {};
       study[event.phase] = sample;
       return sample;
     });
     this.persist(next);
-    this.failedRetestTracker = tracker;
-    for (const sample of samples) this.emit({ event: 'FAILED_RETEST_PAPER', ticker, ...sample });
+    this.failedRetestTrackers = trackers;
+    for (const sample of samples) {
+      this.emit({ event: sample.side === 'yes' ? 'FAILED_PULLBACK_PAPER' : 'FAILED_RETEST_PAPER',
+        ticker, ...sample });
+    }
   }
   async settleOne() {
     if(this.now()<this.nextSettlement)return;this.nextSettlement=this.now()+60000;
@@ -334,17 +359,18 @@ export class BtcLargeObserver {
     updateWickTotals(next.wickTotals??={},r);
     const closed=Object.values(next.markets).filter(r=>r.result).sort((a,b)=>b.settledAt-a.settledAt);
     for(const old of closed.slice(512))delete next.markets[old.ticker];
-    if (r.failedRetest) {
-      const { turn, confirmed, invalidated } = r.failedRetest;
+    for (const [study, side] of [[r.failedRetest, 'no'], [r.failedPullback, 'yes']]) {
+      if (!study) continue;
+      const { turn, confirmed, invalidated } = study;
       const outcome = sample => sample?.entry
-        ? (r.result === 'no' ? sample.entry.count : 0) - sample.entry.estimatedCost : null;
-      r.failedRetest.outcome = { turnNet: outcome(turn), confirmedNet: outcome(confirmed),
+        ? (r.result === side ? sample.entry.count : 0) - sample.entry.estimatedCost : null;
+      study.outcome = { turnNet: outcome(turn), confirmedNet: outcome(confirmed),
         confirmed: Boolean(confirmed), invalidated: invalidated?.reason ?? null };
     }
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
       wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),wickRejectionScalps:wickRejectionScalpOutcomes(r),
-      failedRetest:r.failedRetest,
+      failedRetest:r.failedRetest,failedPullback:r.failedPullback,
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
@@ -354,7 +380,7 @@ export class BtcLargeObserver {
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
   }finally{this.busy=false;}}
   start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
-    failedRetestPaper:BTC_FAILED_RETEST_RULES,
+    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,
     executionModel:'ONE_SNAPSHOT_PER_WINDOW_TOP_LEVEL_VOLUME_NO_FILL_RETRIES'});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;}
   stop(){clearInterval(this.timer);}
