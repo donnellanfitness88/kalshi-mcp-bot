@@ -1,8 +1,13 @@
 import WebSocket from 'ws';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildHeaders } from '../kalshi/client.js';
-import { scalpExecutor } from './scalpExecution.js';
+import { benchmarkFeed } from '../prices/cfBenchmarks.js';
+import { metalBook } from '../research/metalsObserver.js';
+import { lateFee, lateStageSize, scalpExecutor } from './scalpExecution.js';
 import { state } from './state.js';
-import { CRYPTO_WICK_ASSETS as assets, cryptoWickEnabled } from './cryptoWickTiers.js';
+import { CRYPTO_WICK_ASSETS as assets, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
 
 const fast = ['SOL', 'XRP', 'DOGE'];
 const slow = assets.filter(asset => !fast.includes(asset));
@@ -123,8 +128,135 @@ async function tick() {
   }
 }
 
+function startEthWickObserver() {
+  const asset = 'ETH';
+  const log = event => console.log('[ETH_WICK_PAPER] ' + JSON.stringify({ asset, ...event }));
+  const directory = process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url));
+  const file = path.join(directory, 'eth_wick_paper.json');
+  let positions = {};
+  try {
+    positions = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  let reference = [];
+  let guardTicker;
+  let guards = {};
+  let checkedMarket;
+  let nextMarketCheck = 0;
+  let nextSettlement = 0;
+  let busy = false;
+
+  function save(ticker, position) {
+    const next = { ...positions, [ticker]: position };
+    const settled = Object.keys(next).filter(key => next[key].result);
+    for (const key of settled.slice(0, Math.max(0, settled.length - 192))) delete next[key];
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(file + '.tmp', JSON.stringify(next));
+    fs.renameSync(file + '.tmp', file);
+    positions = next;
+  }
+
+  function updateReference(now) {
+    const latest = reference.at(-1)?.sourceTs ?? 0;
+    reference = reference.concat(benchmarkFeed.getHistory(asset).filter(point => point.sourceTs > latest))
+      .filter(point => point.sourceTs >= now - 125000);
+  }
+
+  async function tickPaper() {
+    const now = Date.now();
+    updateReference(now);
+    if (now >= nextSettlement) {
+      nextSettlement = now + 15000;
+      for (const position of Object.values(positions)) {
+        if (position.result || position.close > now) continue;
+        const { market } = await read('/markets/' + position.ticker);
+        if (market?.ticker !== position.ticker || market.status !== 'finalized' ||
+            !['yes', 'no'].includes(market.result)) continue;
+        const payout = market.result === position.side ? position.count : 0;
+        const settled = { ...position, result: market.result, payout, pnl: payout - position.cost };
+        save(position.ticker, settled);
+        log({ event: 'SETTLED', ...settled });
+      }
+    }
+
+    const { market, series } = await discover(asset, now);
+    const close = Date.parse(market?.close_time);
+    const ticker = market?.ticker;
+    const remaining = close - Date.now();
+    if (!(remaining > 0 && remaining < 180000) || positions[ticker] ||
+        series?.fee_type !== 'quadratic' || series.fee_multiplier == null) return;
+    const feeMultiplier = Number(series.fee_multiplier);
+    if (!Number.isFinite(feeMultiplier) || feeMultiplier < 0) return;
+    if (guardTicker !== ticker) {
+      guardTicker = ticker;
+      guards = {};
+      checkedMarket = null;
+      nextMarketCheck = 0;
+    }
+    if (!checkedMarket && now >= nextMarketCheck) {
+      nextMarketCheck = now + 5000;
+      const { market: details } = await read('/markets/' + ticker);
+      if (details?.ticker === ticker && ['open', 'active'].includes(details.status) &&
+          details.strike_type === 'greater_or_equal' && Date.parse(details.close_time) === close &&
+          Number.isFinite(Number(details.floor_strike)) && Number(details.floor_strike) > 0) {
+        checkedMarket = details;
+      }
+    }
+    if (!checkedMarket) return;
+    const target = Number(checkedMarket.floor_strike);
+    const eligibleQuote = price => price >= 0.90 && price < 1 &&
+      (close - Date.now() < 120000 || price <= 0.979);
+    const readBook = async () => {
+      const requestedAt = Date.now();
+      const book = metalBook(await read('/markets/' + ticker + '/orderbook?depth=1'));
+      return Date.now() - requestedAt <= 2000 && Date.now() < close ? book : null;
+    };
+    const tierFor = side => {
+      const checkedAt = Date.now();
+      updateReference(checkedAt);
+      return cryptoWickTier({ history: reference, asset, ticker, side, target, close, now: checkedAt, guards });
+    };
+    const book = await readBook();
+    const side = ['yes', 'no'].find(key => eligibleQuote(book?.[key]?.price) && book[key].size >= 1);
+    if (!side) return;
+    const initialTier = tierFor(side);
+    if (!initialTier?.allowed) return;
+    const quote = (await readBook())?.[side];
+    if (!quote || !eligibleQuote(quote.price) || quote.price !== book[side].price) return;
+    const finalTier = tierFor(side);
+    if (!finalTier?.allowed) return;
+    const tier = initialTier.budget <= finalTier.budget ? initialTier : finalTier;
+    const { budget, bps } = tier;
+    const count = Math.min(Math.floor(quote.size), lateStageSize(quote.price, budget, budget, feeMultiplier));
+    const fee = lateFee(count, quote.price, feeMultiplier);
+    if (count < 1 || count * (1 - quote.price) <= fee) return;
+    const position = { ticker, close, side, target, bps, budget, price: quote.price, count, fee,
+      cost: count * quote.price + fee, cushion: finalTier.currentCushion,
+      wickHeldMs: finalTier.wickHeldMs, enteredAt: Date.now() };
+    save(ticker, position);
+    log({ event: 'ENTRY', ...position });
+  }
+
+  const run = async () => {
+    if (busy) return;
+    busy = true;
+    try { await tickPaper(); }
+    catch (error) { log({ event: 'ERROR', message: error.message }); }
+    finally { busy = false; }
+  };
+  log({ event: 'STARTED', paper: true });
+  void run();
+  const timer = setInterval(run, 1000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 export function startCryptoWickRunner() {
   const enabled = cryptoWickEnabled();
+  let stopEthWickObserver;
+  try { stopEthWickObserver = startEthWickObserver(); }
+  catch (error) { console.warn('[ETH_WICK_PAPER] Startup failed', error.message); }
   if (enabled) { stopped = false; connect(); }
   console.log('[CRYPTO_WICK] ' + JSON.stringify({ event: 'STARTED', enabled, assets }));
   const run = () => void tick().catch(error => console.warn('[CRYPTO_WICK]', error.message));
@@ -132,6 +264,7 @@ export function startCryptoWickRunner() {
   const timer = setInterval(run, 1000);
   timer.unref?.();
   return () => {
+    stopEthWickObserver?.();
     stopped = true;
     clearInterval(timer);
     clearInterval(watchdog);
