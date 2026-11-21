@@ -5,9 +5,9 @@ export const CRYPTO_WICK_ASSETS = ['SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 
 export const isCryptoWick = asset => CRYPTO_WICK_ASSETS.includes(asset);
 export const cryptoWickEnabled = () => process.env.CRYPTO_WICK_LIVE_ENABLED === 'true';
 export const CRYPTO_WICK_TIERS = [
-  { bps: 50, budget: 10 },
-  { bps: 37.5, budget: 5 },
-  { bps: 25, budget: 2 },
+  { bps: 50, budget: 100 },
+  { bps: 37.5, budget: 50 },
+  { bps: 25, budget: 20 },
 ];
 
 const cooldownSeconds = 60;

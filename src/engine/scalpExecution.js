@@ -1,4 +1,4 @@
-import { isCryptoWick, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
+import { CRYPTO_WICK_TIERS, isCryptoWick, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
 import { MANAGED_ASSETS, isFourMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS } from './lateMarkets.js';
@@ -28,7 +28,7 @@ const btcChartTargetPerContract = 0.03;
 const btcChartHoldMs = 240000;
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
 const wickAsset = asset => asset==='BTC' || isFourMarket(asset) || isCryptoWick(asset);
-const wickBudgetFor = asset => isCryptoWick(asset) ? 10 : 200;
+const wickBudgetFor = asset => isCryptoWick(asset) ? CRYPTO_WICK_TIERS[0].budget : 200;
 const hasIndependentRisk = asset => isFourMarket(asset) || isCryptoWick(asset);
 const totalBudget = asset => (isCryptoWick(asset) ? 0 : lateBudgetFor(asset)) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
