@@ -107,7 +107,7 @@ export function btcRangeScalpNeedsBook(study, now, close) {
     (study.upEntry && !study.upExit) || entrySide(study, now, close));
 }
 
-export function sampleBtcRangeScalp(study, book, feeMultiplier, requestedAt, at, close) {
+export function sampleBtcRangeScalp(study, book, feeMultiplier, requestedAt, at, close, { downProfitTarget = false } = {}) {
   if (at >= close || at - requestedAt > rules.maxBookReadMs) return [];
   const changes = [];
   for (const [leg, opposite] of [['down', 'yes'], ['up', 'no']]) {
@@ -124,7 +124,7 @@ export function sampleBtcRangeScalp(study, book, feeMultiplier, requestedAt, at,
       study.invalidated ?? (at - study.lastAt > rules.maxReferenceGapMs ? 'STALE_REFERENCE' :
         close - at <= rules.forceExitBeforeCloseMs ? 'NEAR_CLOSE' :
         at - entry.at >= rules.maxHoldMs ? 'MAX_HOLD' :
-        size >= entry.count && leg === 'up' && perContract >= rules.netProfitPerContract - 1e-9 ? 'NET_PROFIT_TARGET' :
+        size >= entry.count && (leg === 'up' || downProfitTarget) && perContract >= rules.netProfitPerContract - 1e-9 ? 'NET_PROFIT_TARGET' :
         perContract != null && perContract <= -rules.maxNetLossPerContract + 1e-9 ? 'NET_LOSS_LIMIT' : null);
     const reason = study[leg + 'ExitReason'];
     if (!reason) continue;
@@ -166,4 +166,65 @@ export function btcRangeScalpOutcome(study, result) {
       estimatedNet: exit?.net ??
         (entry ? (entry.side === result ? entry.count : 0) - entry.estimatedCost : null) }];
   }));
+}
+
+export const BTC_STRUCTURE_RULES = Object.freeze({
+  impulseUsd: 20,
+  bounceUsd: 10,
+  pullbackUsd: 5,
+});
+
+export function advanceBtcStructureScalp(study, leg, history, open, close, now) {
+  const signalKey = leg + 'Signal';
+  if (study.invalidated || study[leg + 'Exit']) return;
+  // Mirroring prices lets the same swing logic detect lower highs on the Down side.
+  const sign = leg === 'up' ? 1 : -1;
+  const config = BTC_STRUCTURE_RULES;
+  for (const { sourceTs: at, price } of history) {
+    if (!Number.isSafeInteger(at) || at < open || at >= close || at > now ||
+        at <= (study.lastAt ?? 0) || !Number.isFinite(price) || price <= 0) continue;
+    const point = sign * price;
+    if (study.lastAt && at - study.lastAt > rules.maxReferenceGapMs) {
+      if (study[signalKey]) {
+        study.invalidated = 'REFERENCE_GAP';
+        return;
+      }
+      study.origin = study.extreme = study.bounce = study.retest = null;
+    }
+    study.lastAt = at;
+    const signal = study[signalKey];
+    if (signal) {
+      if (point <= sign * signal.retestPrice) {
+        study.invalidated = 'STRUCTURE_RETEST_BROKE';
+        return;
+      }
+      if (leg === 'down' && signal.support != null && !study.supportTouch &&
+          price <= signal.support + rules.nearPriorLowUsd) {
+        study.supportTouch = { at, price };
+      }
+      continue;
+    }
+    study.origin ??= point;
+    if (study.extreme == null && point > study.origin) study.origin = point;
+    if (study.extreme == null || point <= study.extreme) {
+      study.extreme = study.origin - point >= config.impulseUsd ? point : null;
+      study.bounce = study.retest = null;
+      continue;
+    }
+    if (study.retest != null && point > study.bounce) {
+      const support = -study.origin;
+      study[signalKey] = {
+        at, price, extremePrice: sign * study.extreme, retestPrice: sign * study.retest,
+        breakLevel: sign * study.bounce,
+        ...(leg === 'down' ? { support: price > support + rules.nearPriorLowUsd ? support : null } : {}),
+      };
+      continue;
+    }
+    if (point - study.extreme >= config.bounceUsd && study.retest == null) {
+      study.bounce = Math.max(study.bounce ?? point, point);
+    }
+    if (study.bounce != null && point <= study.bounce - config.pullbackUsd) {
+      study.retest = Math.min(study.retest ?? point, point);
+    }
+  }
 }

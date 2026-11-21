@@ -1,5 +1,5 @@
-import { advanceBtcRangeScalp, btcRangeScalpNeedsBook, btcRangeScalpOutcome,
-  BTC_RANGE_SCALP_RULES, sampleBtcRangeScalp } from './btcRangeScalp.js';
+import { advanceBtcRangeScalp, advanceBtcStructureScalp, btcRangeScalpNeedsBook,
+  btcRangeScalpOutcome, BTC_RANGE_SCALP_RULES, BTC_STRUCTURE_RULES, sampleBtcRangeScalp } from './btcRangeScalp.js';
 import { wickRejectionSignal, wickScalpNeedsBook, observeWickRejectionScalp, wickRejectionScalpOutcomes } from './btcChartReversal.js';
 import { FiveMinuteBars, chartReversal, captureChartEntry, chartOutcome } from './btcChartReversal.js';
 import { observeSettlementDefense, observePaperSpike, experimentOutcome } from './btcWickExperiments.js';
@@ -359,33 +359,57 @@ export class BtcLargeObserver {
     if (this.rangeScalpTicker !== ticker) {
       this.rangeScalpTicker = ticker;
       this.rangeScalp = structuredClone(row.rangeScalp ?? {});
+      this.structureScalp = structuredClone(row.structureScalp ?? { up: {}, down: {} });
     }
-    const study = structuredClone(this.rangeScalp);
+    const baseline = structuredClone(this.rangeScalp);
+    const structure = structuredClone(this.structureScalp);
+    const cases = [
+      { study: baseline, variant: null },
+      { study: structure.up, variant: 'structure', leg: 'up' },
+      { study: structure.down, variant: 'structure', leg: 'down' },
+    ];
     const open = Math.max(Date.parse(market.open_time), row.startedAt);
-    const prior = { ...study };
-    advanceBtcRangeScalp(study, this.feed?.getHistory?.('BTC') ?? [], open, close, now);
+    const history = this.feed?.getHistory?.('BTC') ?? [];
+    let changed = false;
     const changes = [];
-    for (const phase of ['downSignal', 'supportTouch', 'upSignal', 'invalidated']) {
-      if (!prior[phase] && study[phase]) {
-        changes.push({ phase, ...(phase === 'invalidated' ? { reason: study[phase] } : study[phase]) });
+    for (const test of cases) {
+      const { study, leg } = test;
+      test.prior = { ...study };
+      if (leg) advanceBtcStructureScalp(study, leg, history, open, close, now);
+      else advanceBtcRangeScalp(study, history, open, close, now);
+      for (const phase of ['downSignal', 'supportTouch', 'upSignal', 'invalidated']) {
+        if (!test.prior[phase] && study[phase]) {
+          changes.push({ variant: test.variant, leg, phase,
+            ...(phase === 'invalidated' ? { reason: study[phase] } : study[phase]) });
+        }
       }
     }
-    if (btcRangeScalpNeedsBook(study, now, close)) {
+    const active = cases.filter(({ study }) => btcRangeScalpNeedsBook(study, now, close));
+    if (active.length) {
       try {
         const data = await this.read('/markets/' + ticker + '/orderbook?depth=1');
-        changes.push(...sampleBtcRangeScalp(
-          study, metalBook(data), row.feeMultiplier, now, this.now(), close));
+        const book = metalBook(data), at = this.now();
+        for (const { study, variant, leg, prior } of active) {
+          const samples = sampleBtcRangeScalp(study, book, row.feeMultiplier, now, at, close,
+            { downProfitTarget: leg === 'down' && study.downSignal?.support == null });
+          for (const sample of samples) changes.push({ variant, leg, ...sample });
+          changed ||= prior.downExitReason !== study.downExitReason ||
+            prior.upExitReason !== study.upExitReason;
+        }
       } catch (error) {
         this.emit({ event: 'RANGE_SCALP_QUOTE_ERROR', ticker, message: error.message });
       }
     }
-    if (changes.length || prior.downExitReason !== study.downExitReason ||
-        prior.upExitReason !== study.upExitReason) {
+    if (changes.length || changed) {
       this.persist({ ...this.state, markets: { ...this.state.markets,
-        [ticker]: { ...row, rangeScalp: study } } });
-      for (const change of changes) this.emit({ event: 'RANGE_SCALP_PAPER', ticker, ...change });
+        [ticker]: { ...row, rangeScalp: baseline, structureScalp: structure } } });
+      for (const { variant, leg, ...change } of changes) {
+        this.emit(variant ? { event: 'STRUCTURE_SCALP_PAPER', ticker, leg, ...change } :
+          { event: 'RANGE_SCALP_PAPER', ticker, ...change });
+      }
     }
-    this.rangeScalp = study;
+    this.rangeScalp = baseline;
+    this.structureScalp = structure;
   }
   async settleOne() {
     if(this.now()<this.nextSettlement)return;this.nextSettlement=this.now()+60000;
@@ -412,6 +436,8 @@ export class BtcLargeObserver {
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
       wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),wickRejectionScalps:wickRejectionScalpOutcomes(r),
       failedRetest:r.failedRetest,failedPullback:r.failedPullback,rangeScalp:btcRangeScalpOutcome(r.rangeScalp,r.result),
+      structureScalp:r.structureScalp && Object.fromEntries(['up','down'].map(leg =>
+        [leg, btcRangeScalpOutcome(r.structureScalp[leg],r.result)?.[leg]])),
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
@@ -422,7 +448,7 @@ export class BtcLargeObserver {
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
   }finally{this.busy=false;}}
   start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
-    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,rangeScalpPaper:BTC_RANGE_SCALP_RULES,
+    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,rangeScalpPaper:BTC_RANGE_SCALP_RULES,structureScalpPaper:BTC_STRUCTURE_RULES,
     executionModel:'ONE_SNAPSHOT_PER_WINDOW_TOP_LEVEL_VOLUME_NO_FILL_RETRIES'});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;}
   stop(){clearInterval(this.timer);}
