@@ -540,6 +540,59 @@ export class BtcLargeObserver {
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
+  async captureTaapiDownQuote(market, sample) {
+    const ticker = market.ticker;
+    const close = Date.parse(market.close_time);
+    const row = this.state.markets[ticker];
+    const reference = this.feed?.getQuote?.('BTC');
+    const rules = BTC_FAILED_RETEST_RULES;
+    let target = row?.target ?? (this.failedRetestTicker === ticker ? this.failedRetestTarget : null);
+    let quote, quoteAt;
+    let status = 'WINDOW_CLOSED';
+    if (sample.observedAt < close) {
+      const book = this.read('/markets/' + ticker + '/orderbook?depth=1').then(data => ({
+        down: metalBook(data)?.no, receivedAt: this.now(),
+      }));
+      const details = target == null
+        ? this.read('/markets/' + ticker).catch(() => null)
+        : null;
+      const [bookResult, marketResult] = await Promise.allSettled([book, details]);
+      const fresh = marketResult.value?.market;
+      const strike = Number(fresh?.floor_strike);
+      if (fresh?.ticker === ticker && fresh.strike_type === 'greater_or_equal' &&
+          Number.isFinite(strike) && strike > 0) target = strike;
+      if (bookResult.status === 'rejected') {
+        status = 'ORDERBOOK_REQUEST_FAILED';
+      } else {
+        const { down, receivedAt } = bookResult.value;
+        if (receivedAt >= close || receivedAt - sample.observedAt > 2000) {
+          status = 'STALE_QUOTE';
+        } else if (!down || !Number.isFinite(down.price) || down.price <= 0 ||
+            down.price >= 1 || !Number.isFinite(down.size) || down.size <= 0) {
+          status = 'NO_DOWN_ASK';
+        } else {
+          quote = down;
+          quoteAt = receivedAt;
+          status = 'QUOTED';
+        }
+      }
+    }
+    const multiplier = row?.feeMultiplier;
+    const entry = quote && Number.isFinite(multiplier) && multiplier > 0
+      ? estimateMetalEntry({ book: { no: quote }, side: 'no',
+          stage: { budget: rules.paperBudget, minPrice: .001 }, feeMultiplier: multiplier })
+      : null;
+    const referencePrice = Number.isFinite(reference?.price) ? reference.price : null;
+    this.emit({ event: 'TAAPI_SHOOTING_STAR_QUOTE', ticker, status,
+      providerTimestamp: sample.providerTimestamp, detectedAt: sample.observedAt,
+      marketCloseAt: close, quoteAt, quoteDelayMs: quoteAt == null ? null : quoteAt - sample.observedAt,
+      secondsRemaining: Math.max(0, (close - (quoteAt ?? sample.observedAt)) / 1000),
+      target: target ?? null, referencePrice, referenceAt: reference?.sourceTs ?? null,
+      distanceBelowStrike: target != null && referencePrice != null ? target - referencePrice : null,
+      downAsk: quote?.price ?? null, displayedSize: quote?.size ?? null,
+      paperBudget: rules.paperBudget, entry: entry ?? null });
+  }
+
   async observeTaapi() {
     const key = process.env.TAAPI_API_KEY;
     const market = this.current;
@@ -569,10 +622,12 @@ export class BtcLargeObserver {
       }
       if (timestamp[0] <= (this.taapiLastCandle ?? 0)) return;
       this.taapiLastCandle = timestamp[0];
-      this.emit({ event: 'TAAPI_CANDLE_SAMPLE', ticker: market.ticker,
+      const sample = { event: 'TAAPI_CANDLE_SAMPLE', ticker: market.ticker,
         symbol: 'BTCUSDT', exchange: 'binance', timeframe: '1m', indicator: 'shootingstar',
         providerTimestamp: timestamp[0], value: value[0], detected: value[0] < 0,
-        requestedAt: now, observedAt: this.now() });
+        requestedAt: now, observedAt: this.now() };
+      this.emit(sample);
+      if (sample.detected) await this.captureTaapiDownQuote(market, sample);
     } catch {
       this.emit({ event: 'TAAPI_CANDLE_ERROR', reason: 'REQUEST_FAILED' });
     } finally {
