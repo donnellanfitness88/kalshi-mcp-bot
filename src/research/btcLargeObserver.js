@@ -534,8 +534,49 @@ export class BtcLargeObserver {
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
   }
+  async observeTaapi() {
+    const key = process.env.TAAPI_API_KEY;
+    const market = this.current;
+    if (!key || !market || this.taapiPending) return;
+    const now = this.now();
+    const minute = Math.floor((now - 5000) / 60000) * 60000;
+    if (minute === this.taapiMinute || now >= Date.parse(market.close_time)) return;
+    this.taapiMinute = minute;
+    this.taapiPending = true;
+    try {
+      const params = new URLSearchParams({
+        exchange: 'binance', symbol: 'BTCUSDT', timeframe: '1m', results: '1', backtrack: '1',
+      });
+      const response = await fetch('https://v2.taapi.io/indicator/shootingstar?' + params, {
+        headers: { Authorization: 'Bearer ' + key },
+        redirect: 'error',
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!response.ok) {
+        this.emit({ event: 'TAAPI_CANDLE_ERROR', status: response.status });
+        return;
+      }
+      const { value, timestamp } = await response.json();
+      if (!Number.isFinite(value?.[0]) || !Number.isSafeInteger(timestamp?.[0])) {
+        this.emit({ event: 'TAAPI_CANDLE_ERROR', reason: 'UNEXPECTED_RESPONSE' });
+        return;
+      }
+      if (timestamp[0] <= (this.taapiLastCandle ?? 0)) return;
+      this.taapiLastCandle = timestamp[0];
+      this.emit({ event: 'TAAPI_CANDLE_SAMPLE', ticker: market.ticker,
+        symbol: 'BTCUSDT', exchange: 'binance', timeframe: '1m', indicator: 'shootingstar',
+        providerTimestamp: timestamp[0], value: value[0], detected: value[0] < 0,
+        requestedAt: now, observedAt: this.now() });
+    } catch {
+      this.emit({ event: 'TAAPI_CANDLE_ERROR', reason: 'REQUEST_FAILED' });
+    } finally {
+      this.taapiPending = false;
+    }
+  }
+
   async tick(){if(this.busy)return;this.busy=true;try{
     try{await this.discover();await this.observe();}catch(e){this.emit({event:'READ_ERROR',message:e.message});}
+    void this.observeTaapi();
     try{await this.observeFailedRetest();}catch(e){this.emit({event:'FAILED_RETEST_READ_ERROR',message:e.message});}
     try{await this.observeRangeScalp();}catch(e){this.emit({event:'RANGE_SCALP_READ_ERROR',message:e.message});}
     try{await this.observeRetestCandles();}catch(e){this.emit({event:'FAILED_RETEST_CANDLE_READ_ERROR',message:e.message});}
