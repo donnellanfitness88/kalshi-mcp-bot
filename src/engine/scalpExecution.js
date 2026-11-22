@@ -26,6 +26,9 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 const btcChartBudget = 10;
 const btcChartTrade = 'btc_wick_rejection';
 const btcBearishRetestTrade = 'btc_confirmed_bearish_retest';
+const btcBullishPullbackTrade = 'btc_confirmed_bullish_pullback';
+const isBtcRetestTrade = strategy =>
+  strategy === btcBearishRetestTrade || strategy === btcBullishPullbackTrade;
 const btcBearishRetestStart = Date.parse('2026-11-22T05:38:00Z');
 const btcBearishRetestEnd = Date.parse('2026-11-22T16:00:00Z');
 const btcChartTargetPerContract = 0.03;
@@ -337,13 +340,22 @@ export function createScalpExecutor(deps = {}) {
   let lateEntryTickers = [];
   let btcChartAttemptedTickers = [];
   let btcChartSignal = null;
-  let btcBearishRetestSignal = null;
+  let btcRetestSignal = null;
   let btcBearishRetestAttempted = [];
 
   function queueBtcBearishRetest(signal) {
-    if (signal.signalAt >= btcBearishRetestStart && signal.signalAt < btcBearishRetestEnd &&
-        (!btcBearishRetestSignal || signal.signalAt > btcBearishRetestSignal.signalAt)) {
-      btcBearishRetestSignal = signal;
+    if (signal.signalAt >= btcBearishRetestStart && signal.signalAt < btcBearishRetestEnd) {
+      queueBtcRetest(signal, 'no');
+    }
+  }
+
+  function queueBtcBullishPullback(signal) {
+    if (process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED !== 'false') queueBtcRetest(signal, 'yes');
+  }
+
+  function queueBtcRetest(signal, side) {
+    if (!btcRetestSignal || signal.signalAt > btcRetestSignal.signalAt) {
+      btcRetestSignal = { ...signal, side };
     }
   }
 
@@ -408,7 +420,8 @@ export function createScalpExecutor(deps = {}) {
           estimatedExitFees: reserveFee(fill.count), startedAt: p.startedAt }),
           mode: p.mode ?? 'SCALP', entryOrderId: p.orderId, entryOrderIds: p.orderId ? [p.orderId] : [],
           ...(p.chartSignal ? { chartSignal: p.chartSignal, strategy: btcChartTrade } : {}),
-          ...(p.retestSignal ? { strategy: btcBearishRetestTrade } : {}),
+          ...(p.retestSignal ? { strategy: p.retestSignal.side === 'yes'
+            ? btcBullishPullbackTrade : btcBearishRetestTrade } : {}),
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
@@ -882,16 +895,19 @@ export function createScalpExecutor(deps = {}) {
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
       stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, shrinkingGuard: volatilityGuard ? { ...shrinkCheck, volatilityGuard } : shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
-  async function enterBtcBearishRetest(ctx) {
+  async function enterBtcRetest(ctx) {
     const { asset, s } = ctx;
-    const signal = btcBearishRetestSignal;
+    const signal = btcRetestSignal;
     if (asset !== 'BTC' || !signal || !Number.isFinite(signal.feeMultiplier) ||
         signal.feeMultiplier <= 0) return;
+    const { side } = signal;
+    const direction = side === 'yes' ? 'UP' : 'DOWN';
     const eligible = () => {
       const now = Date.now();
       const age = now - signal.signalAt;
-      if (now >= btcBearishRetestEnd || age < 0 || age > signal.maxQuoteDelayMs ||
-          btcBearishRetestSignal !== signal || s.ticker !== signal.ticker ||
+      if ((side === 'no' && now >= btcBearishRetestEnd) ||
+          (side === 'yes' && process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED === 'false') ||
+          age < 0 || age > signal.maxQuoteDelayMs || btcRetestSignal !== signal || s.ticker !== signal.ticker ||
           s.marketCloseTs !== signal.close || signal.close <= now || s.activeTrade ||
           btcBearishRetestAttempted.includes(signal.ticker) ||
           process.env.SCALP_ENABLED !== 'true' || simulated() || !s.farmArmed ||
@@ -899,22 +915,22 @@ export function createScalpExecutor(deps = {}) {
       const point = getReferenceHistory(asset).at(-1);
       return point?.sourceTs >= signal.signalAt && point.sourceTs <= now &&
         now - point.sourceTs <= 2000 && Number.isFinite(point.price) &&
-        point.price < signal.breakLevel;
+        (side === 'yes' ? point.price > signal.breakLevel : point.price < signal.breakLevel);
     };
     if (!eligible() || checkRiskGuards(s, ctx.balance).blocked ||
         !await accountMatches(null, false)) return;
     const balance = (await api.getBalance(exchangeForAsset(asset))) / 100;
     if (!Number.isFinite(balance) || balance <= 0 || checkRiskGuards(s, balance).blocked || !eligible()) return;
     const requestedAt = Date.now();
-    const quote = metalBook(await api.getMarketOrderbook(signal.ticker, 1))?.no;
+    const quote = metalBook(await api.getMarketOrderbook(signal.ticker, 1))?.[side];
     if (!eligible() || Date.now() - requestedAt > 2000 || !quote ||
         !Number.isFinite(quote.price) || quote.price < .001 || quote.price >= 1 ||
         quote.price > signal.maxAsk || !Number.isFinite(quote.size)) return;
     const count = Math.min(Math.floor(quote.size),
       lateStageSize(quote.price, balance, signal.budget, signal.feeMultiplier));
     if (count < 1 || count * (1 - quote.price) <= lateFee(count, quote.price, signal.feeMultiplier)) return;
-    const body = buildDirectionalLateBuyBody(signal.ticker, 'DOWN', count, quote.price);
-    await submit({ kind: 'entry', asset, mode: 'LATE_SETTLEMENT', side: 'no', direction: 'DOWN',
+    const body = buildDirectionalLateBuyBody(signal.ticker, direction, count, quote.price);
+    await submit({ kind: 'entry', asset, mode: 'LATE_SETTLEMENT', side, direction,
       body, retestSignal: signal, sim: false, entrySecondsRemaining: remainingSeconds(s),
       startedAt: Date.now() });
   }
@@ -1193,16 +1209,16 @@ export function createScalpExecutor(deps = {}) {
       if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT') {
         await settle(ctx);
         if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT' &&
-            ctx.s.activeTrade.strategy !== btcBearishRetestTrade) await enter(ctx);
+            !isBtcRetestTrade(ctx.s.activeTrade.strategy)) await enter(ctx);
       }
       else if (ctx.s.activeTrade?.strategy === btcChartTrade) await exitBtcChart(ctx);
       else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else {
-        await enterBtcBearishRetest(ctx);
+        await enterBtcRetest(ctx);
         if (!pending && !ctx.s.activeTrade) await enterBtcChart(ctx);
         if (!pending && !ctx.s.activeTrade) await enter(ctx);
       }
-      if (deps.liveWick && !pending && ctx.s.activeTrade?.strategy !== btcBearishRetestTrade &&
+      if (deps.liveWick && !pending && !isBtcRetestTrade(ctx.s.activeTrade?.strategy) &&
           (!ctx.s.activeTrade || ctx.s.activeTrade.mode==='LATE_SETTLEMENT'))
         await enter(ctx,true);
     } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', asset: ctx.asset, ticker: ctx.s.activeTrade?.ticker ?? ctx.s.ticker, error: error.message,
@@ -1212,7 +1228,7 @@ export function createScalpExecutor(deps = {}) {
         responseRemainingCount: pending.response?.remaining_count } : {}) }); }
     finally { busy = false; }
   }
-  return { tick, restore, snapshot, queueBtcWickSignal, queueBtcBearishRetest };
+  return { tick, restore, snapshot, queueBtcWickSignal, queueBtcBearishRetest, queueBtcBullishPullback };
 }
 export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage, liveWick: true, getBtcMinuteRange });
 export function restoreScalpExecution() { scalpExecutor.restore(loadJournal()); }

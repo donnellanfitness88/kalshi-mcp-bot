@@ -43,7 +43,8 @@ async function main() {
       .then(([{BtcLargeObserver},{benchmarkFeed}])=>new BtcLargeObserver({
         feed: benchmarkFeed,
         onWickSignal: scalpExecutor.queueBtcWickSignal,
-        onBearishRetest: scalpExecutor.queueBtcBearishRetest
+        onBearishRetest: scalpExecutor.queueBtcBearishRetest,
+        onBullishPullback: scalpExecutor.queueBtcBullishPullback
       }).start())
       .catch(e=>console.error('[BTC_LARGE_OBSERVER] Startup failed:',e.message));
   }

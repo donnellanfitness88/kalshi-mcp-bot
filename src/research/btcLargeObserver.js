@@ -160,7 +160,7 @@ export function evaluateBtcLarge({history,quote,target,side,secondsRemaining,now
 
 export class BtcLargeObserver {
   constructor({feed,read=publicBtcObservationRead,store=btcLargeStore(),now=Date.now,
-    onWickSignal, onBearishRetest, log=e=>console.log('[BTC_LARGE_OBSERVER] '+JSON.stringify(e))}={}) {
+    onWickSignal, onBearishRetest, onBullishPullback, log=e=>console.log('[BTC_LARGE_OBSERVER] '+JSON.stringify(e))}={}) {
     Object.assign(this,{feed,read,store,now,log,onWickSignal,onBearishRetest});
     this.state=store.load()??{version:1,markets:{},totals:{windows:0,entries:0,wins:0,losses:0,net:0}};
     if(this.state.version!==1||!this.state.markets||!this.state.totals)throw new Error('Invalid BTC observation journal');
@@ -435,6 +435,12 @@ export class BtcLargeObserver {
       if (sample.side === 'no' && sample.phase === 'confirmed' && sample.entry) {
         this.onBearishRetest?.({ ticker, close, signalAt: sample.signalAt,
           breakLevel: sample.priorLow - rules.breakBelowLow, maxAsk: sample.downAsk,
+          maxQuoteDelayMs: rules.maxQuoteDelayMs, budget: rules.paperBudget,
+          feeMultiplier: row.feeMultiplier });
+      }
+      if (sample.side === 'yes' && sample.phase === 'confirmed' && sample.entry) {
+        this.onBullishPullback?.({ ticker, close, signalAt: sample.signalAt,
+          breakLevel: sample.priorHigh + rules.breakBelowLow, maxAsk: sample.upAsk,
           maxQuoteDelayMs: rules.maxQuoteDelayMs, budget: rules.paperBudget,
           feeMultiplier: row.feeMultiplier });
       }
