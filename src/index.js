@@ -42,7 +42,8 @@ async function main() {
     Promise.all([import('./research/btcLargeObserver.js'),import('./prices/cfBenchmarks.js')])
       .then(([{BtcLargeObserver},{benchmarkFeed}])=>new BtcLargeObserver({
         feed: benchmarkFeed,
-        onWickSignal: scalpExecutor.queueBtcWickSignal
+        onWickSignal: scalpExecutor.queueBtcWickSignal,
+        onBearishRetest: scalpExecutor.queueBtcBearishRetest
       }).start())
       .catch(e=>console.error('[BTC_LARGE_OBSERVER] Startup failed:',e.message));
   }

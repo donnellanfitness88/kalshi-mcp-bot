@@ -25,6 +25,9 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
 const btcChartBudget = 10;
 const btcChartTrade = 'btc_wick_rejection';
+const btcBearishRetestTrade = 'btc_confirmed_bearish_retest';
+const btcBearishRetestStart = Date.parse('2026-11-22T05:38:00Z');
+const btcBearishRetestEnd = Date.parse('2026-11-22T16:00:00Z');
 const btcChartTargetPerContract = 0.03;
 const btcChartHoldMs = 120000;
 const btcChartLegacyHoldMs = 240000;
@@ -334,6 +337,15 @@ export function createScalpExecutor(deps = {}) {
   let lateEntryTickers = [];
   let btcChartAttemptedTickers = [];
   let btcChartSignal = null;
+  let btcBearishRetestSignal = null;
+  let btcBearishRetestAttempted = [];
+
+  function queueBtcBearishRetest(signal) {
+    if (signal.signalAt >= btcBearishRetestStart && signal.signalAt < btcBearishRetestEnd &&
+        (!btcBearishRetestSignal || signal.signalAt > btcBearishRetestSignal.signalAt)) {
+      btcBearishRetestSignal = signal;
+    }
+  }
 
   function queueBtcWickSignal(signal) {
     if (!btcChartSignal || signal.confirmedAt > btcChartSignal.confirmedAt) {
@@ -347,7 +359,7 @@ export function createScalpExecutor(deps = {}) {
   const assets = () => assetNames().map(asset => shared[asset]);
   const riskFields=['riskDay','sessionStartBalance','sessionPnL','dailyStartBalance','dailyPnL',
     'usdJpyDailyReset','eurUsdDailyReset','totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
-  const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards, btcChartAttemptedTickers,
+  const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards, btcChartAttemptedTickers, btcBearishRetestAttempted,
     // Retain new markets' risk counters across deployments as well as holdings.
     marketRisk:Object.fromEntries(assetNames().filter(hasIndependentRisk).map(asset=>[asset,
       Object.fromEntries(riskFields.map(k=>[k,shared[asset][k]]))])),
@@ -361,6 +373,7 @@ export function createScalpExecutor(deps = {}) {
     shrinkingGuards = structuredClone(saved.shrinkingGuards ?? {});
     lateEntryTickers = saved.lateEntryTickers ?? [];
     btcChartAttemptedTickers = saved.btcChartAttemptedTickers ?? [];
+    btcBearishRetestAttempted = saved.btcBearishRetestAttempted ?? [];
     lateStages = structuredClone(saved.lateStages ?? {});
     for (const asset of assetNames()) {
       if (hasIndependentRisk(asset) && saved.marketRisk?.[asset]) Object.assign(shared[asset],saved.marketRisk[asset]);
@@ -395,6 +408,7 @@ export function createScalpExecutor(deps = {}) {
           estimatedExitFees: reserveFee(fill.count), startedAt: p.startedAt }),
           mode: p.mode ?? 'SCALP', entryOrderId: p.orderId, entryOrderIds: p.orderId ? [p.orderId] : [],
           ...(p.chartSignal ? { chartSignal: p.chartSignal, strategy: btcChartTrade } : {}),
+          ...(p.retestSignal ? { strategy: btcBearishRetestTrade } : {}),
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
@@ -416,6 +430,7 @@ export function createScalpExecutor(deps = {}) {
       s.activeTrade = next; lateStages = nextStages; pending = null;
       log({ event: 'ENTRY_CONFIRMED', asset: p.asset, ...fill, sim: p.sim, mode: p.mode,
         side: p.side, stage: p.stageId, strategy: next.strategy, chartConfirmation: p.chartConfirmation,
+        retestSignal: p.retestSignal,
         ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard, totalContracts: next.count, totalCost: next.originalCost });
       return;
     } else if (p.kind === 'entry' && p.stageId && !fill.count) {
@@ -542,7 +557,10 @@ export function createScalpExecutor(deps = {}) {
     if (p.kind === 'entry' && p.chartSignal) {
       btcChartAttemptedTickers = [...btcChartAttemptedTickers, p.body.ticker].slice(-500);
     }
-    if (p.kind === 'entry' && p.mode === 'LATE_SETTLEMENT') {
+    if (p.kind === 'entry' && p.retestSignal) {
+      btcBearishRetestAttempted = [...btcBearishRetestAttempted, p.body.ticker].slice(-500);
+    }
+    if (p.kind === 'entry' && p.mode === 'LATE_SETTLEMENT' && !p.retestSignal) {
       lateEntryTickers = [...new Set([...lateEntryTickers, p.body.ticker])].slice(-500);
       if (p.stageId) {
         const ledger = lateStages[p.body.ticker] ?? { attempted: [], side: p.side, spent: 0 };
@@ -864,6 +882,43 @@ export function createScalpExecutor(deps = {}) {
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
       stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, shrinkingGuard: volatilityGuard ? { ...shrinkCheck, volatilityGuard } : shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
+  async function enterBtcBearishRetest(ctx) {
+    const { asset, s } = ctx;
+    const signal = btcBearishRetestSignal;
+    if (asset !== 'BTC' || !signal || !Number.isFinite(signal.feeMultiplier) ||
+        signal.feeMultiplier <= 0) return;
+    const eligible = () => {
+      const now = Date.now();
+      const age = now - signal.signalAt;
+      if (now >= btcBearishRetestEnd || age < 0 || age > signal.maxQuoteDelayMs ||
+          btcBearishRetestSignal !== signal || s.ticker !== signal.ticker ||
+          s.marketCloseTs !== signal.close || signal.close <= now || s.activeTrade ||
+          btcBearishRetestAttempted.includes(signal.ticker) ||
+          process.env.SCALP_ENABLED !== 'true' || simulated() || !s.farmArmed ||
+          shared.disabledAssets.includes(asset) || !compatibleHoldings(s, 'LATE_SETTLEMENT', false)) return false;
+      const point = getReferenceHistory(asset).at(-1);
+      return point?.sourceTs >= signal.signalAt && point.sourceTs <= now &&
+        now - point.sourceTs <= 2000 && Number.isFinite(point.price) &&
+        point.price < signal.breakLevel;
+    };
+    if (!eligible() || checkRiskGuards(s, ctx.balance).blocked ||
+        !await accountMatches(null, false)) return;
+    const balance = (await api.getBalance(exchangeForAsset(asset))) / 100;
+    if (!Number.isFinite(balance) || balance <= 0 || checkRiskGuards(s, balance).blocked || !eligible()) return;
+    const requestedAt = Date.now();
+    const quote = metalBook(await api.getMarketOrderbook(signal.ticker, 1))?.no;
+    if (!eligible() || Date.now() - requestedAt > 2000 || !quote ||
+        !Number.isFinite(quote.price) || quote.price < .001 || quote.price >= 1 ||
+        quote.price > signal.maxAsk || !Number.isFinite(quote.size)) return;
+    const count = Math.min(Math.floor(quote.size),
+      lateStageSize(quote.price, balance, signal.budget, signal.feeMultiplier));
+    if (count < 1 || count * (1 - quote.price) <= lateFee(count, quote.price, signal.feeMultiplier)) return;
+    const body = buildDirectionalLateBuyBody(signal.ticker, 'DOWN', count, quote.price);
+    await submit({ kind: 'entry', asset, mode: 'LATE_SETTLEMENT', side: 'no', direction: 'DOWN',
+      body, retestSignal: signal, sim: false, entrySecondsRemaining: remainingSeconds(s),
+      startedAt: Date.now() });
+  }
+
   async function enterBtcChart(ctx) {
     const { asset, s } = ctx;
     const signal = btcChartSignal;
@@ -1032,7 +1087,7 @@ export function createScalpExecutor(deps = {}) {
     s.activeTrade = null;
     s.lastExitTime = Date.now();
     log({ event: 'SETTLED', asset, ticker: trade.ticker, mode: trade.mode, result, payout,
-      pnl, sim: trade.sim });
+      pnl, sim: trade.sim, strategy: trade.strategy });
   }
   async function exitBtcChart(ctx) {
     const { asset, s } = ctx;
@@ -1137,15 +1192,18 @@ export function createScalpExecutor(deps = {}) {
       }
       if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT') {
         await settle(ctx);
-        if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT') await enter(ctx);
+        if (ctx.s.activeTrade?.mode === 'LATE_SETTLEMENT' &&
+            ctx.s.activeTrade.strategy !== btcBearishRetestTrade) await enter(ctx);
       }
       else if (ctx.s.activeTrade?.strategy === btcChartTrade) await exitBtcChart(ctx);
       else if (ctx.s.activeTrade?.mode === 'SCALP') await exit(ctx);
       else {
-        await enterBtcChart(ctx);
+        await enterBtcBearishRetest(ctx);
+        if (!pending && !ctx.s.activeTrade) await enterBtcChart(ctx);
         if (!pending && !ctx.s.activeTrade) await enter(ctx);
       }
-      if (deps.liveWick && !pending && (!ctx.s.activeTrade || ctx.s.activeTrade.mode==='LATE_SETTLEMENT'))
+      if (deps.liveWick && !pending && ctx.s.activeTrade?.strategy !== btcBearishRetestTrade &&
+          (!ctx.s.activeTrade || ctx.s.activeTrade.mode==='LATE_SETTLEMENT'))
         await enter(ctx,true);
     } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', asset: ctx.asset, ticker: ctx.s.activeTrade?.ticker ?? ctx.s.ticker, error: error.message,
       clientOrderId: pending?.body.client_order_id,
@@ -1154,7 +1212,7 @@ export function createScalpExecutor(deps = {}) {
         responseRemainingCount: pending.response?.remaining_count } : {}) }); }
     finally { busy = false; }
   }
-  return { tick, restore, snapshot, queueBtcWickSignal };
+  return { tick, restore, snapshot, queueBtcWickSignal, queueBtcBearishRetest };
 }
 export const scalpExecutor = createScalpExecutor({ selectLateStage: productionLateStage, liveWick: true, getBtcMinuteRange });
 export function restoreScalpExecution() { scalpExecutor.restore(loadJournal()); }
