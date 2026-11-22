@@ -74,6 +74,47 @@ export function advanceBtcFailedRetest(tracker, points, target, open, close, now
   return events;
 }
 
+const BTC_RETEST_CANDLE_MS = 5000;
+
+export function closedBtcRetestCandles(points, now) {
+  const bars = new Map();
+  let previousAt;
+  for (const { sourceTs, price } of points) {
+    if (!Number.isSafeInteger(sourceTs) || sourceTs > now || !Number.isFinite(price) ||
+        price <= 0 || (previousAt != null && sourceTs <= previousAt)) continue;
+    const start = Math.floor(sourceTs / BTC_RETEST_CANDLE_MS) * BTC_RETEST_CANDLE_MS;
+    const end = start + BTC_RETEST_CANDLE_MS;
+    let bar = bars.get(start);
+    if (!bar) {
+      bar = { start, end, open: price, high: price, low: price, close: price,
+        complete: previousAt != null && sourceTs - previousAt <= BTC_FAILED_RETEST_RULES.maxReferenceGapMs };
+      bars.set(start, bar);
+    }
+    bar.complete &&= sourceTs - previousAt <= BTC_FAILED_RETEST_RULES.maxReferenceGapMs;
+    bar.high = Math.max(bar.high, price);
+    bar.low = Math.min(bar.low, price);
+    bar.close = price;
+    bar.lastAt = sourceTs;
+    previousAt = sourceTs;
+  }
+  return [...bars.values()].filter(bar => bar.complete && bar.end <= now &&
+    bar.end - bar.lastAt <= BTC_FAILED_RETEST_RULES.maxReferenceGapMs);
+}
+
+export function btcRetestCandleSignal(bars, turn, rejection, invalidatedAt = Infinity) {
+  const turnStart = Math.floor(turn.signalAt / BTC_RETEST_CANDLE_MS) * BTC_RETEST_CANDLE_MS;
+  const rejectionBar = rejection ?? bars.find(bar => {
+    const body = Math.abs(bar.close - bar.open);
+    const wick = bar.high - Math.max(bar.open, bar.close);
+    return bar.start >= turnStart - BTC_RETEST_CANDLE_MS && bar.start <= turnStart &&
+      bar.high >= turn.bounceHigh && wick >= BTC_FAILED_RETEST_RULES.turnDown &&
+      wick >= 2 * body;
+  });
+  const confirmation = rejectionBar && bars.find(bar => bar.start >= rejectionBar.end &&
+    bar.end >= turn.signalAt && bar.end < invalidatedAt && bar.close < rejectionBar.low);
+  return { rejection: rejectionBar ?? null, confirmation: confirmation ?? null };
+}
+
 const BASE='https://api.elections.kalshi.com/trade-api/v2';
 export async function publicBtcObservationRead(route) {
   if(!/^\/markets\/trades\?ticker=KXBTC15M-[A-Z0-9-]+&limit=100$/.test(route)&&route!=='/series/KXBTC15M'&&route!=='/markets?series_ticker=KXBTC15M&status=open&limit=100'&&
@@ -262,6 +303,51 @@ export class BtcLargeObserver {
     }
     this.persist(next,event);
   }
+  async observeRetestCandles() {
+    const ticker = this.current?.ticker;
+    const row = this.state.markets[ticker];
+    const study = row?.failedRetest;
+    const now = this.now();
+    const close = Date.parse(row?.closeTime);
+    if (!study?.turn || study.candle?.confirmation || row.result || now >= close) return;
+
+    const bars = closedBtcRetestCandles(this.feed?.getHistory?.('BTC') ?? [], now)
+      .filter(bar => bar.start >= row.startedAt);
+    const { rejection, confirmation } = btcRetestCandleSignal(
+      bars, study.turn, study.candle?.rejection, study.invalidated?.signalAt);
+    if (!rejection || (!confirmation && study.candle?.rejection)) return;
+
+    let quote = null;
+    let quoteAt = null;
+    const rules = BTC_FAILED_RETEST_RULES;
+    if (confirmation && now - confirmation.end <= rules.maxQuoteDelayMs) {
+      try {
+        const book = metalBook(await this.read('/markets/' + ticker + '/orderbook?depth=1'));
+        const receivedAt = this.now();
+        if (receivedAt < close && receivedAt - now <= 2000 &&
+            receivedAt - confirmation.end <= rules.maxQuoteDelayMs && book?.no) {
+          quote = book.no;
+          quoteAt = receivedAt;
+        }
+      } catch (error) {
+        this.emit({ event: 'FAILED_RETEST_CANDLE_QUOTE_ERROR', ticker, message: error.message });
+      }
+    }
+    const entry = quote ? estimateMetalEntry({ book: { no: quote }, side: 'no',
+      stage: { budget: rules.paperBudget, minPrice: .001 }, feeMultiplier: row.feeMultiplier }) : null;
+    const candle = { rejection, confirmation, quoteAt, downAsk: quote?.price ?? null,
+      displayedSize: quote?.size ?? null, entry };
+    const next = structuredClone(this.state);
+    next.markets[ticker].failedRetest.candle = candle;
+    this.persist(next, { event: 'FAILED_RETEST_CANDLE_PAPER', ticker, ...candle,
+      signalAt: confirmation?.end ?? null, target: study.turn.target,
+      reference: confirmation?.close ?? null,
+      secondsRemaining: confirmation ? (close - confirmation.end) / 1000 : null,
+      turn: { signalAt: study.turn.signalAt, downAsk: study.turn.downAsk },
+      confirmed: study.confirmed ? { signalAt: study.confirmed.signalAt, downAsk: study.confirmed.downAsk } : null,
+      quoteDelayMs: quoteAt == null ? null : quoteAt - confirmation.end });
+  }
+
   async observeFailedRetest() {
     const market = this.current;
     if (!market) return;
@@ -437,6 +523,7 @@ export class BtcLargeObserver {
         ? (r.result === side ? sample.entry.count : 0) - sample.entry.estimatedCost : null;
       study.outcome = { turnNet: outcome(turn), confirmedNet: outcome(confirmed),
         confirmed: Boolean(confirmed), invalidated: invalidated?.reason ?? null };
+      if (side === 'no') study.outcome.candleNet = outcome(study.candle);
     }
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
@@ -451,6 +538,7 @@ export class BtcLargeObserver {
     try{await this.discover();await this.observe();}catch(e){this.emit({event:'READ_ERROR',message:e.message});}
     try{await this.observeFailedRetest();}catch(e){this.emit({event:'FAILED_RETEST_READ_ERROR',message:e.message});}
     try{await this.observeRangeScalp();}catch(e){this.emit({event:'RANGE_SCALP_READ_ERROR',message:e.message});}
+    try{await this.observeRetestCandles();}catch(e){this.emit({event:'FAILED_RETEST_CANDLE_READ_ERROR',message:e.message});}
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
   }finally{this.busy=false;}}
   start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
