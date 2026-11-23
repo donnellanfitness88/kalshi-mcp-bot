@@ -1,6 +1,7 @@
 import { advanceBtcRangeScalp, advanceBtcStructureScalp, btcRangeScalpNeedsBook,
   btcRangeScalpOutcome, BTC_RANGE_SCALP_RULES, BTC_STRUCTURE_RULES, sampleBtcRangeScalp } from './btcRangeScalp.js';
 import { wickRejectionSignal, wickScalpNeedsBook, observeWickRejectionScalp, wickRejectionScalpOutcomes } from './btcChartReversal.js';
+import { advanceBtcWedge, BTC_WEDGE_RULES } from './btcWedgeStudy.js';
 import { FiveMinuteBars, chartReversal, captureChartEntry, chartOutcome } from './btcChartReversal.js';
 import { observeSettlementDefense, observePaperSpike, experimentOutcome } from './btcWickExperiments.js';
 import { PullbackHistory, observeWick, wickOutcome, updateWickTotals } from './btcWickStudy.js';
@@ -514,6 +515,46 @@ export class BtcLargeObserver {
     this.rangeScalp = baseline;
     this.structureScalp = structure;
   }
+  async observeWedges() {
+    const step = advanceBtcWedge(this.chartBars.closed, this.state.btcWedgeStudy);
+    if (step) {
+      const pending = step.signal ?? this.state.btcWedgeStudy?.pending;
+      this.persist({ ...this.state, btcWedgeStudy: { ...step.state, pending } });
+    }
+    const signal = this.state.btcWedgeStudy?.pending;
+    if (!signal) return;
+
+    const market = this.current;
+    const observedAt = this.now(), close = Date.parse(market?.close_time);
+    const open = Date.parse(market?.open_time);
+    const fresh = observedAt - signal.at <= 30000;
+    const matches = market && signal.at >= open && signal.at < close &&
+      observedAt < close && this.state.markets[market.ticker] && !this.state.markets[market.ticker].result;
+    if (fresh && !matches) return; // Allow market discovery to catch up at rollover.
+
+    const ticker = fresh && matches ? market.ticker : null;
+    const row = ticker ? this.state.markets[ticker] : null;
+    let target = row?.target ?? (ticker && this.failedRetestTicker === ticker ? this.failedRetestTarget : null);
+    if (ticker && !(Number.isFinite(target) && target > 0)) {
+      try {
+        const { market: details } = await this.read('/markets/' + ticker);
+        const strike = Number(details?.floor_strike);
+        if (details?.ticker === ticker && Number.isFinite(strike) && strike > 0) target = strike;
+      } catch (error) {
+        this.emit({ event: 'BTC_WEDGE_TARGET_READ_ERROR', ticker, message: error.message });
+      }
+    }
+    const { at: candleClosedAt, ...details } = signal;
+    const observation = { ...details, candleClosedAt, observedAt, ticker, target: target ?? null,
+      distanceToTarget: Number.isFinite(target) ? signal.close - target : null,
+      secondsRemaining: ticker ? (close - observedAt) / 1000 : null,
+      status: ticker ? 'MATCHED_WINDOW' : 'NO_TIMELY_WINDOW' };
+    const next = { ...this.state, btcWedgeStudy: { ...this.state.btcWedgeStudy, pending: null } };
+    if (ticker) next.markets = { ...this.state.markets, [ticker]: {
+      ...this.state.markets[ticker], wedgeSignals: [...(row.wedgeSignals ?? []), observation],
+    } };
+    this.persist(next, { event: 'BTC_WEDGE_SIGNAL', ...observation });
+  }
   async settleOne() {
     if(this.now()<this.nextSettlement)return;this.nextSettlement=this.now()+60000;
     const pending=Object.values(this.state.markets).filter(r=>!r.result&&Date.parse(r.closeTime)<=this.now());
@@ -544,6 +585,10 @@ export class BtcLargeObserver {
         [leg, btcRangeScalpOutcome(r.structureScalp[leg],r.result)?.[leg]])),
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
+    for (const observation of r.wedgeSignals ?? []) {
+      this.emit({ event: 'BTC_WEDGE_SETTLED', ...observation, result: r.result,
+        signalMatchedSettlement: r.result === (observation.direction === 'up' ? 'yes' : 'no') });
+    }
   }
   async captureTaapiDownQuote(market, sample) {
     const ticker = market.ticker;
@@ -647,9 +692,11 @@ export class BtcLargeObserver {
     try{await this.observeRangeScalp();}catch(e){this.emit({event:'RANGE_SCALP_READ_ERROR',message:e.message});}
     try{await this.observeRetestCandles();}catch(e){this.emit({event:'FAILED_RETEST_CANDLE_READ_ERROR',message:e.message});}
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
+    try{await this.observeWedges();}catch(e){this.emit({event:'BTC_WEDGE_READ_ERROR',message:e.message});}
   }finally{this.busy=false;}}
   start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
     failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,rangeScalpPaper:BTC_RANGE_SCALP_RULES,structureScalpPaper:BTC_STRUCTURE_RULES,
+    btcWedgePaper:BTC_WEDGE_RULES,
     executionModel:'ONE_SNAPSHOT_PER_WINDOW_TOP_LEVEL_VOLUME_NO_FILL_RETRIES'});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;}
   stop(){clearInterval(this.timer);}
