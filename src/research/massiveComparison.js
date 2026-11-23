@@ -7,6 +7,12 @@ const MAX_AGE_MS = 2000;
 const RETENTION_MS = 65000;
 const MAX_POINTS = 8000;
 
+function assetForPair(pair) {
+  if (typeof pair !== 'string') return null;
+  const symbol = pair.replace('/', '-');
+  return Object.hasOwn(SYMBOLS,symbol) ? SYMBOLS[symbol] : null;
+}
+
 // Compare source timestamps against the existing shrinking-cushion history tolerances.
 function describe(history, now, target) {
   const last = history?.at(-1);
@@ -37,15 +43,35 @@ export class MassiveComparison {
   constructor(observer, {Socket=WebSocket, now=Date.now}={}) {
     Object.assign(this,{observer,Socket,now});
     this.history = Object.fromEntries(ASSETS.map(asset => [asset,[]]));
+    this.quoteWarnings = new Set();
+  }
+
+  warnQuote(asset,reason,ageMs) {
+    const key = asset+':'+reason;
+    if (this.quoteWarnings.has(key)) return;
+    this.quoteWarnings.add(key);
+    this.observer.emit({event:'MASSIVE_QUOTE_REJECTED',asset,reason,ageMs});
   }
 
   ingest(quote) {
-    if (quote.ev !== 'C' || !Object.hasOwn(SYMBOLS,quote.p)) return;
+    if (quote.ev !== 'C') return;
+    const asset = assetForPair(quote.p);
+    if (!asset) {
+      this.warnQuote('UNKNOWN','UNRECOGNIZED_PAIR',null);
+      return;
+    }
     const {b:bid,a:ask,t:sourceAt} = quote;
-    const age = this.now() - sourceAt;
+    const age = Number.isSafeInteger(sourceAt) ? this.now() - sourceAt : null;
     if (!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask < bid ||
-        !Number.isSafeInteger(sourceAt) || age < 0 || age > MAX_AGE_MS) return;
-    const asset = SYMBOLS[quote.p], history = this.history[asset], last = history.at(-1);
+        age === null) {
+      this.warnQuote(asset,'INVALID_FIELDS',age);
+      return;
+    }
+    if (age < 0 || age > MAX_AGE_MS) {
+      this.warnQuote(asset,age < 0 ? 'FUTURE_TIMESTAMP' : 'STALE_TIMESTAMP',age);
+      return;
+    }
+    const history = this.history[asset], last = history.at(-1);
     if (last && sourceAt < last.sourceAt) return;
     const point = {price:(bid+ask)/2,bid,ask,sourceAt};
     if (last?.sourceAt === sourceAt) history[history.length-1] = point;
@@ -108,10 +134,17 @@ export class MassiveComparison {
             authenticated = true;
             socket.send(JSON.stringify({action:'subscribe',params:Object.keys(SYMBOLS).map(pair => 'C.'+pair).join(',')}));
             this.observer.emit({event:'MASSIVE_CONNECTED',assets:ASSETS});
+          } else if (event.status === 'success' && typeof event.message === 'string' &&
+                     event.message.startsWith('subscribed to:')) {
+            const assets = [...event.message.matchAll(/C[.]([A-Z]{3}[-/][A-Z]{3})/g)]
+              .map(match => assetForPair(match[1])).filter(Boolean);
+            if (assets.length) this.observer.emit({event:'MASSIVE_SUBSCRIPTION_CONFIRMED',assets});
           } else if (event.status === 'auth_failed' || event.status === 'not_authorized') {
             rejected = true;
             this.observer.emit({event:'MASSIVE_ACCESS_REJECTED',status:event.status});
             socket.close();
+          } else if (event.status === 'error') {
+            this.observer.emit({event:'MASSIVE_SUBSCRIPTION_ERROR'});
           }
         } else if (authenticated) this.ingest(event);
       }
