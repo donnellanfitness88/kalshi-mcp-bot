@@ -135,6 +135,7 @@ export class MetalsObserver {
     this.state=store.load() ?? {version:1, markets:{}, totals:{}};
     if(this.state.version!==1 || !this.state.markets || !this.state.totals) throw new Error('Invalid metals observer journal');
     this.current={}; this.nextDiscovery={}; this.nextTargetRead={}; this.nextSettlement=0; this.series={}; this.busy=false;
+    this.paperWaitingForProxy=new Set();
   }
   emit(event) { this.log({at:this.now(), observationOnly:true, ...event}); }
   persist(next, event) {
@@ -173,6 +174,18 @@ export class MetalsObserver {
     if(!market) return;
     const seconds=(Date.parse(market.close_time)-this.now())/1000;
     if(seconds<=0) { this.current[asset]=null; this.nextDiscovery[asset]=0; return; }
+    // Paper wick checks require a fresh price. Avoid book requests while that input is missing.
+    if(paperOnly) {
+      if(this.proxy?.snapshot(asset,null,null)?.status!=='FRESH_PROXY') {
+        if(!this.paperWaitingForProxy.has(asset)) {
+          this.paperWaitingForProxy.add(asset);
+          this.emit({event:'PAPER_BOOK_WAITING_FOR_PROXY',asset,ticker:market.ticker});
+        }
+        return;
+      }
+      if(this.paperWaitingForProxy.delete(asset))
+        this.emit({event:'PAPER_BOOK_PROXY_READY',asset,ticker:market.ticker});
+    }
     // Reuse the same public book read for both studies during staged windows.
     // Some newly opened markets publish their strike after initial discovery.
     // Refresh missing targets without discarding prior observations or candidates.
@@ -402,7 +415,8 @@ export class MetalsObserver {
   }
   start() {
     this.emit({event:'STARTED',mode:'PRICE_TIME_OBSERVATION',stages:METALS_STAGES,
-      assets:METALS,paperAssets:PAPER_MARKETS,paperWickBudget:PAPER_WICK_BUDGET,shrinkingTest:{id:SHRINK_TEST,assets:Object.keys(METALS),
+      assets:METALS,paperAssets:PAPER_MARKETS,paperWickBudget:PAPER_WICK_BUDGET,
+      paperBooksRequireFreshProxy:true,shrinkingTest:{id:SHRINK_TEST,assets:Object.keys(METALS),
       fixedMinimum:null,rapidDropFraction:.30,recoverySeconds:2},referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
     void this.tick(); this.timer=setInterval(()=>void this.tick(),5000); this.timer.unref?.();
     void this.tickPaper();
