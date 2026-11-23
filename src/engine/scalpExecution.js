@@ -45,7 +45,10 @@ const btcChartMaxReferenceGapMs = 1500;
 const btcChartMinEntryPrice = 0.05;
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
 const wickAsset = asset => asset==='BTC' || isFourMarket(asset) || isCryptoWick(asset);
-const wickBudgetFor = asset => isCryptoWick(asset) ? CRYPTO_WICK_TIERS[0].budget : 200;
+const wickBudgetFor = asset => {
+  if (isFourMarket(asset)) return 300;
+  return isCryptoWick(asset) ? CRYPTO_WICK_TIERS[0].budget : 200;
+};
 const hasIndependentRisk = asset => isFourMarket(asset) || isCryptoWick(asset);
 const totalBudget = asset => (isCryptoWick(asset) ? 0 : lateBudgetFor(asset)) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
