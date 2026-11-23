@@ -512,7 +512,7 @@ export function createScalpExecutor(deps = {}) {
       }
       if (shared[p.asset].activeTrade) throw new Error('Tracked holding conflicts with rejected entry');
     }
-    if (p.kind === 'entry' && p.stageId && !await accountMatches(shared[p.asset].activeTrade, p.sim)) {
+    if (p.kind === 'entry' && p.stageId && !await accountMatches(p.asset, shared[p.asset].activeTrade, p.sim)) {
       throw new Error('Rejected late entry conflicts with account holdings');
     }
     // Check again after account reads; a matching exchange record takes priority
@@ -626,20 +626,24 @@ export function createScalpExecutor(deps = {}) {
     persist();
     applyFill(p, scalpAck(result, p));
   }
-  // Restrict exposure checks to the strategy's two 15-minute series, plus
-  // exact current/tracked/pending tickers. Sports and combo positions/orders
-  // stay untouched; the exchange balance still limits every new purchase.
-  function scopedAccountRows(rows) {
+  // Late entries reconcile their own asset. Exclusive scalp entries still
+  // check all managed markets, and pending bot orders still serialize execution.
+  function scopedAccountRows(rows, asset) {
     if (!Array.isArray(rows)) throw new Error('Invalid account response');
-    const known = new Set(assets().flatMap(a => [a.ticker, a.activeTrade?.ticker]).filter(Boolean));
-    if (pending?.body?.ticker) known.add(pending.body.ticker);
+    const scopedAssets = asset ? [asset] : assetNames();
+    const prefixes = (asset ? [asset] : MANAGED_ASSETS).map(name => (LIVE_LATE_MARKETS[name]?.series ?? 'KX' + name + '15M') + '-');
+    const known = new Set(scopedAssets.flatMap(name => {
+      const entry = shared[name];
+      return [entry?.ticker, entry?.activeTrade?.ticker];
+    }).filter(Boolean));
+    if (pending?.body?.ticker && (!asset || pending.asset === asset)) known.add(pending.body.ticker);
     return rows.flatMap(row => {
       const ticker = row?.ticker ?? row?.market_ticker;
       if (typeof ticker !== 'string' || !ticker.trim() || ticker !== ticker.trim() ||
           (row.ticker != null && row.market_ticker != null && row.ticker !== row.market_ticker)) {
         throw new Error('Account row has missing or conflicting market identity');
       }
-      if (!/^(KXBTC15M|KXETH15M|KXGOLD15M|KXSILVER15M|KXEURUSD15M|KXUSDJPY15M)-/.test(ticker) && !/^KX(SOL|XRP|DOGE|BNB|HYPE|NEAR|ZEC)15M-/.test(ticker) && !known.has(ticker)) return [];
+      if (!known.has(ticker) && !prefixes.some(prefix => ticker.startsWith(prefix))) return [];
       return [{ ...row, ticker }];
     });
   }
@@ -665,17 +669,17 @@ export function createScalpExecutor(deps = {}) {
         (other.entrySecondsRemaining == null && other.entrySidePrice <= .70));
     });
   }
-  async function accountMatches(trade, sim) {
+  async function accountMatches(asset, trade, sim) {
     if (sim) return true;
-    const positions = scopedAccountRows(await api.getPositions());
-    const tracked = assets().map(a => a.activeTrade).filter(Boolean);
-    if (trade && !tracked.includes(trade)) return false;
-    if (tracked.some(t => !isManagedTrade(t) || t.sim !== sim ||
-        remainingHeldContracts(positions, t) !== t.count)) return false;
+    const assetState = shared[asset];
+    if (!assetState || (assetState.activeTrade ?? null) !== (trade ?? null)) return false;
+    const positions = scopedAccountRows(await api.getPositions(), asset);
+    if (trade && (!isManagedTrade(trade) || trade.sim !== sim ||
+        remainingHeldContracts(positions, trade) !== trade.count)) return false;
     if (positions.some(p => !['string','number'].includes(typeof p.position_fp) ||
         String(p.position_fp).trim() === '' || !Number.isFinite(Number(p.position_fp)) ||
-        (Number(p.position_fp) !== 0 && !tracked.some(t => t.ticker === p.ticker)))) return false;
-    return scopedAccountRows(await api.getOrders({ status: 'resting' })).length === 0;
+        (Number(p.position_fp) !== 0 && trade?.ticker !== p.ticker))) return false;
+    return scopedAccountRows(await api.getOrders({ status: 'resting' }), asset).length === 0;
   }
   const executablePrice=(s,direction,asset)=>isFourMarket(asset)
     ? s.lateBook?.[direction==='UP'?'yes':'no']?.price
@@ -806,7 +810,7 @@ export function createScalpExecutor(deps = {}) {
       if (shrink && !shrink.allowed) { entryBlocked(asset,shrink.reason,{shrinkingGuard:shrink}); return; }
     }
     lastAttempt = Date.now();
-    if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(held, sim) : await accountFlat())) { entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return; }
+    if (!sim && !(mode === 'LATE_SETTLEMENT' ? await accountMatches(asset, held, sim) : await accountFlat())) { entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return; }
     const balance = sim ? shared.paperBalance : (await api.getBalance(exchangeForAsset(asset))) / 100;
     if (!Number.isFinite(balance) || balance<=0) { entryBlocked(asset,'INSUFFICIENT_EXCHANGE_BALANCE'); return; }
     if (cryptoWick) {
@@ -858,7 +862,7 @@ export function createScalpExecutor(deps = {}) {
     const feeMultiplier=hasIndependentRisk(asset)?s.lateFeeMultiplier:1;
     let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
     if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
-    if (mode === 'LATE_SETTLEMENT' && !await accountMatches(held, sim)) {
+    if (mode === 'LATE_SETTLEMENT' && !await accountMatches(asset, held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
     }
     const btcWickRange = wick && asset === 'BTC' ? deps.getBtcMinuteRange : null;
@@ -934,7 +938,7 @@ export function createScalpExecutor(deps = {}) {
         (side === 'yes' ? point.price > signal.breakLevel : point.price < signal.breakLevel);
     };
     if (!eligible() || checkRiskGuards(s, ctx.balance).blocked ||
-        !await accountMatches(null, false)) return;
+        !await accountMatches(asset, null, false)) return;
     const balance = (await api.getBalance(exchangeForAsset(asset))) / 100;
     if (!Number.isFinite(balance) || balance <= 0 || checkRiskGuards(s, balance).blocked || !eligible()) return;
     const requestedAt = Date.now();
