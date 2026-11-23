@@ -24,6 +24,7 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
 const btcChartBudget = 10;
+const btcSettlementRecoveryTicker = 'KXBTC15M-26NOV230045-45';
 const btcChartTrade = 'btc_wick_rejection';
 const btcBearishRetestTrade = 'btc_confirmed_bearish_retest';
 const btcBullishPullbackTrade = 'btc_confirmed_bullish_pullback';
@@ -376,6 +377,7 @@ export function createScalpExecutor(deps = {}) {
     }
   }
   let lateStages = {};
+  let btcSettlementRecovery = null;
   const settlementPolls = new Map();
   const manualPolls = new Map();
   const assetNames = () => MANAGED_ASSETS.filter(asset=>shared[asset]);
@@ -383,6 +385,7 @@ export function createScalpExecutor(deps = {}) {
   const riskFields=['riskDay','sessionStartBalance','sessionPnL','dailyStartBalance','dailyPnL',
     'usdJpyDailyReset','eurUsdDailyReset','totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
   const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards, btcChartAttemptedTickers, btcBearishRetestAttempted,
+    btcSettlementRecovery,
     // Retain new markets' risk counters across deployments as well as holdings.
     marketRisk:Object.fromEntries(assetNames().filter(hasIndependentRisk).map(asset=>[asset,
       Object.fromEntries(riskFields.map(k=>[k,shared[asset][k]]))])),
@@ -393,6 +396,7 @@ export function createScalpExecutor(deps = {}) {
   function restore(saved) {
     if (!saved) return;
     pending = saved.pending ?? null;
+    btcSettlementRecovery = saved.btcSettlementRecovery ?? null;
     shrinkingGuards = structuredClone(saved.shrinkingGuards ?? {});
     lateEntryTickers = saved.lateEntryTickers ?? [];
     btcChartAttemptedTickers = saved.btcChartAttemptedTickers ?? [];
@@ -1087,8 +1091,8 @@ export function createScalpExecutor(deps = {}) {
       const record = records.find(row => Date.parse(row.settled_time) >= trade.startedAt);
       if (!record) return; // Market result alone does not prove account settlement.
       if (record.market_result !== result) throw new Error('Settlement result mismatch');
-      const position = (await api.getPositions()).find(row => row.ticker === trade.ticker);
-      if (position) {
+      const positions = (await api.getPositions()).filter(row => row.ticker === trade.ticker);
+      for (const position of positions) {
         if (!['string', 'number'].includes(typeof position.position_fp) ||
             String(position.position_fp).trim() === '' || !Number.isFinite(Number(position.position_fp))) {
           throw new Error('Invalid settled position');
@@ -1096,11 +1100,38 @@ export function createScalpExecutor(deps = {}) {
         if (Number(position.position_fp) !== 0) return;
       }
       const fills = await api.getAllFills({ ticker: trade.ticker });
-      if (!trade.entryOrderId || fills.some(fill => !(trade.entryOrderIds ?? [trade.entryOrderId]).includes(fill.order_id) &&
+      const entryOrderIds = trade.entryOrderIds ?? [trade.entryOrderId];
+      const otherFills = fills.filter(fill => !entryOrderIds.includes(fill.order_id) &&
           !(trade.manualExitFillIds ?? []).includes(fill.fill_id ?? fill.trade_id) &&
           !(trade.accountedExitOrderIds ?? []).includes(fill.order_id) &&
-          Date.parse(fill.created_time) >= trade.startedAt - 1000)) {
-        throw new Error('Other fills affected late holding; settlement reconciliation required');
+          Date.parse(fill.created_time) >= trade.startedAt - 1000);
+      if (!trade.entryOrderId || otherFills.length) {
+        // This account settlement is final and flat. Preserve the mixed fills
+        // for review without assigning exchange-level P&L to the bot lot.
+        if (asset !== 'BTC' || trade.ticker !== btcSettlementRecoveryTicker ||
+            trade.mode !== 'LATE_SETTLEMENT' || !trade.entryOrderId ||
+            !fills.some(fill => entryOrderIds.includes(fill.order_id))) {
+          throw new Error('Other fills affected late holding; settlement reconciliation required');
+        }
+        const resting = await api.getOrders({ ticker: trade.ticker, status: 'resting' });
+        if (resting.length) return;
+        const archivedAt = Date.now();
+        const recovery = { ticker: trade.ticker, archivedAt, result,
+          trade: structuredClone(trade), settlement: record, otherFills };
+        const saved = snapshot();
+        saved.positions[asset] = null;
+        saved.btcSettlementRecovery = recovery;
+        if (lateStages[trade.ticker]) saved.lateStages = {
+          ...lateStages, [trade.ticker]: { ...lateStages[trade.ticker], closed: true }
+        };
+        save(saved);
+        btcSettlementRecovery = recovery;
+        lateStages = saved.lateStages;
+        s.activeTrade = null;
+        s.lastExitTime = archivedAt;
+        log({ event: 'BTC_SETTLEMENT_RECONCILED', asset, ticker: trade.ticker, result,
+          otherFillCount: otherFills.length, pnl: null, sim: false });
+        return;
       }
     }
     // Attribute only this tracked lot. A settlement row can include earlier scalps
@@ -1220,6 +1251,11 @@ export function createScalpExecutor(deps = {}) {
         if (Date.now() < nextReconcileAt) return;
         nextReconcileAt = Date.now() + 3000;
         await reconcile(); return;
+      }
+      if (ctx.asset === 'BTC' && ctx.s.activeTrade?.ticker === btcSettlementRecoveryTicker &&
+          ctx.s.activeTrade.mode === 'LATE_SETTLEMENT' && !ctx.s.activeTrade.sim) {
+        await settle(ctx);
+        return;
       }
       if (isManagedTrade(ctx.s.activeTrade) && !ctx.s.activeTrade.sim &&
           Date.now() - (manualPolls.get(ctx.asset) ?? 0) >= 5000) {
