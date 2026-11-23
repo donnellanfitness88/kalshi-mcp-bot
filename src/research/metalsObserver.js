@@ -10,6 +10,12 @@ import {evaluateShrinkingCushion} from '../engine/shrinkingCushion.js';
 // Observation only: this module never imports authenticated clients or order code.
 // Keep the existing name/journal to preserve accumulated metals observations.
 export const METALS = { GOLD: 'KXGOLD15M', SILVER: 'KXSILVER15M', EURUSD:'KXEURUSD15M', USDJPY:'KXUSDJPY15M' };
+const PAPER_MARKETS = { WTI: 'KXWTI15M', COPPER: 'KXCOPPER15M', USDCAD: 'KXUSDCAD15M' };
+const PAPER_WICK_BUDGET = 300;
+const OBSERVED_MARKETS = {...METALS,...PAPER_MARKETS};
+const SERIES_PATTERN = Object.values(OBSERVED_MARKETS).join('|');
+const SERIES_ROUTE = new RegExp('^/series/(?:'+SERIES_PATTERN+')$');
+const MARKET_ROUTE = new RegExp('^/markets/(?:'+SERIES_PATTERN+')-[A-Z0-9-]+(?:/orderbook[?]depth=1)?$');
 export const METALS_STAGES = [
   { id: 'under_180', maxSeconds: 180, minPrice: .90, budget: 2 },
   { id: 'under_150', maxSeconds: 150, minPrice: .93, budget: 5 },
@@ -51,7 +57,7 @@ export const metalsStage = seconds => Number.isFinite(seconds) && seconds > 0
 
 export function activeMetalMarket(markets, asset, now) {
   return (Array.isArray(markets) ? markets : []).filter(m =>
-    typeof m.ticker === 'string' && m.ticker.startsWith(METALS[asset] + '-') &&
+    typeof m.ticker === 'string' && m.ticker.startsWith(OBSERVED_MARKETS[asset] + '-') &&
     ['open', 'active'].includes(m.status) && Date.parse(m.open_time) <= now &&
     Date.parse(m.close_time) > now && Date.parse(m.close_time) - Date.parse(m.open_time) === 900000)
     .sort((a,b) => Date.parse(a.close_time) - Date.parse(b.close_time))[0] ?? null;
@@ -92,13 +98,12 @@ export function estimateMetalEntry({book, stage, side, feeMultiplier}) {
 
 // Restrict the network adapter itself to public GET market/series endpoints.
 export async function publicMetalRead(route) {
-  const exact = /^\/series\/KX(?:GOLD|SILVER|EURUSD|USDJPY)15M$/.test(route) ||
-    /^\/markets\/KX(?:GOLD|SILVER|EURUSD|USDJPY)15M-[A-Z0-9-]+(?:\/orderbook\?depth=1)?$/.test(route);
+  const exact = SERIES_ROUTE.test(route) || MARKET_ROUTE.test(route);
   let discovery=false;
   if(route.startsWith('/markets?')) {
     const q=new URLSearchParams(route.slice('/markets?'.length));
     discovery=[...q.keys()].length===3 && [...q.keys()].every(k=>['series_ticker','status','limit'].includes(k)) &&
-      Object.values(METALS).includes(q.get('series_ticker')) && q.get('status')==='open' && q.get('limit')==='100';
+      Object.values(OBSERVED_MARKETS).includes(q.get('series_ticker')) && q.get('status')==='open' && q.get('limit')==='100';
   }
   if (!exact && !discovery) throw new Error('Observer route not allowed');
   const r = await fetch(BASE+route, {method:'GET', signal:AbortSignal.timeout(8000), redirect:'error'});
@@ -141,19 +146,20 @@ export class MetalsObserver {
     if(now < (this.nextDiscovery[asset] ?? 0)) return;
     this.nextDiscovery[asset]=now+60000;
     if(!this.series[asset]) {
-      const {series}=await this.read('/series/'+METALS[asset]);
-      if(series?.ticker!==METALS[asset] || series.frequency!=='fifteen_min') throw new Error('Unexpected metals series');
+      const {series}=await this.read('/series/'+OBSERVED_MARKETS[asset]);
+      if(series?.ticker!==OBSERVED_MARKETS[asset] || series.frequency!=='fifteen_min') throw new Error('Unexpected metals series');
       this.series[asset]=series;
       this.emit({event:'SERIES',asset,feeType:series.fee_type,feeMultiplier:series.fee_multiplier,
         settlementSources:series.settlement_sources});
     }
-    const data=await this.read('/markets?'+new URLSearchParams({series_ticker:METALS[asset],status:'open',limit:100}));
+    const data=await this.read('/markets?'+new URLSearchParams({series_ticker:OBSERVED_MARKETS[asset],status:'open',limit:100}));
     const market=activeMetalMarket(data.markets,asset,this.now());
     this.current[asset]=market;
     if(!market) { this.emit({event:'NO_OPEN_MARKET',asset}); return; }
     if(!this.state.markets[market.ticker]) {
       const next=structuredClone(this.state);
       next.markets[market.ticker]={asset,ticker:market.ticker,closeTime:market.close_time,
+        ...(Object.hasOwn(PAPER_MARKETS,asset)?{startedAt:this.now()}:{}),
         target:number(market.floor_strike)||null,rulesPrimary:market.rules_primary,rulesSecondary:market.rules_secondary,
         source:this.series[asset].settlement_sources,feeType:this.series[asset].fee_type,
         feeMultiplier:number(this.series[asset].fee_multiplier),
@@ -162,6 +168,7 @@ export class MetalsObserver {
     }
   }
   async observe(asset) {
+    const paperOnly=Object.hasOwn(PAPER_MARKETS,asset);
     const market=this.current[asset];
     if(!market) return;
     const seconds=(Date.parse(market.close_time)-this.now())/1000;
@@ -197,9 +204,10 @@ export class MetalsObserver {
       const close=Date.parse(row.closeTime);
       const secondsRemaining=(close-at)/1000;
       observeWick(row,book,history,at,pullbacks,{
+        budget:paperOnly?PAPER_WICK_BUDGET:undefined,
         floor:0,
         // Express the exploratory settlement screen in each market's existing buffer units.
-        flipMinimum:guard=>guard.crossingMinimum,
+        flipMinimum:guard=>paperOnly?0:guard.crossingMinimum,
         guard:(side,previous)=>{
           const check=metalShrinkingCheck({asset,ticker:row.ticker,side,target:row.target,
             proxy:this.proxy?.snapshot(asset,row.target,side),history:proxyHistory,
@@ -212,12 +220,13 @@ export class MetalsObserver {
     }
     if(observation) {
       row.study90=observation;
-      this.persist(next,{event:'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
+      this.persist(next,{event:paperOnly?'PAPER90_QUOTE':'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
     }
     if(!stage) return;
     const candidate=!row.candidates.some(c=>c.stageId===stage.id) && row.feeType==='quadratic'
       ? estimateMetalEntry({book,stage,side:row.side,feeMultiplier:row.feeMultiplier}) : null;
-    const proxySide=candidate?.side??row.side;
+    const quoteSide=book?.yes && (!book.no || book.yes.price>=book.no.price)?'yes':book?.no?'no':null;
+    const proxySide=paperOnly?quoteSide:candidate?.side??row.side;
     const proxy=this.proxy?.snapshot(asset,row.target,proxySide)??null;
     const sample={at,secondsRemaining:(Date.parse(market.close_time)-at)/1000,stageId:stage.id,book,
       referencePrice:null,distance:null,proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED',proxySide,proxy};
@@ -268,7 +277,14 @@ export class MetalsObserver {
     this.persist(next,candidate?{event:'CANDIDATE',asset,ticker:market.ticker,stageId:stage.id,
       ...candidate,target:row.target,proxySide,proxy,qualification:'PRICE_TIME_LIQUIDITY_ONLY',proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED'}:null);
     if(shrinkEvent)this.emit(shrinkEvent);
-    if(proxy)this.emit({event:'PROXY_OBSERVATION',asset,ticker:market.ticker,target:row.target,
+    if(paperOnly) {
+      const range=proxy?.movement?.[60]?.range;
+      const cushionTo60sRange=range>0 && Number.isFinite(proxy.estimatedCushion)
+        ? proxy.estimatedCushion/range : null;
+      this.emit({event:'PAPER_MARKET_QUOTE',asset,ticker:row.ticker,target:row.target,
+        secondsRemaining:sample.secondsRemaining,book,proxySide,proxy,cushionTo60sRange});
+    }
+    if(proxy&&!paperOnly)this.emit({event:'PROXY_OBSERVATION',asset,ticker:market.ticker,target:row.target,
       secondsRemaining:sample.secondsRemaining,proxySide,proxy});
   }
   async settleOne() {
@@ -336,13 +352,16 @@ export class MetalsObserver {
         referenceType:'SPOT_PROXY_NOT_SETTLEMENT'
       };
     }
+    const paperOnly=Object.hasOwn(PAPER_MARKETS,r.asset);
     let wickResult;
     if(r.wickStudy) {
-      next.fourWickTotals??={};
-      const totals=next.fourWickTotals[r.asset]??={};
+      const totalsKey=paperOnly?'paperWickTotals':'fourWickTotals';
+      next[totalsKey]??={};
+      const totals=next[totalsKey][r.asset]??={};
       updateWickTotals(totals,r);
-      wickResult={event:'FOUR_WICK_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
-        reference:'PYTH_SPOT_PROXY',settlementModel:'equal-weight last sample per completed second, research proxy',
+      wickResult={event:paperOnly?'PAPER_WICK_SETTLED':'FOUR_WICK_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
+        reference:paperOnly?'PYTH_REFERENCE_FEED':'PYTH_SPOT_PROXY',
+        ...(paperOnly?{budget:PAPER_WICK_BUDGET}:{}),settlementModel:'equal-weight last sample per completed second, research proxy',
         ...wickOutcome(r),totals};
     }
     const closed=Object.values(next.markets).filter(m=>m.result).sort((a,b)=>b.settledAt-a.settledAt);
@@ -354,7 +373,7 @@ export class MetalsObserver {
     const quote=r.study90;
     const net=quote?.plan && !quote.ambiguous
       ? (quote.side===r.result?quote.plan.count:0)-quote.plan.estimatedCost : null;
-    this.emit({event:'FOUR90_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
+    this.emit({event:paperOnly?'PAPER90_SETTLED':'FOUR90_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
       observedAt:quote?.at??null,modelNet:net,trendNet:net===null||quote.signedFourHourReturn===null
         ? null : quote.signedFourHourReturn>0?net:0});
     if(cushionSettlement)this.emit(cushionSettlement);
@@ -371,14 +390,26 @@ export class MetalsObserver {
       try { await this.settleOne(); } catch(e) { this.emit({event:'SETTLEMENT_ERROR',message:e.message}); }
     } finally { this.busy=false; }
   }
+  async tickPaper() {
+    if(this.paperBusy) return;
+    this.paperBusy=true;
+    try {
+      await Promise.all(Object.keys(PAPER_MARKETS).map(async asset=>{
+        try { await this.discover(asset); await this.observe(asset); }
+        catch(e) { this.emit({event:'READ_ERROR',asset,message:e.message}); }
+      }));
+    } finally { this.paperBusy=false; }
+  }
   start() {
     this.emit({event:'STARTED',mode:'PRICE_TIME_OBSERVATION',stages:METALS_STAGES,
-      assets:METALS,shrinkingTest:{id:SHRINK_TEST,assets:Object.keys(METALS),
+      assets:METALS,paperAssets:PAPER_MARKETS,paperWickBudget:PAPER_WICK_BUDGET,shrinkingTest:{id:SHRINK_TEST,assets:Object.keys(METALS),
       fixedMinimum:null,rapidDropFraction:.30,recoverySeconds:2},referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
     void this.tick(); this.timer=setInterval(()=>void this.tick(),5000); this.timer.unref?.();
+    void this.tickPaper();
+    this.paperTimer=setInterval(()=>void this.tickPaper(),5000); this.paperTimer.unref?.();
     return this;
   }
-  stop() { clearInterval(this.timer); this.proxy?.stop(); }
+  stop() { clearInterval(this.timer); clearInterval(this.paperTimer); this.proxy?.stop(); }
 }
 
 export function startMetalsObserver() {

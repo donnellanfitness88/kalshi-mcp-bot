@@ -1,10 +1,21 @@
 import WebSocket from 'ws';
 
-// Research only. These are spot proxies, NOT Kalshi's settlement indices.
+// Streaming prices are research inputs. Kalshi results are read separately.
 export const PROXY_FEEDS = {GOLD:{id:346,symbol:'Metal.XAU/USD',quoteUnit:'USD',pipSize:null},
   SILVER:{id:345,symbol:'Metal.XAG/USD',quoteUnit:'USD',pipSize:null},
   EURUSD:{id:327,symbol:'FX.EUR/USD',quoteUnit:'USD per EUR',pipSize:.0001},
-  USDJPY:{id:340,symbol:'FX.USD/JPY',quoteUnit:'JPY per USD',pipSize:.01}};
+  USDJPY:{id:340,symbol:'FX.USD/JPY',quoteUnit:'JPY per USD',pipSize:.01},
+  WTI:{id:3063,symbol:'Commodities.Index.PYTHOIL/USD',quoteUnit:'USD per barrel',pipSize:null},
+  COPPER:{id:3525,symbol:'Commodities.Index.CU/USD',quoteUnit:'USD per pound',pipSize:null},
+  USDCAD:{id:338,symbol:'FX.USD/CAD',quoteUnit:'CAD per USD',pipSize:.0001}};
+const SUBSCRIPTIONS = [
+  {id:1,assets:['GOLD','SILVER']},
+  {id:2,assets:['EURUSD','USDJPY']},
+  {id:3,assets:['WTI']},
+  {id:4,assets:['COPPER']},
+  {id:5,assets:['USDCAD']}
+];
+const PAPER_FEEDS = new Set(['WTI','COPPER','USDCAD']);
 const URLS = [0,1,2].map(i=>`wss://pyth-lazer-${i}.dourolabs.app/v1/stream`);
 const HISTORY_RETENTION_MS = 310000;
 const MAX_HISTORY_POINTS = 4000;
@@ -15,11 +26,12 @@ export class MetalsProxy {
     Object.assign(this,{now,log,Socket}); this.history=Object.fromEntries(Object.keys(PROXY_FEEDS).map(a=>[a,[]])); this.sockets=[];this.timers=new Set();
   }
   ingest(message) {
-    if(message?.type!=='streamUpdated' || ![1,2].includes(message.subscriptionId) || !Array.isArray(message.parsed?.priceFeeds))return;
+    if(message?.type!=='streamUpdated' || !Array.isArray(message.parsed?.priceFeeds))return;
+    const subscription=SUBSCRIPTIONS.find(s=>s.id===message.subscriptionId);
+    if(!subscription)return;
     for(const row of message.parsed.priceFeeds) {
-      const asset=Object.keys(PROXY_FEEDS).find(a=>PROXY_FEEDS[a].id===row.priceFeedId);
+      const asset=subscription.assets.find(a=>PROXY_FEEDS[a].id===row.priceFeedId);
       if(!asset)continue;
-      if(message.subscriptionId!==(['EURUSD','USDJPY'].includes(asset)?2:1))continue;
       const exponent=numeric(row.exponent), mantissa=numeric(row.price), sourceAt=numeric(row.feedUpdateTimestamp)/1000;
       const price=mantissa/10**(-exponent), at=this.now(), age=at-sourceAt;
       if(!Number.isInteger(exponent)||exponent < -18||exponent>0||!Number.isSafeInteger(mantissa)||
@@ -36,7 +48,7 @@ export class MetalsProxy {
   }
   snapshot(asset,target,side) {
     const history=this.history[asset]??[],last=history.at(-1), at=this.now();
-    const meta={source:PROXY_FEEDS[asset]?.symbol??null,referenceType:'SPOT_PROXY_NOT_SETTLEMENT',
+    const meta={source:PROXY_FEEDS[asset]?.symbol??null,referenceType:PAPER_FEEDS.has(asset)?'PYTH_REFERENCE_FEED':'SPOT_PROXY_NOT_SETTLEMENT',
       quoteUnit:PROXY_FEEDS[asset]?.quoteUnit??null,pipSize:PROXY_FEEDS[asset]?.pipSize??null,
       officialReferencePrice:null,proxyIndexDifference:null};
     if(!last || at-last.sourceAt<0 || at-last.sourceAt>2000)return {...meta,status:'UNAVAILABLE_OR_STALE',price:null,estimatedCushion:null};
@@ -75,16 +87,22 @@ export class MetalsProxy {
     ws.on('pong',()=>{alive=true;});
     ws.on('open',()=>{
       if(this.stopped){ws.close();return;}
-      ws.send(JSON.stringify({type:'subscribe',subscriptionId:1,priceFeedIds:[346,345],
-        properties:['price','exponent','confidence','feedUpdateTimestamp','marketSession'],formats:[],channel:'fixed_rate@200ms',ignoreInvalidFeeds:true}));
-      // Separate subscription: an FX entitlement rejection must not stop metals.
-      ws.send(JSON.stringify({type:'subscribe',subscriptionId:2,priceFeedIds:[327,340],
-        properties:['price','exponent','confidence','feedUpdateTimestamp','marketSession'],formats:[],channel:'fixed_rate@200ms',ignoreInvalidFeeds:true}));
+      // Isolate each new feed so an entitlement error leaves other subscriptions running.
+      for(const {id,assets} of SUBSCRIPTIONS) {
+        ws.send(JSON.stringify({type:'subscribe',subscriptionId:id,priceFeedIds:assets.map(a=>PROXY_FEEDS[a].id),
+          properties:['price','exponent','confidence','feedUpdateTimestamp','marketSession'],
+          formats:[],channel:'fixed_rate@200ms',ignoreInvalidFeeds:true}));
+      }
     });
     ws.on('message',data=>{
       try {const message=JSON.parse(data.toString());
         if(message.type==='subscriptionError') {
-          if(message.subscriptionId===2){this.log({event:'PROXY_SUBSCRIPTION_ERROR',endpoint:index,subscriptionId:2});return;}
+          const subscription=SUBSCRIPTIONS.find(s=>s.id===message.subscriptionId);
+          if(subscription && subscription.id!==1) {
+            this.log({event:'PROXY_SUBSCRIPTION_ERROR',endpoint:index,
+              subscriptionId:subscription.id,assets:subscription.assets});
+            return;
+          }
           denied=true;this.log({event:'PROXY_SUBSCRIPTION_ERROR',endpoint:index});ws.close();
         } else this.ingest(message);
       } catch {} // Do not print payloads or credentials.

@@ -95,7 +95,7 @@ export function observeWick(row, book, history, at, pullbacks, options={}) {
       requireLongRecovery:true,stabilizationSeconds:5});
     study.guards[side]=guard.guardState;
     if (!guard.allowed) continue;
-    const plan=estimateMetalEntry({book,side,stage:{budget:900,minPrice:.90},feeMultiplier:row.feeMultiplier});
+    const plan=estimateMetalEntry({book,side,stage:{budget:options.budget??900,minPrice:.90},feeMultiplier:row.feeMultiplier});
     if (!plan) continue;
     const wick=wickMetrics(history,at,row.target,sign,close,guard.crossingBufferRequired ? guard.crossingMinimum : options.floor);
     if (!wick) study.missingHistory++;
