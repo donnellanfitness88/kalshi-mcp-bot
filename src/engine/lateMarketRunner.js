@@ -3,6 +3,8 @@ import { scalpExecutor } from './scalpExecution.js';
 import { LIVE_LATE_MARKETS, fourMarketsEnabled } from './lateMarkets.js';
 import { metalBook } from '../research/metalsObserver.js';
 
+const MAX_EXECUTABLE_BOOK_AGE_MS = 2000;
+
 // Reuse the observer's existing discovery and Pyth connections. The observer
 // itself remains read-only. Only the shared journaled executor can send orders.
 export class LateMarketRunner {
@@ -15,19 +17,34 @@ export class LateMarketRunner {
     s.lastQuoteMessageTs=0;
     if (!market || market.ticker!==s.ticker || !['open','active'].includes(market.status))
       throw new Error('Live market no longer current');
-    const started=this.now();
-    const data=await this.observer.read('/markets/'+encodeURIComponent(s.ticker)+'/orderbook?depth=1');
-    const book=metalBook(data);
-    const elapsed=this.now()-started;
-    if(elapsed<0 || elapsed>2000) throw new Error('EXECUTABLE_BOOK_STALE_RESPONSE');
-    if(!book) throw new Error('EXECUTABLE_BOOK_INVALID_OR_CROSSED');
-    if(!book.yes && !book.no) throw new Error('EXECUTABLE_BOOK_EMPTY');
-    // Preserve absent quotes as absent. Never invent an opposite bid or offer.
-    s.lateBook=book;
-    s.yesAsk=book.yes?.price??null;s.yesBid=book.yesBid;
-    s.yesAskSize=book.yes?.size??0;s.noAskSize=book.no?.size??0;
-    // Age is measured from request start, not response completion.
-    s.lastQuoteMessageTs=started;
+    const ticker=s.ticker, closeTime=Date.parse(market.close_time), started=this.now();
+    let receivedAt=null, checkedAt=null, outcome='READ_ERROR';
+    try {
+      const data=await this.observer.read('/markets/'+encodeURIComponent(ticker)+'/orderbook?depth=1');
+      receivedAt=this.now();
+      const book=metalBook(data);
+      checkedAt=this.now();
+      const elapsed=checkedAt-started;
+      if(elapsed<0 || elapsed>MAX_EXECUTABLE_BOOK_AGE_MS) outcome='EXECUTABLE_BOOK_STALE_RESPONSE';
+      else if(!book) outcome='EXECUTABLE_BOOK_INVALID_OR_CROSSED';
+      else if(!book.yes && !book.no) outcome='EXECUTABLE_BOOK_EMPTY';
+      else outcome='ACCEPTED';
+      if(outcome!=='ACCEPTED') throw new Error(outcome);
+
+      // Preserve absent quotes as absent. Never invent an opposite bid or offer.
+      s.lateBook=book;
+      s.yesAsk=book.yes?.price??null;s.yesBid=book.yesBid;
+      s.yesAskSize=book.yes?.size??0;s.noAskSize=book.no?.size??0;
+      // Age is measured from request start, not response completion.
+      s.lastQuoteMessageTs=started;
+    } finally {
+      const completedAt=receivedAt??this.now();
+      this.log({event:'EXECUTABLE_BOOK_TIMING',asset,ticker,outcome,
+        requestMs:completedAt-started,bookAgeMs:checkedAt===null?null:checkedAt-started,
+        limitMs:MAX_EXECUTABLE_BOOK_AGE_MS,
+        secondsRemainingAtStart:(closeTime-started)/1000,
+        secondsRemainingAtCompletion:(closeTime-completedAt)/1000});
+    }
   }
   async tick() {
     if(this.busy)return;this.busy=true;
