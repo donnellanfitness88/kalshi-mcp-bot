@@ -27,10 +27,14 @@ const btcChartBudget = 10;
 const btcChartTrade = 'btc_wick_rejection';
 const btcBearishRetestTrade = 'btc_confirmed_bearish_retest';
 const btcBullishPullbackTrade = 'btc_confirmed_bullish_pullback';
+const btcBearishCandleTrade = 'btc_confirmed_bearish_candle_5s';
 const isBtcRetestTrade = strategy =>
-  strategy === btcBearishRetestTrade || strategy === btcBullishPullbackTrade;
-const btcBearishRetestStart = Date.parse('2026-11-22T05:38:00Z');
-const btcBearishRetestEnd = Date.parse('2026-11-22T16:00:00Z');
+  strategy === btcBearishRetestTrade || strategy === btcBullishPullbackTrade ||
+  strategy === btcBearishCandleTrade;
+function btcRetestStrategy(signal) {
+  if (signal.side === 'yes') return btcBullishPullbackTrade;
+  return signal.candleConfirmed ? btcBearishCandleTrade : btcBearishRetestTrade;
+}
 const btcChartTargetPerContract = 0.03;
 const btcChartHoldMs = 120000;
 const btcChartLegacyHoldMs = 240000;
@@ -353,9 +357,7 @@ export function createScalpExecutor(deps = {}) {
   let btcBearishRetestAttempted = [];
 
   function queueBtcBearishRetest(signal) {
-    if (signal.signalAt >= btcBearishRetestStart && signal.signalAt < btcBearishRetestEnd) {
-      queueBtcRetest(signal, 'no');
-    }
+    queueBtcRetest(signal, 'no');
   }
 
   function queueBtcBullishPullback(signal) {
@@ -429,8 +431,7 @@ export function createScalpExecutor(deps = {}) {
           estimatedExitFees: reserveFee(fill.count), startedAt: p.startedAt }),
           mode: p.mode ?? 'SCALP', entryOrderId: p.orderId, entryOrderIds: p.orderId ? [p.orderId] : [],
           ...(p.chartSignal ? { chartSignal: p.chartSignal, strategy: btcChartTrade } : {}),
-          ...(p.retestSignal ? { strategy: p.retestSignal.side === 'yes'
-            ? btcBullishPullbackTrade : btcBearishRetestTrade } : {}),
+          ...(p.retestSignal ? { strategy: btcRetestStrategy(p.retestSignal) } : {}),
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
@@ -921,8 +922,7 @@ export function createScalpExecutor(deps = {}) {
     const eligible = () => {
       const now = Date.now();
       const age = now - signal.signalAt;
-      if ((side === 'no' && now >= btcBearishRetestEnd) ||
-          (side === 'yes' && process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED === 'false') ||
+      if ((side === 'yes' && process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED === 'false') ||
           age < 0 || age > signal.maxQuoteDelayMs || btcRetestSignal !== signal || s.ticker !== signal.ticker ||
           s.marketCloseTs !== signal.close || signal.close <= now || s.activeTrade ||
           btcBearishRetestAttempted.includes(signal.ticker) ||

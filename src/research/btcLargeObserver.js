@@ -346,6 +346,11 @@ export class BtcLargeObserver {
       turn: { signalAt: study.turn.signalAt, downAsk: study.turn.downAsk },
       confirmed: study.confirmed ? { signalAt: study.confirmed.signalAt, downAsk: study.confirmed.downAsk } : null,
       quoteDelayMs: quoteAt == null ? null : quoteAt - confirmation.end });
+    if (confirmation && entry) {
+      this.onBearishRetest?.({ ticker, close, signalAt: confirmation.end, candleConfirmed: true,
+        breakLevel: rejection.low, maxAsk: quote.price, maxQuoteDelayMs: rules.maxQuoteDelayMs,
+        budget: rules.paperBudget, feeMultiplier: row.feeMultiplier });
+    }
   }
 
   async observeFailedRetest() {
