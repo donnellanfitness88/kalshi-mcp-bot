@@ -274,8 +274,17 @@ export function createScalpExecutor(deps = {}) {
       : getReferenceHistory(ctx.asset);
     const floor = checked.crossingBufferRequired ? checked.crossingMinimum : distance.minimumDistance;
     const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor);
-    return metrics?.heldMs >= 5000 ? {...checked,wickHeldMs:metrics.heldMs}
-      : {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
+    if (!(metrics?.heldMs >= 5000)) {
+      return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
+    }
+    const result = {...checked, wickHeldMs:metrics.heldMs};
+    if (ctx.asset === 'USDJPY' && distance.side === 'no') {
+      const strikeHeldMs = (floor === 0 ? metrics :
+        wickMetrics(rows, now, distance.target, -1, ctx.s.marketCloseTs, 0))?.heldMs ?? null;
+      result.strikeHeldMs = strikeHeldMs;
+      result.usdJpyDownWickBudget = strikeHeldMs >= 60000 ? wickBudgetFor(ctx.asset) : 50;
+    }
+    return result;
   }
   const targetCache = new Map();
   async function proximity(ctx, signal) {
@@ -587,7 +596,8 @@ export function createScalpExecutor(deps = {}) {
           ...ledger, attempted: [...new Set([...ledger.attempted, p.stageId])],
           records: { ...ledger.records, [p.stageId]: {
             spent: previous?.spent ?? 0, attempts: (previous?.attempts ?? 0) + 1,
-            lastAttemptAt: retryNow()
+            lastAttemptAt: retryNow(),
+            ...(p.shrinkingGuard?.usdJpyDownWickBudget === 50 ? { freshUsdJpyDownWick: true } : {})
           } }
         } };
       }
@@ -718,6 +728,8 @@ export function createScalpExecutor(deps = {}) {
     const cryptoWick = isCryptoWick(asset);
     if (cryptoWick && (!wick || !cryptoWickEnabled())) return;
     const originalTicker = s.ticker;
+    const wickRecord = lateStages[originalTicker]?.records?.[wickStage.id];
+    if (!wick && asset === 'USDJPY' && wickRecord?.freshUsdJpyDownWick && wickRecord.spent > 0) return;
     const wickWindowOpen = () => remainingSeconds(s)>0 && remainingSeconds(s)<180;
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
         lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
@@ -870,6 +882,10 @@ export function createScalpExecutor(deps = {}) {
     }
     if (shrinkCheck && !shrinkCheck.allowed) {
       entryBlocked(asset,shrinkCheck.reason,{shrinkingGuard:shrinkCheck}); return;
+    }
+    if (shrinkCheck?.usdJpyDownWickBudget != null) {
+      stageBudget = Math.min(stageBudget, shrinkCheck.usdJpyDownWickBudget);
+      count = lateStageSize(price, balance, stageBudget, feeMultiplier);
     }
     const final = readSignal();
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
