@@ -7,7 +7,7 @@ import { benchmarkFeed } from '../prices/cfBenchmarks.js';
 import { metalBook } from '../research/metalsObserver.js';
 import { lateFee, lateStageSize, scalpExecutor } from './scalpExecution.js';
 import { state } from './state.js';
-import { CRYPTO_WICK_ASSETS as assets, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
+import { CRYPTO_WICK_ASSETS as assets, ETH_WICK_PAPER_TIERS, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
 
 const fast = ['SOL', 'XRP', 'DOGE'];
 const slow = assets.filter(asset => !fast.includes(asset));
@@ -72,15 +72,15 @@ function connect() {
   }, 5000);
 }
 
-async function read(route) {
+async function read(route, timeoutMs = 2500) {
   const response = await fetch('https://api.elections.kalshi.com/trade-api/v2' + route, {
-    method: 'GET', redirect: 'error', signal: AbortSignal.timeout(2500),
+    method: 'GET', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error('Market discovery HTTP ' + response.status);
   return response.json();
 }
 
-async function discover(asset, now) {
+async function discover(asset, now, readMarket = read) {
   const data = metadata.get(asset) ?? { next: 0 };
   metadata.set(asset, data);
   if (now < data.next || Date.parse(data.market?.close_time) > now) return data;
@@ -88,11 +88,12 @@ async function discover(asset, now) {
   data.market = null;
   const ticker = 'KX' + asset + '15M';
   if (!data.series) {
-    const { series } = await read('/series/' + ticker);
+    const series = (await readMarket('/series/' + ticker))?.series;
     if (series?.ticker !== ticker) return data;
     data.series = series;
   }
-  const { markets } = await read('/markets?status=open&limit=50&series_ticker=' + ticker);
+  const markets = (await readMarket('/markets?status=open&limit=50&series_ticker=' + ticker))?.markets;
+  if (!Array.isArray(markets)) return data;
   data.market = markets.find(m => m.ticker?.startsWith(ticker + '-') &&
     Date.parse(m.open_time) <= now && Date.parse(m.close_time) > now &&
     Date.parse(m.close_time) - Date.parse(m.open_time) === 900000);
@@ -130,6 +131,9 @@ async function tick() {
 
 function startEthWickObserver() {
   const asset = 'ETH';
+  const metadataTimeoutMs = 6500;
+  const maxBookAgeMs = 2000;
+  const minimumCushionBps = Math.min(...ETH_WICK_PAPER_TIERS.map(tier => tier.bps));
   const log = event => console.log('[ETH_WICK_PAPER] ' + JSON.stringify({ asset, ...event }));
   const directory = process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url));
   const file = path.join(directory, 'eth_wick_paper.json');
@@ -145,7 +149,18 @@ function startEthWickObserver() {
   let checkedMarket;
   let nextMarketCheck = 0;
   let nextSettlement = 0;
+  let settling = false;
   let busy = false;
+
+  async function readPaper(route, operation, timeoutMs = metadataTimeoutMs) {
+    const startedAt = Date.now();
+    try { return await read(route, timeoutMs); }
+    catch (error) {
+      log({ event: 'READ_ERROR', operation, elapsedMs: Date.now() - startedAt, timeoutMs,
+        error: error.name, message: error.message });
+      return null;
+    }
+  }
 
   function save(ticker, position) {
     const next = { ...positions, [ticker]: position };
@@ -163,14 +178,14 @@ function startEthWickObserver() {
       .filter(point => point.sourceTs >= now - 125000);
   }
 
-  async function tickPaper() {
-    const now = Date.now();
-    updateReference(now);
-    if (now >= nextSettlement) {
-      nextSettlement = now + 15000;
+  async function settleDue(now) {
+    if (settling || now < nextSettlement) return;
+    settling = true;
+    nextSettlement = now + 15000;
+    try {
       for (const position of Object.values(positions)) {
         if (position.result || position.close > now) continue;
-        const { market } = await read('/markets/' + position.ticker);
+        const market = (await readPaper('/markets/' + position.ticker, 'SETTLEMENT'))?.market;
         if (market?.ticker !== position.ticker || market.status !== 'finalized' ||
             !['yes', 'no'].includes(market.result)) continue;
         const payout = market.result === position.side ? position.count : 0;
@@ -178,9 +193,14 @@ function startEthWickObserver() {
         save(position.ticker, settled);
         log({ event: 'SETTLED', ...settled });
       }
-    }
+    } finally { settling = false; }
+  }
 
-    const { market, series } = await discover(asset, now);
+  async function tickPaper() {
+    const now = Date.now();
+    updateReference(now);
+    const { market, series } = await discover(asset, now,
+      route => readPaper(route, route.startsWith('/series/') ? 'SERIES' : 'DISCOVERY'));
     const close = Date.parse(market?.close_time);
     const ticker = market?.ticker;
     const remaining = close - Date.now();
@@ -196,7 +216,7 @@ function startEthWickObserver() {
     }
     if (!checkedMarket && now >= nextMarketCheck) {
       nextMarketCheck = now + 5000;
-      const { market: details } = await read('/markets/' + ticker);
+      const details = (await readPaper('/markets/' + ticker, 'MARKET_DETAILS'))?.market;
       if (details?.ticker === ticker && ['open', 'active'].includes(details.status) &&
           details.strike_type === 'greater_or_equal' && Date.parse(details.close_time) === close &&
           Number.isFinite(Number(details.floor_strike)) && Number(details.floor_strike) > 0) {
@@ -205,24 +225,31 @@ function startEthWickObserver() {
     }
     if (!checkedMarket) return;
     const target = Number(checkedMarket.floor_strike);
+    const checkedAt = Date.now();
+    updateReference(checkedAt);
+    const latest = reference.at(-1);
+    if (!latest || !Number.isFinite(latest.price) || latest.sourceTs > checkedAt ||
+        checkedAt - latest.sourceTs > 2000 ||
+        Math.abs(latest.price - target) + 1e-9 < target * minimumCushionBps / 10000) return;
     const eligibleQuote = price => price >= 0.90 && price < 1 &&
       (close - Date.now() < 120000 || price <= 0.979);
-    const readBook = async () => {
+    const readBook = async operation => {
       const requestedAt = Date.now();
-      const book = metalBook(await read('/markets/' + ticker + '/orderbook?depth=1'));
-      return Date.now() - requestedAt <= 2000 && Date.now() < close ? book : null;
+      const data = await readPaper('/markets/' + ticker + '/orderbook?depth=1', operation, maxBookAgeMs);
+      const book = data ? metalBook(data) : null;
+      return Date.now() - requestedAt <= maxBookAgeMs && Date.now() < close ? book : null;
     };
     const tierFor = side => {
       const checkedAt = Date.now();
       updateReference(checkedAt);
       return cryptoWickTier({ history: reference, asset, ticker, side, target, close, now: checkedAt, guards });
     };
-    const book = await readBook();
+    const book = await readBook('ENTRY_BOOK');
     const side = ['yes', 'no'].find(key => eligibleQuote(book?.[key]?.price) && book[key].size >= 1);
     if (!side) return;
     const initialTier = tierFor(side);
     if (!initialTier?.allowed) return;
-    const quote = (await readBook())?.[side];
+    const quote = (await readBook('CONFIRM_BOOK'))?.[side];
     if (!quote || !eligibleQuote(quote.price) || quote.price !== book[side].price) return;
     const finalTier = tierFor(side);
     if (!finalTier?.allowed) return;
@@ -239,13 +266,15 @@ function startEthWickObserver() {
   }
 
   const run = async () => {
+    // Public settlement requests should not consume the entry observer's polling slot.
+    void settleDue(Date.now()).catch(error => log({ event: 'ERROR', operation: 'SETTLEMENT', message: error.message }));
     if (busy) return;
     busy = true;
     try { await tickPaper(); }
     catch (error) { log({ event: 'ERROR', message: error.message }); }
     finally { busy = false; }
   };
-  log({ event: 'STARTED', paper: true });
+  log({ event: 'STARTED', paper: true, metadataTimeoutMs, maxBookAgeMs });
   void run();
   const timer = setInterval(run, 1000);
   timer.unref?.();
