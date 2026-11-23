@@ -5,6 +5,7 @@ import { NinetyStudy } from './ninetyStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {MetalsProxy} from './metalsProxy.js';
+import {MassiveComparison} from './massiveComparison.js';
 import {evaluateShrinkingCushion} from '../engine/shrinkingCushion.js';
 
 // Observation only: this module never imports authenticated clients or order code.
@@ -423,11 +424,12 @@ export class MetalsObserver {
     this.paperTimer=setInterval(()=>void this.tickPaper(),5000); this.paperTimer.unref?.();
     return this;
   }
-  stop() { clearInterval(this.timer); clearInterval(this.paperTimer); this.proxy?.stop(); }
+  stop() { clearInterval(this.timer); clearInterval(this.paperTimer); this.massiveComparison?.stop(); this.proxy?.stop(); }
 }
 
 export function startMetalsObserver() {
   const observer=new MetalsObserver();
   observer.proxy=new MetalsProxy({log:event=>observer.emit(event)}).start(process.env.PYTH_PRO_API_KEY);
+  observer.massiveComparison=new MassiveComparison(observer).start(process.env.MASSIVE_API_KEY);
   return observer.start();
 }
