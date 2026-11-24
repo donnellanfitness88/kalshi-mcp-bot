@@ -14,7 +14,8 @@ const riskDayFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/N
   year: 'numeric', month: '2-digit', day: '2-digit' });
 const riskDay = now => riskDayFormatter.format(new Date(now));
 
-export function checkRiskGuards(s, balance, fastCooldown = false, { skipLossCooldown = false } = {}) {
+export function checkRiskGuards(s, balance, fastCooldown = false,
+  { skipLossCooldown = false, skipLossGuards = false } = {}) {
   const now = Date.now();
   const today = riskDay(now);
   // A daily cap expires at midnight Eastern, independently of process restarts.
@@ -22,6 +23,7 @@ export function checkRiskGuards(s, balance, fastCooldown = false, { skipLossCool
   if (s.riskDay && s.riskDay !== today && Number.isFinite(balance) && balance > 0) {
     startDay(s, balance, now);
   } else if (!s.riskDay) s.riskDay = today;
+  if (skipLossGuards) return { blocked: false };
   const cooldown = fastCooldown ? RISK_COOLDOWN_FAST_MS : RISK_COOLDOWN_MS;
 
   if (!skipLossCooldown && now - s.lastLossTime < cooldown) {

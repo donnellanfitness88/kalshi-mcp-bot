@@ -899,21 +899,9 @@ export function createScalpExecutor(deps = {}) {
         s.sessionKillAt = null;
         s.sessionPnL = 0;
       }
-      let liveRisk=checkRiskGuards(s,balance);
-      const eurResetDay = '2026-11-18';
-      if (!sim && asset === 'EURUSD' && s.riskDay === eurResetDay &&
-          s.eurUsdDailyReset?.day !== eurResetDay && liveRisk.reason === 'DAILYCAP') {
-        s.eurUsdDailyReset = {
-          day: eurResetDay,
-          previousDailyPnL: s.dailyPnL,
-          previousBaseline: s.dailyStartBalance
-        };
-        startDay(s, balance);
-        persist();
-        liveRisk = checkRiskGuards(s, balance);
-        log({event: 'EURUSD_DAILY_RESET', asset, newBaseline: balance,
-          ...s.eurUsdDailyReset, remainingBlock: liveRisk.reason ?? null});
-      }
+      let liveRisk = checkRiskGuards(s, balance, false, {
+        skipLossGuards: !sim && asset === 'EURUSD'
+      });
       const resetDay='2026-11-17';
       if (!sim && asset==='USDJPY' && s.riskDay===resetDay &&
           s.usdJpyDailyReset?.day!==resetDay && liveRisk.reason==='DAILYCAP') {
