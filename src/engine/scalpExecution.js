@@ -978,6 +978,7 @@ export function createScalpExecutor(deps = {}) {
   }
 
   async function enterBtcChart(ctx) {
+    if (process.env.BTC_WICK_REJECTION_LIVE_ENABLED !== 'true') return;
     const { asset, s } = ctx;
     const signal = btcChartSignal;
     if (asset !== 'BTC' || !signal || s.ticker !== signal.ticker ||
