@@ -837,6 +837,15 @@ export function createScalpExecutor(deps = {}) {
     if (isFourMarket(asset)) {
       if (s.sessionStartBalance===null) startSession(s,balance);
       if (s.dailyStartBalance===null) startDay(s,balance);
+      // Release only the USD/JPY session hold recorded after the Nov 23 9 p.m. PT settlement.
+      if (!sim && asset === 'USDJPY' &&
+          s.sessionKillAt >= Date.parse('2026-11-24T05:00:00Z') &&
+          s.sessionKillAt < Date.parse('2026-11-24T05:12:06Z')) {
+        log({ event: 'USDJPY_SESSION_HOLD_RELEASED', asset, sessionKillAt: s.sessionKillAt,
+          previousSessionPnL: s.sessionPnL, dailyPnL: s.dailyPnL });
+        s.sessionKillAt = null;
+        s.sessionPnL = 0;
+      }
       let liveRisk=checkRiskGuards(s,balance);
       const eurResetDay = '2026-11-18';
       if (!sim && asset === 'EURUSD' && s.riskDay === eurResetDay &&
