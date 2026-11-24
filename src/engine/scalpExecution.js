@@ -280,7 +280,7 @@ export function createScalpExecutor(deps = {}) {
     const rows = isFourMarket(ctx.asset)
       ? ctx.proxy.history[ctx.asset].map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}))
       : getReferenceHistory(ctx.asset);
-    const floor = checked.crossingBufferRequired ? checked.crossingMinimum : distance.minimumDistance;
+    const floor = checked.crossingWickMinimum ?? distance.minimumDistance;
     const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor);
     if (!(metrics?.heldMs >= 5000)) {
       return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
