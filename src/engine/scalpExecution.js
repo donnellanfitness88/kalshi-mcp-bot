@@ -163,14 +163,31 @@ export function entryPhase(seconds) {
 // Only the current time tier is eligible; missed earlier tiers are not backfilled.
 export function lateStage(seconds, asset = 'BTC', ledger = null) {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  const fifthSpent=ledger?.records?.under_45?.spent;
-  const extraReady=asset!=='ETH' && Number.isFinite(fifthSpent) && fifthSpent>=50;
+  const fifthStage = ledger?.records?.under_45;
+  const fifthSpent = fifthStage?.spent;
+  const extraReady = asset !== 'ETH' && Number.isFinite(fifthSpent) && fifthSpent >= 50 &&
+    fifthStage.ladderCap === undefined;
   return lateStagesFor(asset).filter(stage=>stage.id!=='under_45_extra'||extraReady)
     .findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
 export function productionLateStage(seconds, asset, ledger) {
   if ((asset === 'BTC' || isFourMarket(asset)) && seconds >= 60) return null;
   return lateStage(seconds, asset, ledger);
+}
+
+const usesLadderCushionCap = asset => asset === 'GOLD' || asset === 'EURUSD';
+
+function reducedLadderCap(asset, stageId, ledger, cushion) {
+  if (!usesLadderCushionCap(asset) || stageId !== 'under_45') return undefined;
+  const existingCap = ledger?.records?.[stageId]?.ladderCap;
+  if (existingCap !== undefined) return existingCap;
+
+  const previousStageId = ledger?.attempted?.findLast(id =>
+    id !== wickStage.id && id !== stageId && ledger.records?.[id]?.spent > 0);
+  const previousCushion = ledger?.records?.[previousStageId]?.fillCushion;
+  if (Number.isFinite(previousCushion) && Number.isFinite(cushion) &&
+      previousCushion - cushion > 1e-9) return 50;
+  return undefined;
 }
 
 export function lateStageSize(price, balance, budget, feeMultiplier = 1) {
@@ -458,14 +475,20 @@ export function createScalpExecutor(deps = {}) {
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
-      const stageLimit = p.stageId === wickStage.id ? wickBudgetFor(p.asset) : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget;
+      const stageLimit = p.ladderCap ?? stageRecord?.ladderCap ?? (p.stageId === wickStage.id
+        ? wickBudgetFor(p.asset) : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget);
+      const fillCushion = p.shrinkingGuard?.currentCushion;
+      const recordCushion = usesLadderCushionCap(p.asset) && p.stageId !== wickStage.id &&
+        Number.isFinite(fillCushion);
       if (p.stageId && stageRecord && stageRecord.spent + cost > stageLimit + 1e-9) {
         throw new Error('Late fill exceeds remaining stage budget');
       }
       const nextStages = p.stageId ? { ...lateStages, [p.body.ticker]: { ...ledger,
         spent: ledger.spent + cost,
         ...(stageRecord ? { records: { ...ledger.records, [p.stageId]: {
-          ...stageRecord, spent: stageRecord.spent + cost
+          ...stageRecord, spent: stageRecord.spent + cost,
+          ...(recordCushion ? { fillCushion } : {}),
+          ...(p.ladderCap !== undefined ? { ladderCap: p.ladderCap } : {})
         } } } : {})
       } } : lateStages;
       // Save aggregate and clear pending together, before changing memory. A failed
@@ -477,7 +500,8 @@ export function createScalpExecutor(deps = {}) {
       log({ event: 'ENTRY_CONFIRMED', asset: p.asset, ...fill, sim: p.sim, mode: p.mode,
         side: p.side, stage: p.stageId, strategy: next.strategy, chartConfirmation: p.chartConfirmation,
         retestSignal: p.retestSignal,
-        ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard, totalContracts: next.count, totalCost: next.originalCost });
+        ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard,
+        ladderCap: p.ladderCap, totalContracts: next.count, totalCost: next.originalCost });
       return;
     } else if (p.kind === 'entry' && p.stageId && !fill.count) {
       const saved = snapshot(); saved.pending = null;
@@ -619,7 +643,7 @@ export function createScalpExecutor(deps = {}) {
         lateStages = { ...lateStages, [p.body.ticker]: {
           ...ledger, attempted: [...new Set([...ledger.attempted, p.stageId])],
           records: { ...ledger.records, [p.stageId]: {
-            spent: previous?.spent ?? 0, attempts: (previous?.attempts ?? 0) + 1,
+            ...previous, spent: previous?.spent ?? 0, attempts: (previous?.attempts ?? 0) + 1,
             lastAttemptAt: retryNow(),
             ...(p.shrinkingGuard?.usdJpyDownWickBudget === 50 ? { freshUsdJpyDownWick: true } : {})
           } }
@@ -889,7 +913,8 @@ export function createScalpExecutor(deps = {}) {
     const fresh = readSignal();
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
     const price = priceFor(fresh.direction);
-    let stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - (lateStages[ticker]?.records?.[fresh.stage.id]?.spent ?? 0),
+    const stageSpent = lateStages[ticker]?.records?.[fresh.stage?.id]?.spent ?? 0;
+    let stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - stageSpent,
       (wick ? totalBudget(asset) : lateBudgetFor(asset)+(lateStages[ticker]?.records?.wick_5s?.spent ?? 0)) - (lateStages[ticker]?.spent ?? 0)) : null;
     const feeMultiplier=hasIndependentRisk(asset)?s.lateFeeMultiplier:1;
     let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
@@ -924,6 +949,11 @@ export function createScalpExecutor(deps = {}) {
       stageBudget = Math.min(stageBudget, shrinkCheck.usdJpyDownWickBudget);
       count = lateStageSize(price, balance, stageBudget, feeMultiplier);
     }
+    const ladderCap = reducedLadderCap(asset, fresh.stage?.id, lateStages[ticker], shrinkCheck?.currentCushion);
+    if (ladderCap !== undefined) {
+      stageBudget = Math.min(stageBudget, ladderCap - stageSpent);
+      count = lateStageSize(price, balance, stageBudget, feeMultiplier);
+    }
     const final = readSignal();
     if (s.ticker !== ticker || s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || !final.shouldEnter ||
         final.direction !== fresh.direction || final.stage?.id !== fresh.stage?.id ||
@@ -946,7 +976,7 @@ export function createScalpExecutor(deps = {}) {
     if (mode === 'LATE_SETTLEMENT') body.time_in_force = 'immediate_or_cancel';
     body.client_order_id = crypto.randomUUID();
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
-      stageId: fresh.stage?.id, stageBudget, proximity: distanceCheck, shrinkingGuard: volatilityGuard ? { ...shrinkCheck, volatilityGuard } : shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
+      stageId: fresh.stage?.id, stageBudget, ladderCap, proximity: distanceCheck, shrinkingGuard: volatilityGuard ? { ...shrinkCheck, volatilityGuard } : shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
   async function enterBtcRetest(ctx) {
     const { asset, s } = ctx;

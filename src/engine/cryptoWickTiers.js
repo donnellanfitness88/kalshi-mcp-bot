@@ -55,6 +55,7 @@ export function cryptoWickTier({ history, asset, ticker, side, target, close, no
   if (cooldown) return cooldown;
   let qualified = null;
   const isEthPaper = asset === 'ETH';
+  const minimumHoldMs = asset === 'HYPE' ? 15000 : 5000;
   const tiers = isEthPaper ? ETH_WICK_PAPER_TIERS : CRYPTO_WICK_TIERS;
   for (const tier of tiers) {
     const floor = target * tier.bps / 10000;
@@ -66,7 +67,7 @@ export function cryptoWickTier({ history, asset, ticker, side, target, close, no
     if (check.guardState) guards[key] = check.guardState;
     if (qualified || !check.allowed || (!isEthPaper && check.currentCushion <= floor + 1e-9)) continue;
     const wick = wickMetrics(history, now, target, side === 'yes' ? 1 : -1, close, floor);
-    if (wick?.heldMs >= 5000) qualified = { ...check, ...tier, floor, wickHeldMs: wick.heldMs };
+    if (wick?.heldMs >= minimumHoldMs) qualified = { ...check, ...tier, floor, wickHeldMs: wick.heldMs };
   }
   return qualified;
 }
