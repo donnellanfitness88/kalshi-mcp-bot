@@ -6,7 +6,7 @@ export const PROXY_FEEDS = {GOLD:{id:346,symbol:'Metal.XAU/USD',quoteUnit:'USD',
   EURUSD:{id:327,symbol:'FX.EUR/USD',quoteUnit:'USD per EUR',pipSize:.0001},
   USDJPY:{id:340,symbol:'FX.USD/JPY',quoteUnit:'JPY per USD',pipSize:.01},
   WTI:{id:3063,symbol:'Commodities.Index.PYTHOIL/USD',quoteUnit:'USD per barrel',pipSize:null},
-  COPPER:{id:3525,symbol:'Commodities.Index.CU/USD',quoteUnit:'USD per pound',pipSize:null},
+  COPPER:{id:3266,symbol:'Commodities.Index.COPPER/USD',quoteUnit:'USD per pound',pipSize:null},
   USDCAD:{id:338,symbol:'FX.USD/CAD',quoteUnit:'CAD per USD',pipSize:.0001}};
 const SUBSCRIPTIONS = [
   {id:1,assets:['GOLD','SILVER']},
