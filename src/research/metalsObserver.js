@@ -430,6 +430,8 @@ export class MetalsObserver {
 export function startMetalsObserver() {
   const observer=new MetalsObserver();
   observer.proxy=new MetalsProxy({log:event=>observer.emit(event)}).start(process.env.PYTH_PRO_API_KEY);
-  observer.massiveComparison=new MassiveComparison(observer).start(process.env.MASSIVE_API_KEY);
+  if (process.env.MASSIVE_COMPARISON_ENABLED === 'true') {
+    observer.massiveComparison=new MassiveComparison(observer).start(process.env.MASSIVE_API_KEY);
+  }
   return observer.start();
 }
