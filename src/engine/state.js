@@ -1,3 +1,4 @@
+import { PILOT_WICK_MARKETS } from './lateMarkets.js';
 import { CRYPTO_WICK_ASSETS } from './cryptoWickTiers.js';
 // Shared mutable state for both assets — read by MCP tools and terminal
 
@@ -76,6 +77,7 @@ export const state = {
   SILVER: createAssetState(),
   EURUSD: createAssetState(),
   USDJPY: createAssetState(),
+  ...Object.fromEntries(Object.keys(PILOT_WICK_MARKETS).map(asset => [asset, createAssetState()])),
   ...Object.fromEntries(CRYPTO_WICK_ASSETS.map(asset => [asset, createAssetState()])),
   balance: null, // dollars (updated every 30s)
 

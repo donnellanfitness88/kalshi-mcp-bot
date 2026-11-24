@@ -1,7 +1,7 @@
 const minimum = { EURUSD: 0.00030, USDJPY: 0.030, GOLD: 4, SILVER: 0.10 };
 
-export function repeatedCrossingGuard(check, asset, side, target, close, now, history) {
-  const repeatedMinimum = minimum[asset];
+export function repeatedCrossingGuard(check, asset, side, target, close, now, history,
+  repeatedMinimum = minimum[asset]) {
   if (!check?.allowed || repeatedMinimum === undefined) return check;
   const start = close - 180000;
   const latest = history?.at(-1);

@@ -1,6 +1,7 @@
 import { state } from './state.js';
 import { scalpExecutor } from './scalpExecution.js';
-import { LIVE_LATE_MARKETS, fourMarketsEnabled } from './lateMarkets.js';
+import { LIVE_LATE_MARKETS, fourMarketsEnabled, isPilotWick, pilotWickEnabled,
+  PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from './lateMarkets.js';
 import { metalBook } from '../research/metalsObserver.js';
 
 const MAX_EXECUTABLE_BOOK_AGE_MS = 2000;
@@ -60,7 +61,7 @@ export class LateMarketRunner {
         } else s.lastQuoteMessageTs=0;
         try {
           // Also service restored holdings when closed, disabled, or no feed exists.
-          if(!s.activeTrade && (!fourMarketsEnabled() || !market))continue;
+          if(!s.activeTrade && (!fourMarketsEnabled() || !market || (isPilotWick(asset) && !pilotWickEnabled())))continue;
           await this.executor.tick({asset,s,balance:this.shared.balance,
             proxy:this.observer.proxy,refreshQuote:()=>this.refreshQuote(asset)});
         } catch(error) {this.log({event:'ERROR',asset,message:error.message});}
@@ -70,6 +71,8 @@ export class LateMarketRunner {
   start() {
     this.log({event:'STARTED',enabled:fourMarketsEnabled(),markets:LIVE_LATE_MARKETS,
       capPerMarket:1082,totalCapIncludingBTC:5410,largeBTC:'OBSERVATION_ONLY',
+      pilotWick:{enabled:fourMarketsEnabled() && pilotWickEnabled(),budgetPerMarket:PILOT_WICK_BUDGET,
+        cutoffSeconds:PILOT_WICK_CUTOFF_SECONDS},
       reference:'PYTH_SPOT_PROXY_NOT_SETTLEMENT',fixedMinimum:null,
       rapidDropFraction:.30,recoverySeconds:2});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;

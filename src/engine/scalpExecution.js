@@ -2,7 +2,8 @@ import { advanceBtcStructureScalp } from '../research/btcRangeScalp.js';
 import { CRYPTO_WICK_TIERS, isCryptoWick, cryptoWickEnabled, cryptoWickTier } from './cryptoWickTiers.js';
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
-import { MANAGED_ASSETS, isFourMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS } from './lateMarkets.js';
+import { MANAGED_ASSETS, isPythLateMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS,
+  isPilotWick, pilotWickEnabled, PILOT_WICK_MARKETS, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from './lateMarkets.js';
 import { wickMetrics } from '../research/btcWickStudy.js';
 import { metalBook, metalShrinkingCheck } from '../research/metalsObserver.js';
 import { startSession, startDay } from './riskManager.js';
@@ -44,13 +45,14 @@ const btcChartSetupWindowMs = 90000;
 const btcChartMaxReferenceGapMs = 1500;
 const btcChartMinEntryPrice = 0.05;
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
-const wickAsset = asset => asset==='BTC' || isFourMarket(asset) || isCryptoWick(asset);
+const wickAsset = asset => asset==='BTC' || isPythLateMarket(asset) || isCryptoWick(asset);
 const wickBudgetFor = asset => {
-  if (isFourMarket(asset)) return 300;
+  if (isPilotWick(asset)) return PILOT_WICK_BUDGET;
+  if (isPythLateMarket(asset)) return 300;
   return isCryptoWick(asset) ? CRYPTO_WICK_TIERS[0].budget : 200;
 };
-const hasIndependentRisk = asset => isFourMarket(asset) || isCryptoWick(asset);
-const totalBudget = asset => (isCryptoWick(asset) ? 0 : lateBudgetFor(asset)) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
+const hasIndependentRisk = asset => isPythLateMarket(asset) || isCryptoWick(asset);
+const totalBudget = asset => (isCryptoWick(asset) || isPilotWick(asset) ? 0 : lateBudgetFor(asset)) + (wickAsset(asset) ? wickBudgetFor(asset) : 0);
 const journalPath = path.join(process.env.SCALP_STATE_DIR ?? fileURLToPath(new URL('../../data/', import.meta.url)), 'scalp_execution.json');
 function saveJournal(value) {
   fs.mkdirSync(path.dirname(journalPath), { recursive: true });
@@ -171,7 +173,8 @@ export function lateStage(seconds, asset = 'BTC', ledger = null) {
     .findLast(stage => seconds < stage.maxSeconds) ?? null;
 }
 export function productionLateStage(seconds, asset, ledger) {
-  if ((asset === 'BTC' || isFourMarket(asset)) && seconds >= 60) return null;
+  if (isPilotWick(asset)) return null;
+  if ((asset === 'BTC' || isPythLateMarket(asset)) && seconds >= 60) return null;
   return lateStage(seconds, asset, ledger);
 }
 
@@ -249,9 +252,9 @@ export function createScalpExecutor(deps = {}) {
   function shrinkingCheck(ctx, distance, stageBudget, wick = false) {
     const key = wick ? 'wick:'+ctx.asset+':'+distance.side : ctx.asset;
     const requireLongRecovery=wick || stageBudget>=25;
-    const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isFourMarket(ctx.asset)} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
+    const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isPythLateMarket(ctx.asset)} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
     // Every late purchase must pass, including the first purchase.
-    const check = isFourMarket(ctx.asset) ? metalShrinkingCheck({
+    const check = isPythLateMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
       history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[key],
@@ -268,9 +271,10 @@ export function createScalpExecutor(deps = {}) {
     }
     const now = Date.now();
     const projected = entryCrossingBuffer(check, ctx.asset, remainingSeconds(ctx.s, now), now);
-    const checked = projected?.allowed && isFourMarket(ctx.asset)
+    const pilot = PILOT_WICK_MARKETS[ctx.asset];
+    const checked = projected?.allowed && isPythLateMarket(ctx.asset)
       ? repeatedCrossingGuard(projected, ctx.asset, distance.side, distance.target,
-          ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset])
+          ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset], pilot?.repeatedCrossingCushion)
       : projected;
     if (!wick && checked?.allowed && ctx.asset === 'USDJPY') {
       const records = lateStages[ctx.s.ticker]?.records ?? {};
@@ -282,6 +286,13 @@ export function createScalpExecutor(deps = {}) {
       }
     }
     if (!wick || !checked?.allowed) return checked;
+    if (pilot && !checked.crossingHistoryComplete) {
+      return {...checked, allowed: false, reason: 'PILOT_WICK_CROSSING_HISTORY_INCOMPLETE'};
+    }
+    if (pilot && !(checked.currentCushion + 1e-9 >= pilot.minimumCushion)) {
+      return {...checked, allowed: false, reason: 'PILOT_WICK_CUSHION_TOO_SMALL',
+        minimumCushion: pilot.minimumCushion};
+    }
     if (ctx.asset === 'EURUSD' && checked.guardState?.triggeredAt != null) {
       const change15 = checked.longRecovery?.cushionChange15;
       if (!Number.isFinite(change15) || change15 <= 1e-9) {
@@ -300,7 +311,7 @@ export function createScalpExecutor(deps = {}) {
       return {...checked, allowed: false, reason: 'SILVER_WICK_CUSHION_TOO_SMALL',
         silverWickMinimum};
     }
-    const rows = isFourMarket(ctx.asset)
+    const rows = isPythLateMarket(ctx.asset)
       ? ctx.proxy.history[ctx.asset].map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}))
       : getReferenceHistory(ctx.asset);
     const floor = checked.crossingWickMinimum ?? distance.minimumDistance;
@@ -309,6 +320,9 @@ export function createScalpExecutor(deps = {}) {
       return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
     }
     const result = {...checked, wickHeldMs:metrics.heldMs};
+    if (pilot && checked.targetCrossings > 0 && metrics.heldMs < 15000) {
+      return {...result, allowed: false, reason: 'PILOT_WICK_CROSSING_HOLD'};
+    }
     if (ctx.asset === 'EURUSD' && checked.targetCrossings === 1 &&
         checked.crossingHistoryComplete && metrics.heldMs < 15000) {
       return {...result, allowed: false, reason: 'EURUSD_WICK_FIRST_CROSSING_HOLD'};
@@ -351,7 +365,7 @@ export function createScalpExecutor(deps = {}) {
       return { allowed: valid, reason: valid ? 'CRYPTO_WICK_TARGET_OK' : 'INVALID_CRYPTO_WICK_MARKET',
         side: signal.direction === 'UP' ? 'yes' : 'no', target };
     }
-    if (isFourMarket(ctx.asset)) {
+    if (isPythLateMarket(ctx.asset)) {
       const metadata=targetCache.get(ctx.asset)?.market;
       const expected=LIVE_LATE_MARKETS[ctx.asset];
       if (!metadata || metadata.exchange_index!==expected.exchangeIndex ||
@@ -728,14 +742,14 @@ export function createScalpExecutor(deps = {}) {
         (Number(p.position_fp) !== 0 && trade?.ticker !== p.ticker))) return false;
     return scopedAccountRows(await api.getOrders({ status: 'resting' }), asset).length === 0;
   }
-  const executablePrice=(s,direction,asset)=>isFourMarket(asset)
+  const executablePrice=(s,direction,asset)=>isPythLateMarket(asset)
     ? s.lateBook?.[direction==='UP'?'yes':'no']?.price
     : direction==='UP'?s.yesAsk:1-s.yesBid;
   function entrySignal(s, mode) {
     const now = Date.now(), asset=assetNames().find(asset=>shared[asset]===s);
     if (!Number.isFinite(s.lastQuoteMessageTs) || now - s.lastQuoteMessageTs > 2000 ||
         s.lastQuoteMessageTs > now) return { shouldEnter: false };
-    if (!isFourMarket(asset) && (![s.yesAsk, s.yesBid].every(Number.isFinite) ||
+    if (!isPythLateMarket(asset) && (![s.yesAsk, s.yesBid].every(Number.isFinite) ||
         s.yesBid <= 0 || s.yesAsk >= 1 || s.yesAsk < s.yesBid)) return { shouldEnter: false };
     if (mode === 'SCALP') {
       return { shouldEnter: false, reason: 'ALL_SCALP_ENTRIES_DISABLED' };
@@ -757,7 +771,7 @@ export function createScalpExecutor(deps = {}) {
     const candidates = [{ direction: 'UP', side: 'yes', price: executablePrice(s,'UP',asset) },
       { direction: 'DOWN', side: 'no', price: executablePrice(s,'DOWN',asset) }]
       .filter(c => (!side || c.side === side) && Number.isFinite(c.price) && c.price >= stage.minPrice - 1e-9 && c.price < 1 &&
-        (!isFourMarket(asset) || (Number.isFinite(s.lateBook?.[c.side]?.size) && s.lateBook[c.side].size>=1)))
+        (!isPythLateMarket(asset) || (Number.isFinite(s.lateBook?.[c.side]?.size) && s.lateBook[c.side].size>=1)))
       .sort((a, b) => b.price - a.price);
     return candidates.length ? { shouldEnter: true, direction: candidates[0].direction, stage } : { shouldEnter: false };
   }
@@ -777,15 +791,20 @@ export function createScalpExecutor(deps = {}) {
   async function enter(ctx, wick = false) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
+    const pilot = isPilotWick(asset);
+    if (pilot && (!wick || !pilotWickEnabled())) return;
     const cryptoWick = isCryptoWick(asset);
     if (cryptoWick && (!wick || !cryptoWickEnabled())) return;
     const originalTicker = s.ticker;
     const wickRecord = lateStages[originalTicker]?.records?.[wickStage.id];
     if (!wick && asset === 'USDJPY' && wickRecord?.freshUsdJpyDownWick && wickRecord.spent > 0) return;
-    const wickWindowOpen = () => remainingSeconds(s)>0 && remainingSeconds(s)<180;
+    const wickWindowOpen = () => {
+      const seconds = remainingSeconds(s);
+      return seconds > (pilot ? PILOT_WICK_CUTOFF_SECONDS : 0) && seconds < 180;
+    };
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
         lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
-    if (isFourMarket(asset)) {
+    if (isPythLateMarket(asset)) {
       if (!fourMarketsEnabled() || !ctx.refreshQuote || !ctx.proxy ||
           remainingSeconds(s)<=0 || remainingSeconds(s)>=180) return;
       if (!wick) await ctx.refreshQuote();
@@ -797,7 +816,7 @@ export function createScalpExecutor(deps = {}) {
     let wickBook, bookAt;
     async function readWickBook() {
       bookAt = Date.now();
-      if (isFourMarket(asset)) {
+      if (isPythLateMarket(asset)) {
         await ctx.refreshQuote();
         wickBook = s.lateBook;
       } else {
@@ -868,7 +887,7 @@ export function createScalpExecutor(deps = {}) {
       const liveRisk = checkRiskGuards(s,balance);
       if (liveRisk.blocked) { entryBlocked(asset,liveRisk.reason); return; }
     }
-    if (isFourMarket(asset)) {
+    if (isPythLateMarket(asset)) {
       if (s.sessionStartBalance===null) startSession(s,balance);
       if (s.dailyStartBalance===null) startDay(s,balance);
       // Release only the USD/JPY session hold recorded after the Nov 23 9 p.m. PT settlement.
@@ -918,7 +937,7 @@ export function createScalpExecutor(deps = {}) {
       (wick ? totalBudget(asset) : lateBudgetFor(asset)+(lateStages[ticker]?.records?.wick_5s?.spent ?? 0)) - (lateStages[ticker]?.spent ?? 0)) : null;
     const feeMultiplier=hasIndependentRisk(asset)?s.lateFeeMultiplier:1;
     let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
-    if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
+    if (!wick && isPythLateMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(asset, held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
     }
@@ -926,7 +945,7 @@ export function createScalpExecutor(deps = {}) {
     const btcCandle = btcWickRange ? await btcWickRange(Date.now()) : null;
     // The final account check may cross a time tier or receive a changed quote.
     if (wick) await readWickBook();
-    else if (isFourMarket(asset)) await ctx.refreshQuote();
+    else if (isPythLateMarket(asset)) await ctx.refreshQuote();
     const distanceCheck = mode === 'LATE_SETTLEMENT' ? await proximity(ctx, fresh) : null;
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
@@ -966,10 +985,10 @@ export function createScalpExecutor(deps = {}) {
       entryBlocked(asset, volatilityGuard.reason, { volatilityGuard });
       return;
     }
-    if (!wick && isFourMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
+    if (!wick && isPythLateMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (wick) count=Math.min(count,Math.floor(wickBook[final.direction==='UP'?'yes':'no'].size));
     if (!Number.isSafeInteger(count) || count<=0 || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price,feeMultiplier))) return;
-    const body = (wick || isFourMarket(asset)) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
+    const body = (wick || isPythLateMarket(asset)) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
       buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
     if (hasIndependentRisk(asset)) body.exchange_index=exchangeForAsset(asset);
