@@ -4,7 +4,7 @@ export const PILOT_WICK_MARKETS = Object.freeze({
   COPPER: {series:'KXCOPPER15M', exchangeIndex:2, minimumCushion:0.003, repeatedCrossingCushion:0.006},
   USDCAD: {series:'KXUSDCAD15M', exchangeIndex:0, minimumCushion:0.00015, repeatedCrossingCushion:0.00030}
 });
-export const PILOT_WICK_BUDGET = 10;
+export const PILOT_WICK_BUDGET = 100;
 export const PILOT_WICK_CUTOFF_SECONDS = 30;
 export const pilotWickEnabled = () => process.env.PILOT_WICK_LIVE_ENABLED !== 'false';
 
