@@ -1,6 +1,7 @@
-import { PullbackHistory, observeWick, updateWickTotals, wickOutcome } from './btcWickStudy.js';
+import { PullbackHistory, observeWick, updateWickTotals, wickMetrics, wickOutcome } from './btcWickStudy.js';
 import { entryCrossingBuffer } from '../engine/silverEntryBuffer.js';
 import { repeatedCrossingGuard } from '../engine/repeatedCrossingGuard.js';
+import { PILOT_WICK_MARKETS, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from '../engine/lateMarkets.js';
 import { NinetyStudy } from './ninetyStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,7 +32,7 @@ const SHRINK_TEST = 'all_four_shrinking_no_fixed_minimum_v1';
 // Shared observer/live qualification for the four approved markets.
 // No fixed distance/drop floor; live BTC retains its existing thresholds.
 export function metalShrinkingCheck({asset,ticker,side,target,proxy,history,
-  previous=null,at,secondsRemaining,requireLongRecovery=false,stabilizationSeconds=2,requireStableAlways=false,requireLongAlways=false}) {
+  previous=null,at,secondsRemaining,requireLongRecovery=false,stabilizationSeconds=2,requireStableAlways=false,requireLongAlways=false,paperRecoveryPullback=null}) {
   const blocked=reason=>({allowed:false,reason,guardState:previous});
   if(!Number.isFinite(target)||target<=0||!['yes','no'].includes(side))
     return blocked('INVALID_TARGET_OR_SIDE');
@@ -49,7 +50,7 @@ export function metalShrinkingCheck({asset,ticker,side,target,proxy,history,
   return evaluateShrinkingCushion({
     history:rows,asset,ticker,side,target,minimumDistance:0,
     rapidDropMinimum:0,observationOnlyNoMinimum:true,
-    secondsRemaining,previous,requireLongRecovery,stabilizationSeconds,requireStableAlways,requireLongAlways,now:at
+    secondsRemaining,previous,requireLongRecovery,stabilizationSeconds,requireStableAlways,requireLongAlways,paperRecoveryPullback,now:at
   });
 }
 const number = x => (typeof x === 'number' || (typeof x === 'string' && x.trim())) ? Number(x) : NaN;
@@ -95,6 +96,74 @@ export function estimateMetalEntry({book, stage, side, feeMultiplier}) {
       estimatedFee:fee(count), estimatedCost:count*q.price+fee(count), budget:stage.budget}];
   }).sort((a,b)=>b.price-a.price);
   return choices[0] ?? null;
+}
+
+const WTI_RECOVERY_TEST = 'wti_wick_recovery_v1';
+const WTI_RECOVERY_PULLBACK = 0.001; // USD per barrel.
+
+function observeWtiRecovery({row,book,proxy,proxyHistory,history,at,started,observerStartedAt}) {
+  const close=Date.parse(row.closeTime), secondsRemaining=(close-at)/1000;
+  if(secondsRemaining<=PILOT_WICK_CUTOFF_SECONDS || secondsRemaining>=180 || row.feeType!=='quadratic')
+    return [];
+  const models=row.wtiRecoveryStudy??={
+    partialWindow:observerStartedAt>close-180000,
+    strict:{guardStates:{},checks:0,blocked:{}},
+    bounded:{guardStates:{},checks:0,blocked:{}}
+  };
+  const side=['yes','no'].find(side=>{
+    const ask=book?.[side];
+    return ask?.price>=.90 && ask.price<1 && ask.size>=1 &&
+      (secondsRemaining<120 || ask.price<=.979);
+  });
+  if(!side) return [];
+  const plan=estimateMetalEntry({book,stage:{minPrice:.90,budget:PILOT_WICK_BUDGET},
+    side,feeMultiplier:row.feeMultiplier});
+  if(!plan) return [];
+  const reference=proxy?.snapshot('WTI',row.target,side);
+  const config=PILOT_WICK_MARKETS.WTI;
+  const events=[];
+  for(const model of ['strict','bounded']) {
+    const run=models[model];
+    if(run.candidate) continue;
+    run.checks++;
+    let guard=metalShrinkingCheck({asset:'WTI',ticker:row.ticker,side,target:row.target,
+      proxy:reference,history:proxyHistory,at,secondsRemaining,previous:run.guardStates[side],
+      requireLongRecovery:true,requireLongAlways:true,stabilizationSeconds:5,
+      paperRecoveryPullback:model==='bounded'?WTI_RECOVERY_PULLBACK:null});
+    if(guard.guardState) run.guardStates[side]=guard.guardState;
+    guard=repeatedCrossingGuard(guard,'WTI',side,row.target,close,at,proxyHistory,config.repeatedCrossingCushion);
+    let reason=guard.allowed?null:guard.reason;
+    if(!reason && !guard.crossingHistoryComplete) reason='PILOT_WICK_CROSSING_HISTORY_INCOMPLETE';
+    if(!reason && !(guard.currentCushion+1e-9>=config.minimumCushion)) reason='PILOT_WICK_CUSHION_TOO_SMALL';
+    const requiredHoldMs=guard.targetCrossings>0?15000:5000;
+    const wick=reason?null:wickMetrics(history,at,row.target,side==='yes'?1:-1,close,guard.crossingWickMinimum??0);
+    if(!reason && !(wick?.heldMs>=requiredHoldMs)) reason='WTI_RECOVERY_WICK_HOLD';
+    if(reason) {
+      run.blocked[reason]=(run.blocked[reason]??0)+1;
+      continue;
+    }
+    run.candidate={...plan,quotedAt:at,bookRequestMs:at-started,secondsRemaining,
+      target:row.target,referencePrice:reference.price,referenceAgeMs:at-reference.sourceAt,
+      cushion:guard.currentCushion,cushionChange15:guard.longRecovery.cushionChange15,
+      cushionChange60:guard.longRecovery.cushionChange60,targetCrossings:guard.targetCrossings,
+      heldMs:wick.heldMs,boundedRecovery:guard.boundedRecovery===true};
+    events.push({event:'WTI_RECOVERY_CANDIDATE',testId:WTI_RECOVERY_TEST,asset:'WTI',ticker:row.ticker,
+      model,...run.candidate});
+  }
+  return events;
+}
+
+function wtiRecoverySettlement(row) {
+  const study=row.wtiRecoveryStudy;
+  const models=Object.fromEntries(['strict','bounded'].map(model=>{
+    const {candidate,checks,blocked}=study[model];
+    const payout=candidate?.side===row.result?candidate.count:0;
+    return [model,{checks,blocked,candidate:candidate??null,payout,
+      netAfterEstimatedFees:candidate?payout-candidate.estimatedCost:0,
+      outcome:candidate?(payout?'win':'loss'):'no_entry'}];
+  }));
+  return {event:'WTI_RECOVERY_SETTLED',testId:WTI_RECOVERY_TEST,asset:'WTI',ticker:row.ticker,
+    result:row.result,partialWindow:study.partialWindow,models};
 }
 
 // Restrict the network adapter itself to public GET market/series endpoints.
@@ -237,6 +306,9 @@ export class MetalsObserver {
       this.persist(next,{event:paperOnly?'PAPER90_QUOTE':'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
     }
     if(!stage) return;
+    const wtiRecoveryEvents=asset==='WTI'
+      ?observeWtiRecovery({row,book,proxy:this.proxy,proxyHistory,history,at,started,observerStartedAt:this.startedAt})
+      :[];
     const candidate=!row.candidates.some(c=>c.stageId===stage.id) && row.feeType==='quadratic'
       ? estimateMetalEntry({book,stage,side:row.side,feeMultiplier:row.feeMultiplier}) : null;
     const quoteSide=book?.yes && (!book.no || book.yes.price>=book.no.price)?'yes':book?.no?'no':null;
@@ -290,6 +362,7 @@ export class MetalsObserver {
     }
     this.persist(next,candidate?{event:'CANDIDATE',asset,ticker:market.ticker,stageId:stage.id,
       ...candidate,target:row.target,proxySide,proxy,qualification:'PRICE_TIME_LIQUIDITY_ONLY',proximity:'NOT_EVALUATED',shrinkingGuard:'NOT_EVALUATED'}:null);
+    for(const event of wtiRecoveryEvents) this.emit(event);
     if(shrinkEvent)this.emit(shrinkEvent);
     if(paperOnly) {
       const range=proxy?.movement?.[60]?.range;
@@ -383,6 +456,7 @@ export class MetalsObserver {
     this.persist(next,{event:'SETTLED_ESTIMATE',asset:r.asset,ticker:r.ticker,result:r.result,
       candidates:r.candidates.length,estimatedCost:r.estimatedCost,hypotheticalPayout:r.hypotheticalPayout,
       hypotheticalNet:r.hypotheticalNet,filtersNotEvaluated:['proximity','shrinking-cushion','account-risk','available-cash']});
+    if(r.wtiRecoveryStudy)this.emit(wtiRecoverySettlement(r));
     if(wickResult)this.emit(wickResult);
     const quote=r.study90;
     const net=quote?.plan && !quote.ambiguous
@@ -417,7 +491,9 @@ export class MetalsObserver {
   start() {
     this.emit({event:'STARTED',mode:'PRICE_TIME_OBSERVATION',stages:METALS_STAGES,
       assets:METALS,paperAssets:PAPER_MARKETS,paperWickBudget:PAPER_WICK_BUDGET,
-      paperBooksRequireFreshProxy:true,shrinkingTest:{id:SHRINK_TEST,assets:Object.keys(METALS),
+      paperBooksRequireFreshProxy:true,wtiRecoveryTest:{id:WTI_RECOVERY_TEST,
+        budget:PILOT_WICK_BUDGET,maxPullback:WTI_RECOVERY_PULLBACK,models:['strict','bounded']},
+      shrinkingTest:{id:SHRINK_TEST,assets:Object.keys(METALS),
       fixedMinimum:null,rapidDropFraction:.30,recoverySeconds:2},referenceFeed:'NOT_CONNECTED',proxyFeed:this.proxy?'SPOT_PROXY_OPTIONAL':'NOT_CONNECTED',liveOrders:false});
     void this.tick(); this.timer=setInterval(()=>void this.tick(),5000); this.timer.unref?.();
     void this.tickPaper();
