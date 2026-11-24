@@ -4,7 +4,7 @@ import { wickMetrics } from '../research/btcWickStudy.js';
 export const CRYPTO_WICK_ASSETS = ['SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC'];
 export const isCryptoWick = asset => CRYPTO_WICK_ASSETS.includes(asset);
 export const cryptoWickEnabled = () => process.env.CRYPTO_WICK_LIVE_ENABLED === 'true';
-export const CRYPTO_WICK_TIERS = [{ bps: 32.5, budget: 100 }];
+export const CRYPTO_WICK_TIERS = [{ bps: 32.5, budget: 200 }];
 
 export const ETH_WICK_PAPER_TIERS = [
   { bps: 50, budget: 100 },
