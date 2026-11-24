@@ -265,6 +265,12 @@ export function createScalpExecutor(deps = {}) {
       }
     }
     if (!wick || !checked?.allowed) return checked;
+    if (ctx.asset === 'EURUSD' && checked.guardState?.triggeredAt != null) {
+      const change15 = checked.longRecovery?.cushionChange15;
+      if (!Number.isFinite(change15) || change15 <= 1e-9) {
+        return {...checked, allowed: false, reason: 'EURUSD_WICK_CUSHION_NOT_WIDENING'};
+      }
+    }
     if (ctx.asset === 'USDJPY') {
       const change60 = checked.longRecovery?.cushionChange60;
       if (!Number.isFinite(change60) || change60 <= 1e-9) {
