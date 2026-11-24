@@ -411,7 +411,8 @@ export function createScalpExecutor(deps = {}) {
 
   function btcRetestEntryEnabled(side, signal) {
     if (side === 'yes') return process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED === 'true';
-    return Boolean(signal.candleConfirmed) || process.env.BTC_BEARISH_RETEST_LIVE_ENABLED === 'true';
+    if (signal.candleConfirmed) return process.env.BTC_BEARISH_CANDLE_LIVE_ENABLED === 'true';
+    return process.env.BTC_BEARISH_RETEST_LIVE_ENABLED === 'true';
   }
 
   function queueBtcRetest(signal, side) {
