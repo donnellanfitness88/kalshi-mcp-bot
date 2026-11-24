@@ -365,10 +365,16 @@ export function createScalpExecutor(deps = {}) {
   }
 
   function queueBtcBullishPullback(signal) {
-    if (process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED !== 'false') queueBtcRetest(signal, 'yes');
+    queueBtcRetest(signal, 'yes');
+  }
+
+  function btcRetestEntryEnabled(side, signal) {
+    if (side === 'yes') return process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED !== 'false';
+    return Boolean(signal.candleConfirmed) || process.env.BTC_BEARISH_RETEST_LIVE_ENABLED === 'true';
   }
 
   function queueBtcRetest(signal, side) {
+    if (!btcRetestEntryEnabled(side, signal)) return;
     if (!btcRetestSignal || signal.signalAt > btcRetestSignal.signalAt) {
       btcRetestSignal = { ...signal, side };
     }
@@ -933,7 +939,7 @@ export function createScalpExecutor(deps = {}) {
     const eligible = () => {
       const now = Date.now();
       const age = now - signal.signalAt;
-      if ((side === 'yes' && process.env.BTC_BULLISH_PULLBACK_LIVE_ENABLED === 'false') ||
+      if (!btcRetestEntryEnabled(side, signal) ||
           age < 0 || age > signal.maxQuoteDelayMs || btcRetestSignal !== signal || s.ticker !== signal.ticker ||
           s.marketCloseTs !== signal.close || signal.close <= now || s.activeTrade ||
           btcBearishRetestAttempted.includes(signal.ticker) ||
