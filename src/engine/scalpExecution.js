@@ -292,6 +292,10 @@ export function createScalpExecutor(deps = {}) {
       return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
     }
     const result = {...checked, wickHeldMs:metrics.heldMs};
+    if (ctx.asset === 'EURUSD' && checked.targetCrossings === 1 &&
+        checked.crossingHistoryComplete && metrics.heldMs < 15000) {
+      return {...result, allowed: false, reason: 'EURUSD_WICK_FIRST_CROSSING_HOLD'};
+    }
     if (ctx.asset === 'USDJPY' && distance.side === 'no') {
       const strikeHeldMs = (floor === 0 ? metrics :
         wickMetrics(rows, now, distance.target, -1, ctx.s.marketCloseTs, 0))?.heldMs ?? null;
