@@ -1,5 +1,3 @@
-import { advanceBtcRangeScalp, advanceBtcStructureScalp, btcRangeScalpNeedsBook,
-  btcRangeScalpOutcome, BTC_RANGE_SCALP_RULES, BTC_STRUCTURE_RULES, sampleBtcRangeScalp } from './btcRangeScalp.js';
 import { wickRejectionSignal, wickScalpNeedsBook, observeWickRejectionScalp, wickRejectionScalpOutcomes } from './btcChartReversal.js';
 import { advanceBtcWedge, BTC_WEDGE_RULES } from './btcWedgeStudy.js';
 import { FiveMinuteBars, chartReversal, captureChartEntry, chartOutcome } from './btcChartReversal.js';
@@ -8,12 +6,7 @@ import { PullbackHistory, observeWick, wickOutcome, updateWickTotals } from './b
 import fs from 'node:fs';
 import path from 'node:path';
 import {metalBook,estimateMetalEntry} from './metalsObserver.js';
-import {evaluateShrinkingCushion} from '../engine/shrinkingCushion.js';
-
 // Research only. No authenticated client, order submission, or trading-state mutation.
-export const BTC_LARGE_RULES={budget:2500,maxSeconds:90,minPrice:.99,
-  minimumCushion:50,momentumSeconds:2,rangeSeconds:60,rangeMultiple:1.5,
-  maxReferenceAgeMs:2000,maxBookAgeMs:2000};
 export const BTC_FAILED_RETEST_RULES = Object.freeze({
   breakBelowTarget: 5, nearTarget: 10, minBounce: 10, turnDown: 5, breakBelowLow: 5,
   reclaimTarget: 3, maxReferenceGapMs: 2000, maxQuoteDelayMs: 7000, paperBudget: 10,
@@ -130,35 +123,6 @@ export function btcLargeStore(directory=path.join(process.env.SCALP_STATE_DIR??'
   return {load(){try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch(e){if(e.code==='ENOENT')return null;throw e;}},
     save(value){fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2));fs.renameSync(file+'.tmp',file);}};
 }
-export function evaluateBtcLarge({history,quote,target,side,secondsRemaining,now,previous=null,ticker}) {
-  const reject=(reason,detail={})=>({allowed:false,reason,...detail});
-  if(!(secondsRemaining>0&&secondsRemaining<90))return reject('OUTSIDE_TIME');
-  if(!Number.isFinite(target)||target<=0||!['yes','no'].includes(side))return reject('INVALID_TARGET_OR_SIDE');
-  if(quote?.source!=='CF_BENCHMARKS'||!Number.isFinite(quote.price)||
-    !Number.isSafeInteger(quote.sourceTs)||now-quote.sourceTs<0||now-quote.sourceTs>2000)
-    return reject('REFERENCE_UNAVAILABLE');
-  const sign=side==='yes'?1:-1,cushion=sign*(quote.price-target);
-  if(cushion<=50)return reject('CUSHION_NOT_ABOVE_50',{cushion});
-  const rows=(history??[]).filter(p=>Number.isSafeInteger(p.sourceTs)&&p.sourceTs<=now&&
-    Number.isFinite(p.price)&&p.price>0).sort((a,b)=>a.sourceTs-b.sourceTs);
-  const last=rows.at(-1),point=t=>rows.findLast(p=>p.sourceTs<=t&&t-p.sourceTs<=500);
-  if(!last||last.sourceTs!==quote.sourceTs)return reject('HISTORY_UNAVAILABLE',{cushion});
-  const first=point(last.sourceTs-60000),recent=first?rows.filter(p=>p.sourceTs>=first.sourceTs):[];
-  if(!first||recent.some((p,i)=>i&&p.sourceTs-recent[i-1].sourceTs>1500))
-    return reject('SIXTY_SECOND_HISTORY_REQUIRED',{cushion});
-  const range60=Math.max(...recent.map(p=>p.price))-Math.min(...recent.map(p=>p.price));
-  const guard=evaluateShrinkingCushion({history:rows,asset:'BTC',ticker,side,target,minimumDistance:50,
-    rapidDropMinimum:50,secondsRemaining,previous,now});
-  const detail={cushion,range60,requiredCushion:Math.max(50,1.5*range60),guard};
-  if(!guard.allowed)return reject(guard.reason,detail);
-  if(cushion<1.5*range60)return reject('VOLATILITY_CUSHION_TOO_SMALL',detail);
-  const checkpoints=Array.from({length:3},(_,i)=>point(last.sourceTs-(2-i)*1000));
-  if(checkpoints.some(p=>!p)||checkpoints.some((p,i)=>i&&sign*(p.price-checkpoints[i-1].price)<=1e-9))
-    return reject('TWO_SECOND_MOMENTUM_REQUIRED',detail);
-  return {allowed:true,reason:'QUALIFIED',...detail,momentumCheckpoints:checkpoints,
-    referencePrice:quote.price,referenceSourceTs:quote.sourceTs};
-}
-
 export class BtcLargeObserver {
   constructor({feed,read=publicBtcObservationRead,store=btcLargeStore(),now=Date.now,
     onWickSignal, onBearishRetest, onBullishPullback, log=e=>console.log('[BTC_LARGE_OBSERVER] '+JSON.stringify(e))}={}) {
@@ -185,7 +149,7 @@ export class BtcLargeObserver {
     if(this.current&&!this.state.markets[this.current.ticker]) {
       const next=structuredClone(this.state),m=this.current;
       next.markets[m.ticker]={ticker:m.ticker,closeTime:m.close_time,target:null,startedAt:this.now(),
-        feeMultiplier:Number(this.series.fee_multiplier),candidate:null,result:null,checks:[],guards:{}};
+        feeMultiplier:Number(this.series.fee_multiplier),result:null};
       this.persist(next,{event:'MARKET',ticker:m.ticker,closeTime:m.close_time});
     }
   }
@@ -285,24 +249,7 @@ export class BtcLargeObserver {
         row.spike.signal.at>=row.chartReversal.confirmedAt) {
       row.chartReversal.spikeConfirmationAt ??= row.spike.signal.at;
     }
-    if(seconds>=90||row.candidate){this.persist(next);return;}
-    const estimate=estimateMetalEntry({book,stage:{budget:2500,minPrice:.99},feeMultiplier:row.feeMultiplier});
-    const proposed=estimate&&estimate.count-estimate.estimatedCost>1e-9?estimate:null;
-    let check={allowed:false,reason:'NO_EXECUTABLE_PRICE_OR_VOLUME'};
-    if(proposed)check=evaluateBtcLarge({history:this.feed?.getHistory('BTC'),quote:this.feed?.getQuote('BTC'),
-      target:row.target,side:proposed.side,secondsRemaining:seconds,now:at,previous:row.guards[proposed.side],ticker:row.ticker});
-    if(proposed&&check.guard?.guardState)row.guards[proposed.side]=check.guard.guardState;
-    const sample={at,secondsRemaining:seconds,side:proposed?.side??null,price:proposed?.price??null,
-      target:row.target,...check};row.checks=[...row.checks,sample].slice(-120);
-    let event={event:'CHECK',ticker:row.ticker,...sample};
-    if(check.allowed) {
-      row.candidate={...proposed,...sample,fillAssumed:true,feesAreEstimated:true,
-        budget:2500,unusedBudget:2500-proposed.estimatedCost,
-        potentialNet:proposed.count-proposed.estimatedCost,fullBudgetFilled:proposed.estimatedCost>=2499};
-      event={event:'CANDIDATE',ticker:row.ticker,...row.candidate,
-        filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']};
-    }
-    this.persist(next,event);
+    this.persist(next);
   }
   async observeRetestCandles() {
     const ticker = this.current?.ticker;
@@ -452,69 +399,6 @@ export class BtcLargeObserver {
       }
     }
   }
-  async observeRangeScalp() {
-    const market = this.current;
-    if (!market) return;
-    const ticker = market.ticker;
-    const row = this.state.markets[ticker];
-    const close = Date.parse(market.close_time);
-    const now = this.now();
-    if (!row || now >= close) return;
-    if (this.rangeScalpTicker !== ticker) {
-      this.rangeScalpTicker = ticker;
-      this.rangeScalp = structuredClone(row.rangeScalp ?? {});
-      this.structureScalp = structuredClone(row.structureScalp ?? { up: {}, down: {} });
-    }
-    const baseline = structuredClone(this.rangeScalp);
-    const structure = structuredClone(this.structureScalp);
-    const cases = [
-      { study: baseline, variant: null },
-      { study: structure.up, variant: 'structure', leg: 'up' },
-      { study: structure.down, variant: 'structure', leg: 'down' },
-    ];
-    const open = Math.max(Date.parse(market.open_time), row.startedAt);
-    const history = this.feed?.getHistory?.('BTC') ?? [];
-    let changed = false;
-    const changes = [];
-    for (const test of cases) {
-      const { study, leg } = test;
-      test.prior = { ...study };
-      if (leg) advanceBtcStructureScalp(study, leg, history, open, close, now);
-      else advanceBtcRangeScalp(study, history, open, close, now);
-      for (const phase of ['downSignal', 'supportTouch', 'upSignal', 'invalidated']) {
-        if (!test.prior[phase] && study[phase]) {
-          changes.push({ variant: test.variant, leg, phase,
-            ...(phase === 'invalidated' ? { reason: study[phase] } : study[phase]) });
-        }
-      }
-    }
-    const active = cases.filter(({ study }) => btcRangeScalpNeedsBook(study, now, close));
-    if (active.length) {
-      try {
-        const data = await this.read('/markets/' + ticker + '/orderbook?depth=1');
-        const book = metalBook(data), at = this.now();
-        for (const { study, variant, leg, prior } of active) {
-          const samples = sampleBtcRangeScalp(study, book, row.feeMultiplier, now, at, close,
-            { downProfitTarget: leg === 'down' && study.downSignal?.support == null });
-          for (const sample of samples) changes.push({ variant, leg, ...sample });
-          changed ||= prior.downExitReason !== study.downExitReason ||
-            prior.upExitReason !== study.upExitReason;
-        }
-      } catch (error) {
-        this.emit({ event: 'RANGE_SCALP_QUOTE_ERROR', ticker, message: error.message });
-      }
-    }
-    if (changes.length || changed) {
-      this.persist({ ...this.state, markets: { ...this.state.markets,
-        [ticker]: { ...row, rangeScalp: baseline, structureScalp: structure } } });
-      for (const { variant, leg, ...change } of changes) {
-        this.emit(variant ? { event: 'STRUCTURE_SCALP_PAPER', ticker, leg, ...change } :
-          { event: 'RANGE_SCALP_PAPER', ticker, ...change });
-      }
-    }
-    this.rangeScalp = baseline;
-    this.structureScalp = structure;
-  }
   async observeWedges() {
     const step = advanceBtcWedge(this.chartBars.closed, this.state.btcWedgeStudy);
     if (step) {
@@ -561,6 +445,7 @@ export class BtcLargeObserver {
     if(!pending.length)return;this.cursor=(this.cursor??-1)+1;const row=pending[this.cursor%pending.length];
     const {market}=await this.read('/markets/'+row.ticker);
     if(market?.ticker!==row.ticker||!['finalized','settled'].includes(market.status)||!['yes','no'].includes(market.result))return;
+    // Finish any large-entry estimate recorded before that study was removed.
     const next=structuredClone(this.state),r=next.markets[row.ticker],c=r.candidate;
     r.result=market.result;r.settledAt=this.now();r.estimatedCost=c?.estimatedCost??0;
     r.payout=c?.side===r.result?c.count:0;r.net=r.payout-r.estimatedCost;
@@ -580,9 +465,7 @@ export class BtcLargeObserver {
     this.persist(next,{event:'SETTLED_ESTIMATE',ticker:r.ticker,result:r.result,entry:c,
       estimatedCost:r.estimatedCost,hypotheticalPayout:r.payout,hypotheticalNet:r.net,
       wickComparison:wickOutcome(r),wickTotals:next.wickTotals,experiments:experimentOutcome(r),chartReversal:chartOutcome(r),wickRejectionScalps:wickRejectionScalpOutcomes(r),
-      failedRetest:r.failedRetest,failedPullback:r.failedPullback,rangeScalp:btcRangeScalpOutcome(r.rangeScalp,r.result),
-      structureScalp:r.structureScalp && Object.fromEntries(['up','down'].map(leg =>
-        [leg, btcRangeScalpOutcome(r.structureScalp[leg],r.result)?.[leg]])),
+      failedRetest:r.failedRetest,failedPullback:r.failedPullback,
       partialWindow:r.startedAt>Date.parse(r.closeTime)-90000,
       filtersNotEvaluated:['account-risk','available-cash','combined-live-exposure']});
     for (const observation of r.wedgeSignals ?? []) {
@@ -590,114 +473,16 @@ export class BtcLargeObserver {
         signalMatchedSettlement: r.result === (observation.direction === 'up' ? 'yes' : 'no') });
     }
   }
-  async captureTaapiDownQuote(market, sample) {
-    const ticker = market.ticker;
-    const close = Date.parse(market.close_time);
-    const row = this.state.markets[ticker];
-    const reference = this.feed?.getQuote?.('BTC');
-    const rules = BTC_FAILED_RETEST_RULES;
-    let target = row?.target ?? (this.failedRetestTicker === ticker ? this.failedRetestTarget : null);
-    let quote, quoteAt;
-    let status = 'WINDOW_CLOSED';
-    if (sample.observedAt < close) {
-      const book = this.read('/markets/' + ticker + '/orderbook?depth=1').then(data => ({
-        down: metalBook(data)?.no, receivedAt: this.now(),
-      }));
-      const details = target == null
-        ? this.read('/markets/' + ticker).catch(() => null)
-        : null;
-      const [bookResult, marketResult] = await Promise.allSettled([book, details]);
-      const fresh = marketResult.value?.market;
-      const strike = Number(fresh?.floor_strike);
-      if (fresh?.ticker === ticker && fresh.strike_type === 'greater_or_equal' &&
-          Number.isFinite(strike) && strike > 0) target = strike;
-      if (bookResult.status === 'rejected') {
-        status = 'ORDERBOOK_REQUEST_FAILED';
-      } else {
-        const { down, receivedAt } = bookResult.value;
-        if (receivedAt >= close || receivedAt - sample.observedAt > 2000) {
-          status = 'STALE_QUOTE';
-        } else if (!down || !Number.isFinite(down.price) || down.price <= 0 ||
-            down.price >= 1 || !Number.isFinite(down.size) || down.size <= 0) {
-          status = 'NO_DOWN_ASK';
-        } else {
-          quote = down;
-          quoteAt = receivedAt;
-          status = 'QUOTED';
-        }
-      }
-    }
-    const multiplier = row?.feeMultiplier;
-    const entry = quote && Number.isFinite(multiplier) && multiplier > 0
-      ? estimateMetalEntry({ book: { no: quote }, side: 'no',
-          stage: { budget: rules.paperBudget, minPrice: .001 }, feeMultiplier: multiplier })
-      : null;
-    const referencePrice = Number.isFinite(reference?.price) ? reference.price : null;
-    this.emit({ event: 'TAAPI_SHOOTING_STAR_QUOTE', ticker, status,
-      providerTimestamp: sample.providerTimestamp, detectedAt: sample.observedAt,
-      marketCloseAt: close, quoteAt, quoteDelayMs: quoteAt == null ? null : quoteAt - sample.observedAt,
-      secondsRemaining: Math.max(0, (close - (quoteAt ?? sample.observedAt)) / 1000),
-      target: target ?? null, referencePrice, referenceAt: reference?.sourceTs ?? null,
-      distanceBelowStrike: target != null && referencePrice != null ? target - referencePrice : null,
-      downAsk: quote?.price ?? null, displayedSize: quote?.size ?? null,
-      paperBudget: rules.paperBudget, entry: entry ?? null });
-  }
-
-  async observeTaapi() {
-    const key = process.env.TAAPI_API_KEY;
-    const market = this.current;
-    if (!key || !market || this.taapiPending) return;
-    const now = this.now();
-    const minute = Math.floor((now - 5000) / 60000) * 60000;
-    if (minute === this.taapiMinute || now >= Date.parse(market.close_time)) return;
-    this.taapiMinute = minute;
-    this.taapiPending = true;
-    try {
-      const params = new URLSearchParams({
-        exchange: 'binance', symbol: 'BTCUSDT', timeframe: '1m', results: '1', backtrack: '1',
-      });
-      const response = await fetch('https://v2.taapi.io/indicator/shootingstar?' + params, {
-        headers: { Authorization: 'Bearer ' + key },
-        redirect: 'error',
-        signal: AbortSignal.timeout(4000),
-      });
-      if (!response.ok) {
-        this.emit({ event: 'TAAPI_CANDLE_ERROR', status: response.status });
-        return;
-      }
-      const { value, timestamp } = await response.json();
-      if (!Number.isFinite(value?.[0]) || !Number.isSafeInteger(timestamp?.[0])) {
-        this.emit({ event: 'TAAPI_CANDLE_ERROR', reason: 'UNEXPECTED_RESPONSE' });
-        return;
-      }
-      if (timestamp[0] <= (this.taapiLastCandle ?? 0)) return;
-      this.taapiLastCandle = timestamp[0];
-      const sample = { event: 'TAAPI_CANDLE_SAMPLE', ticker: market.ticker,
-        symbol: 'BTCUSDT', exchange: 'binance', timeframe: '1m', indicator: 'shootingstar',
-        providerTimestamp: timestamp[0], value: value[0], detected: value[0] < 0,
-        requestedAt: now, observedAt: this.now() };
-      this.emit(sample);
-      if (sample.detected) await this.captureTaapiDownQuote(market, sample);
-    } catch {
-      this.emit({ event: 'TAAPI_CANDLE_ERROR', reason: 'REQUEST_FAILED' });
-    } finally {
-      this.taapiPending = false;
-    }
-  }
-
   async tick(){if(this.busy)return;this.busy=true;try{
     try{await this.discover();await this.observe();}catch(e){this.emit({event:'READ_ERROR',message:e.message});}
-    void this.observeTaapi();
     try{await this.observeFailedRetest();}catch(e){this.emit({event:'FAILED_RETEST_READ_ERROR',message:e.message});}
-    try{await this.observeRangeScalp();}catch(e){this.emit({event:'RANGE_SCALP_READ_ERROR',message:e.message});}
     try{await this.observeRetestCandles();}catch(e){this.emit({event:'FAILED_RETEST_CANDLE_READ_ERROR',message:e.message});}
     try{await this.settleOne();}catch(e){this.emit({event:'SETTLEMENT_ERROR',message:e.message});}
     try{await this.observeWedges();}catch(e){this.emit({event:'BTC_WEDGE_READ_ERROR',message:e.message});}
   }finally{this.busy=false;}}
-  start(){this.emit({event:'STARTED',rules:BTC_LARGE_RULES,priceCap:null,liveOrders:false,
-    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,rangeScalpPaper:BTC_RANGE_SCALP_RULES,structureScalpPaper:BTC_STRUCTURE_RULES,
-    btcWedgePaper:BTC_WEDGE_RULES,
-    executionModel:'ONE_SNAPSHOT_PER_WINDOW_TOP_LEVEL_VOLUME_NO_FILL_RETRIES'});
+  start(){this.emit({event:'STARTED',liveOrders:false,
+    failedRetestPaper:BTC_FAILED_RETEST_RULES,failedPullbackPaper:BTC_FAILED_RETEST_RULES,
+    btcWedgePaper:BTC_WEDGE_RULES});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;}
   stop(){clearInterval(this.timer);}
 }
