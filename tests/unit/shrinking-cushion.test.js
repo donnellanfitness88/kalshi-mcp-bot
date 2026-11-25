@@ -154,3 +154,30 @@ test('conditional five-second recovery allows an unflagged dip but never weakens
     assert.equal(run(rows.slice(-151),{...opts,side}).reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');
   }
 });
+
+test('history diagnostics identify a checkpoint, an internal gap and stale data without changing the decision',()=>{
+  const now=1800000000000;
+  const full=Array.from({length:326},(_,i)=>({sourceTs:now-65000+i*200,price:60060}));
+  const args={asset:'BTC',ticker:'BTC',side:'yes',target:60000,minimumDistance:30,secondsRemaining:100,now};
+  const check=(history,issue)=>{
+    const details=[];
+    const actual=evaluateShrinkingCushion({...args,history,onHistoryFailure:detail=>details.push(detail)});
+    assert.deepEqual(actual,evaluateShrinkingCushion({...args,history}));
+    assert.equal(details.length,1);
+    assert.equal(details[0].issue,issue);
+    return details[0];
+  };
+  const missing=check(full.slice(-50),'MISSING_CHECKPOINT');
+  assert.equal(missing.requiredTs,now-15000);
+  assert.equal(missing.previousSourceTs,null);
+  const gap=check(full.filter(p=>p.sourceTs<now-8000||p.sourceTs>now-6400),'HISTORY_GAP');
+  assert.equal(gap.fromSourceTs,now-8200);
+  assert.equal(gap.toSourceTs,now-6200);
+  assert.equal(gap.gapMs,2000);
+  assert.equal(check(full.slice(0,-11),'STALE_HISTORY_POINT').ageMs,2200);
+  const longGap=[];
+  const decision=evaluateShrinkingCushion({...args,history:full.slice(-100),requireLongRecovery:true,
+    requireLongAlways:true,onHistoryFailure:detail=>longGap.push(detail)});
+  assert.equal(decision.reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');
+  assert.equal(longGap[0].lookbackMs,60000);
+});

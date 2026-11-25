@@ -248,11 +248,14 @@ export function createScalpExecutor(deps = {}) {
   const retryNow = deps.now ?? Date.now;
   const getReferenceQuote = deps.getReferenceQuote ?? (asset => benchmarkFeed.getQuote(asset));
   const getReferenceHistory = deps.getReferenceHistory ?? (asset => benchmarkFeed.getHistory(asset));
+  const getBtcReferenceDiagnostics = deps.getBtcReferenceDiagnostics ?? (() => benchmarkFeed.getBtcDiagnostics?.() ?? null);
   let shrinkingGuards = {};
   function shrinkingCheck(ctx, distance, stageBudget, wick = false) {
     const key = wick ? 'wick:'+ctx.asset+':'+distance.side : ctx.asset;
     const requireLongRecovery=wick || stageBudget>=25;
     const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isPythLateMarket(ctx.asset)} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
+    let referenceHistory;
+    const onHistoryFailure = ctx.asset === 'BTC' ? detail => { referenceHistory = detail; } : null;
     // Every late purchase must pass, including the first purchase.
     const check = isPythLateMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
@@ -263,7 +266,7 @@ export function createScalpExecutor(deps = {}) {
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' && !wick ? 50 : distance.minimumDistance,
       secondsRemaining:remainingSeconds(ctx.s),
-      previous:shrinkingGuards[key],requireLongRecovery,...extraOptions,now:Date.now() });
+      previous:shrinkingGuards[key],requireLongRecovery,...extraOptions,onHistoryFailure,now:Date.now() });
     if (check.guardState && JSON.stringify(check.guardState)!==JSON.stringify(shrinkingGuards[key])) {
       const next={...shrinkingGuards,[key]:check.guardState};
       save({...snapshot(),shrinkingGuards:next}); // Persist a latch before any late purchase can proceed.
@@ -285,7 +288,7 @@ export function createScalpExecutor(deps = {}) {
         return {...checked, allowed: false, reason: 'USDJPY_LADDER_ADD_CUSHION_NOT_WIDENING'};
       }
     }
-    if (!wick || !checked?.allowed) return checked;
+    if (!wick || !checked?.allowed) return referenceHistory ? {...checked,referenceHistory} : checked;
     if (pilot && !checked.crossingHistoryComplete) {
       return {...checked, allowed: false, reason: 'PILOT_WICK_CROSSING_HISTORY_INCOMPLETE'};
     }
@@ -315,9 +318,11 @@ export function createScalpExecutor(deps = {}) {
       ? ctx.proxy.history[ctx.asset].map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}))
       : getReferenceHistory(ctx.asset);
     const floor = checked.crossingWickMinimum ?? distance.minimumDistance;
-    const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor);
+    const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor, onHistoryFailure);
     if (!(metrics?.heldMs >= 5000)) {
-      return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
+      return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED',
+        ...(onHistoryFailure?{referenceHistory:referenceHistory ??
+          {issue:'HOLD_BELOW_REQUIRED',heldMs:metrics?.heldMs ?? null,requiredHoldMs:5000,floor}}:{})};
     }
     const result = {...checked, wickHeldMs:metrics.heldMs};
     if (pilot && checked.targetCrossings > 0 && metrics.heldMs < 15000) {
@@ -388,7 +393,12 @@ export function createScalpExecutor(deps = {}) {
     const key = `${asset}:${reason}`;
     if (retryNow() - (entryBlockLogs.get(key) ?? -Infinity) < 60000) return;
     entryBlockLogs.set(key, retryNow());
-    log({ event: 'ENTRY_BLOCKED', asset, reason, ...details });
+    const referenceDiagnostic = asset === 'BTC' && (details.shrinkingGuard?.referenceHistory ||
+      reason === 'PROXIMITY_REFERENCE_STALE' || reason === 'SHRINK_HISTORY_UNAVAILABLE' ||
+      reason === 'SHRINK_LONG_HISTORY_UNAVAILABLE');
+    log({ event: 'ENTRY_BLOCKED', asset, reason, ...details, ...(referenceDiagnostic?{
+      ticker: shared[asset]?.ticker, referenceFeed: getBtcReferenceDiagnostics()
+    }:{}) });
   }
   const lateChecks = new Map();
   let busy = false;

@@ -2,7 +2,7 @@ const STABILIZATION_SECONDS = 2;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, paperRecoveryPullback = null, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, paperRecoveryPullback = null, onHistoryFailure = null, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
@@ -15,7 +15,11 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     Number.isFinite(p.price) && p.price > 0 && p.sourceTs >= now - 90000)
     .sort((a,b) => a.sourceTs-b.sourceTs);
   const last = rows.at(-1);
-  if (!last || now-last.sourceTs > 2000) return reject('SHRINK_HISTORY_UNAVAILABLE');
+  if (!last || now-last.sourceTs > 2000) {
+    onHistoryFailure?.({ issue: last ? 'STALE_HISTORY_POINT' : 'NO_VALID_HISTORY',
+      sourceTs: last?.sourceTs ?? null, ageMs: last ? now-last.sourceTs : null });
+    return reject('SHRINK_HISTORY_UNAVAILABLE');
+  }
   const cushion = p => side === 'yes' ? p.price-target : target-p.price;
   const at = time => rows.findLast(p => p.sourceTs <= time && time-p.sourceTs <= 500);
   const complete = (start,end) => {
@@ -39,8 +43,29 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
       projectedSecondsToTarget:speed>0?Math.max(0,current)/speed:null,
       rapid, projection };
   };
+  function diagnoseLookback(lookbackMs, end=last.sourceTs, checkGap=true) {
+    if (!onHistoryFailure) return;
+    const requiredTs=end-lookbackMs;
+    const previous=rows.findLast(point=>point.sourceTs<=requiredTs);
+    if (!previous || requiredTs-previous.sourceTs>500) {
+      onHistoryFailure({ issue:'MISSING_CHECKPOINT', lookbackMs, requiredTs,
+        previousSourceTs:previous?.sourceTs ?? null,
+        nextSourceTs:rows.find(point=>point.sourceTs>requiredTs)?.sourceTs ?? null, toleranceMs:500 });
+    } else if (checkGap) {
+      const span=rows.filter(point=>point.sourceTs>=previous.sourceTs && point.sourceTs<=end);
+      const next=span.findIndex((point,i)=>i>0 && point.sourceTs-span[i-1].sourceTs>1500);
+      if (next>0) onHistoryFailure({ issue:'HISTORY_GAP', lookbackMs,
+        fromSourceTs:span[next-1].sourceTs, toSourceTs:span[next].sourceTs,
+        gapMs:span[next].sourceTs-span[next-1].sourceTs, maximumGapMs:1500 });
+    }
+  }
   const current=measure(last);
-  if (!current) return reject('SHRINK_HISTORY_UNAVAILABLE');
+  if (!current) {
+    if (!at(last.sourceTs-15000)) diagnoseLookback(15000);
+    else if (!at(last.sourceTs-3000)) diagnoseLookback(3000, last.sourceTs, false);
+    else diagnoseLookback(15000);
+    return reject('SHRINK_HISTORY_UNAVAILABLE');
+  }
   // Detect a trigger in the last ten seconds even if no order check ran at that
   // instant. A previously latched trigger survives longer through the journal.
   let trigger=null;
@@ -65,6 +90,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
   if(requireLongRecovery && (recoveryWarning || requireLongAlways)) {
     const first=at(last.sourceTs-60000);
     const available=Boolean(first && complete(first.sourceTs,last.sourceTs));
+    if (!available) diagnoseLookback(60000);
     const change15=current.currentCushion-current.initialCushion;
     const change60=available?current.currentCushion-cushion(first):null;
     longRecovery={lookbackSeconds:[15,60],historyAvailable:available,

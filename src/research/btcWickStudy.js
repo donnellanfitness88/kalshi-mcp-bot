@@ -40,19 +40,32 @@ export class PullbackHistory {
   }
 }
 
-export function wickMetrics(rows, now, target, sign, close, floor=30) {
+export function wickMetrics(rows, now, target, sign, close, floor=30, onHistoryFailure=null) {
   const end = rows.at(-1)?.sourceTs;
-  if (!Number.isFinite(end) || end > now || now-end > 2000) return null;
+  if (!Number.isFinite(end) || end > now || now-end > 2000) {
+    onHistoryFailure?.({ issue:!Number.isFinite(end)?'NO_VALID_HISTORY':end>now?'FUTURE_HISTORY_POINT':'STALE_HISTORY_POINT',
+      sourceTs:end ?? null, ageMs:Number.isFinite(end)?now-end:null });
+    return null;
+  }
   const begin = end-60000;
   const first = rows.findLastIndex(p=>p.sourceTs<=begin);
-  if (first<0 || begin-rows[first].sourceTs>500) return null;
+  if (first<0 || begin-rows[first].sourceTs>500) {
+    onHistoryFailure?.({ issue:'MISSING_CHECKPOINT', lookbackMs:60000, requiredTs:begin,
+      previousSourceTs:rows[first]?.sourceTs ?? null, nextSourceTs:rows[first+1]?.sourceTs ?? null,
+      toleranceMs:500 });
+    return null;
+  }
   const points=rows.slice(first);
   const margin=p=>sign*(p.price-target);
   const clears=p=>floor===0 ? margin(p)>0 : margin(p)>=floor;
   let belowMs=0, recoveries=0, stableSince=begin, minimum=Infinity;
   for (let i=0; i<points.length; i++) {
     const p=points[i], next=points[i+1];
-    if (next && next.sourceTs-p.sourceTs>1500) return null;
+    if (next && next.sourceTs-p.sourceTs>1500) {
+      onHistoryFailure?.({ issue:'HISTORY_GAP', lookbackMs:60000, fromSourceTs:p.sourceTs,
+        toSourceTs:next.sourceTs, gapMs:next.sourceTs-p.sourceTs, maximumGapMs:1500 });
+      return null;
+    }
     minimum=Math.min(minimum,margin(p));
     if (!clears(p) && next) {
       belowMs+=next.sourceTs-Math.max(begin,p.sourceTs);
