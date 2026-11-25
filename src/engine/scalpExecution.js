@@ -836,7 +836,8 @@ export function createScalpExecutor(deps = {}) {
     if (!wick && asset === 'USDJPY' && wickRecord?.freshUsdJpyDownWick && wickRecord.spent > 0) return;
     const wickWindowOpen = () => {
       const seconds = remainingSeconds(s);
-      return seconds > (pilot ? PILOT_WICK_CUTOFF_SECONDS : 0) && seconds < 180;
+      const beforeEntryCutoff = seconds > (pilot ? PILOT_WICK_CUTOFF_SECONDS : 0);
+      return beforeEntryCutoff && (asset === 'WTI' ? seconds <= 90 : seconds < 180);
     };
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
         lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
