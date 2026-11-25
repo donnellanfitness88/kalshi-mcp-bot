@@ -705,3 +705,32 @@ test('shared executor queues a market behind a live order and runs it after reco
   assert.deepEqual(f.requests.map(body=>body.ticker),[f.shared.GOLD.ticker,f.shared.SILVER.ticker]);
   assert.equal(f.saved().pending,null);
 });
+
+test('Pyth live ladder and wick accept a 2.5s history gap and reject a wider gap',async()=>{
+  const clock=Date.now, now=clock();
+  Date.now=()=>now;
+  try {
+    for(const wick of [false,true]) {
+      for(const gapMs of [2500,2600]) {
+        const f=fixture(wick?{liveWick:true,selectLateStage:()=>null}:{});
+        const s=f.shared.GOLD;
+        s.marketCloseTs=now+(wick?80000:50000);
+        s.yesAsk = wick ? 0.90 : 0.97;
+        s.yesBid=s.yesAsk-.01;
+        const gapStart=now-(wick?48300:11300);
+        f.proxy.history.GOLD=Array.from({length:701},(_,i)=>now-70000+i*100)
+          .filter(t=>t<=gapStart || t>=gapStart+gapMs)
+          .map(sourceAt=>({sourceAt,price:2010}));
+        f.proxy.snapshot=()=>({status:'FRESH_PROXY',sourceAt:now,price:2010});
+
+        await f.executor.tick(f.ctx('GOLD'));
+        assert.equal(f.requests.length,gapMs===2500?1:0,JSON.stringify(f.logs));
+        if(gapMs>2500) {
+          const history=f.logs.find(e=>e.event==='ENTRY_BLOCKED')?.shrinkingGuard?.referenceHistory;
+          assert.equal(history?.gapMs,gapMs);
+          assert.equal(history?.maximumGapMs,2500);
+        }
+      }
+    }
+  } finally { Date.now=clock; }
+});

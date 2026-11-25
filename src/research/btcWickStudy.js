@@ -40,7 +40,7 @@ export class PullbackHistory {
   }
 }
 
-export function wickMetrics(rows, now, target, sign, close, floor=30, onHistoryFailure=null) {
+export function wickMetrics(rows, now, target, sign, close, floor=30, onHistoryFailure=null, maxHistoryGapMs=1500) {
   const end = rows.at(-1)?.sourceTs;
   if (!Number.isFinite(end) || end > now || now-end > 2000) {
     onHistoryFailure?.({ issue:!Number.isFinite(end)?'NO_VALID_HISTORY':end>now?'FUTURE_HISTORY_POINT':'STALE_HISTORY_POINT',
@@ -61,9 +61,9 @@ export function wickMetrics(rows, now, target, sign, close, floor=30, onHistoryF
   let belowMs=0, recoveries=0, stableSince=begin, minimum=Infinity;
   for (let i=0; i<points.length; i++) {
     const p=points[i], next=points[i+1];
-    if (next && next.sourceTs-p.sourceTs>1500) {
+    if (next && next.sourceTs-p.sourceTs>maxHistoryGapMs) {
       onHistoryFailure?.({ issue:'HISTORY_GAP', lookbackMs:60000, fromSourceTs:p.sourceTs,
-        toSourceTs:next.sourceTs, gapMs:next.sourceTs-p.sourceTs, maximumGapMs:1500 });
+        toSourceTs:next.sourceTs, gapMs:next.sourceTs-p.sourceTs, maximumGapMs:maxHistoryGapMs });
       return null;
     }
     minimum=Math.min(minimum,margin(p));

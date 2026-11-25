@@ -7,6 +7,7 @@ export const PILOT_WICK_MARKETS = Object.freeze({
 export const FALLING_NINETY_BUDGET = 300;
 export const fallingNinetyEnabled = () => process.env.PILOT_FALLING_NINETY_LIVE_ENABLED !== 'false';
 
+export const PYTH_LIVE_MAX_HISTORY_GAP_MS = 2500;
 export const PILOT_WICK_BUDGET = 100;
 export const PILOT_WICK_CUTOFF_SECONDS = 30;
 export const pilotWickEnabled = () => process.env.PILOT_WICK_LIVE_ENABLED !== 'false';

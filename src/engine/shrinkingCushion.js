@@ -3,7 +3,7 @@ const TRIGGER_LOOKBACK_SECONDS = 10;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, paperRecoveryPullback = null, onHistoryFailure = null, projectedLookbackSeconds = TRIGGER_LOOKBACK_SECONDS, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, paperRecoveryPullback = null, onHistoryFailure = null, projectedLookbackSeconds = TRIGGER_LOOKBACK_SECONDS, maxHistoryGapMs = 1500, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
@@ -25,7 +25,7 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
   const at = time => rows.findLast(p => p.sourceTs <= time && time-p.sourceTs <= 500);
   const complete = (start,end) => {
     const selected = rows.filter(p => p.sourceTs >= start && p.sourceTs <= end);
-    return selected.every((p,i) => !i || p.sourceTs-selected[i-1].sourceTs <= 1500);
+    return selected.every((p,i) => !i || p.sourceTs-selected[i-1].sourceTs <= maxHistoryGapMs);
   };
   const measure = end => {
     const first=at(end.sourceTs-15000), recent=at(end.sourceTs-3000);
@@ -54,10 +54,10 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
         nextSourceTs:rows.find(point=>point.sourceTs>requiredTs)?.sourceTs ?? null, toleranceMs:500 });
     } else if (checkGap) {
       const span=rows.filter(point=>point.sourceTs>=previous.sourceTs && point.sourceTs<=end);
-      const next=span.findIndex((point,i)=>i>0 && point.sourceTs-span[i-1].sourceTs>1500);
+      const next=span.findIndex((point,i)=>i>0 && point.sourceTs-span[i-1].sourceTs>maxHistoryGapMs);
       if (next>0) onHistoryFailure({ issue:'HISTORY_GAP', lookbackMs,
         fromSourceTs:span[next-1].sourceTs, toSourceTs:span[next].sourceTs,
-        gapMs:span[next].sourceTs-span[next-1].sourceTs, maximumGapMs:1500 });
+        gapMs:span[next].sourceTs-span[next-1].sourceTs, maximumGapMs:maxHistoryGapMs });
     }
   }
   const current=measure(last);
