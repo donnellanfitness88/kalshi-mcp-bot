@@ -123,3 +123,32 @@ test('retaining fast samples does not authorize genuine history gaps or stale re
     assert.equal(late.allowed,false);assert.equal(late.reason,'MISSING_OR_STALE_PROXY');
   }
 });
+
+test('pilot diagnostics separate stream delay, carried-forward timestamps and missing history',()=>{
+  let now=base;
+  const proxy=new MetalsProxy({now:()=>now});
+  const frame=(streamAt,feedAt)=>({type:'streamUpdated',subscriptionId:3,parsed:{
+    timestampUs:String(streamAt*1000),priceFeeds:[{priceFeedId:3063,price:'8040000',exponent:-5,
+      feedUpdateTimestamp:feedAt*1000,marketSession:'regular'}]}});
+  proxy.ingest(frame(base-100,base-200));
+  now+=2500;
+  proxy.ingest(frame(now-100,base-200));
+  const stale=proxy.getDiagnostics('WTI');
+  assert.equal(stale.lastAccepted.feedAt,base-200);
+  assert.equal(stale.lastRejected.rejection,'stale');
+  assert.equal(stale.lastRejected.receivedAt,now);
+  assert.equal(stale.lastRejected.streamAgeMs,100);
+  assert.equal(stale.lastRejected.streamMinusFeedMs,2600);
+  assert.equal(stale.rejected.stale,1);
+  assert.equal(proxy.snapshot('WTI',80,'yes').status,'UNAVAILABLE_OR_STALE');
+
+  proxy.ingest(frame(now,now));
+  let failure;
+  const args={asset:'WTI',ticker:'WTI',side:'yes',target:80,proxy:proxy.snapshot('WTI',80,'yes'),
+    history:proxy.history.WTI,at:now,secondsRemaining:100};
+  const checked=metalShrinkingCheck({...args,onHistoryFailure:detail=>{failure=detail;}});
+  assert.deepEqual(checked,metalShrinkingCheck(args));
+  assert.equal(checked.reason,'SHRINK_HISTORY_UNAVAILABLE');
+  assert.equal(failure.issue,'MISSING_CHECKPOINT');
+  assert.equal(failure.requiredTs,now-15000);
+});

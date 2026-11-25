@@ -24,6 +24,7 @@ const numeric = v => (typeof v==='number' || typeof v==='string' && v.trim()!=='
 export class MetalsProxy {
   constructor({now=Date.now,log=()=>{},Socket=WebSocket}={}) {
     Object.assign(this,{now,log,Socket}); this.history=Object.fromEntries(Object.keys(PROXY_FEEDS).map(a=>[a,[]])); this.sockets=[];this.timers=new Set();
+    this.feedDiagnostics=new Map();
   }
   ingest(message) {
     if(message?.type!=='streamUpdated' || !Array.isArray(message.parsed?.priceFeeds))return;
@@ -34,10 +35,33 @@ export class MetalsProxy {
       if(!asset)continue;
       const exponent=numeric(row.exponent), mantissa=numeric(row.price), sourceAt=numeric(row.feedUpdateTimestamp)/1000;
       const price=mantissa/10**(-exponent), at=this.now(), age=at-sourceAt;
-      if(!Number.isInteger(exponent)||exponent < -18||exponent>0||!Number.isSafeInteger(mantissa)||
-        !Number.isFinite(price)||price<=0||!Number.isFinite(sourceAt)||age<0||age>2000||row.marketSession!=='regular')continue;
       const history=this.history[asset], last=history.at(-1);
-      if(last && sourceAt<=last.sourceAt)continue; // Includes duplicates from redundant sockets.
+      const invalid=!Number.isInteger(exponent)||exponent < -18||exponent>0||!Number.isSafeInteger(mantissa)||
+        !Number.isFinite(price)||price<=0||!Number.isFinite(sourceAt);
+      const rejection=invalid?'invalid':age<0?'future':age>2000?'stale':
+        row.marketSession!=='regular'?'non_regular_session':
+        last && sourceAt<=last.sourceAt?'duplicate_or_out_of_order':null;
+      if(PAPER_FEEDS.has(asset)) {
+        const streamAt=numeric(message.parsed.timestampUs)/1000;
+        let diagnostics=this.feedDiagnostics.get(asset);
+        if(!diagnostics) {
+          diagnostics={rejected:{}};
+          this.feedDiagnostics.set(asset,diagnostics);
+        }
+        const timing={
+          streamAt:Number.isFinite(streamAt)?streamAt:null,
+          feedAt:Number.isFinite(sourceAt)?sourceAt:null,receivedAt:at,
+          streamAgeMs:Number.isFinite(streamAt)?at-streamAt:null,
+          feedAgeAtReceiptMs:Number.isFinite(age)?age:null,
+          streamMinusFeedMs:Number.isFinite(streamAt)&&Number.isFinite(sourceAt)?streamAt-sourceAt:null
+        };
+        diagnostics.lastFrame={...timing,rejection};
+        if(rejection) {
+          diagnostics.rejected[rejection]=(diagnostics.rejected[rejection]??0)+1;
+          if(rejection!=='duplicate_or_out_of_order') diagnostics.lastRejected=diagnostics.lastFrame;
+        } else diagnostics.lastAccepted=timing;
+      }
+      if(rejection)continue;
       const confidence=numeric(row.confidence)/10**(-exponent);
       const point={sourceAt,receivedAt:at,price,confidence:Number.isFinite(confidence)&&confidence>=0?confidence:null};
       // Preserve every distinct source update. One-second bucketing discarded
@@ -45,6 +69,13 @@ export class MetalsProxy {
       history.push(point);
       this.history[asset]=history.filter(p=>sourceAt-p.sourceAt<=HISTORY_RETENTION_MS).slice(-MAX_HISTORY_POINTS);
     }
+  }
+  getDiagnostics(asset) {
+    const rows=this.history[asset]??[], diagnostics=this.feedDiagnostics.get(asset);
+    return {historyPoints:rows.length,firstHistorySourceTs:rows[0]?.sourceAt??null,
+      lastHistorySourceTs:rows.at(-1)?.sourceAt??null,
+      lastFrame:diagnostics?.lastFrame??null,lastAccepted:diagnostics?.lastAccepted??null,
+      lastRejected:diagnostics?.lastRejected??null,rejected:{...diagnostics?.rejected}};
   }
   snapshot(asset,target,side) {
     const history=this.history[asset]??[],last=history.at(-1), at=this.now();

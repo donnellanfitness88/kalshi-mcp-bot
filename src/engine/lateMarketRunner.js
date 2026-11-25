@@ -19,9 +19,10 @@ export class LateMarketRunner {
     if (!market || market.ticker!==s.ticker || !['open','active'].includes(market.status))
       throw new Error('Live market no longer current');
     const ticker=s.ticker, closeTime=Date.parse(market.close_time), started=this.now();
-    let receivedAt=null, checkedAt=null, outcome='READ_ERROR';
+    let receivedAt=null, checkedAt=null, outcome='READ_ERROR', deadlineAborted=false;
+    const signal=AbortSignal.timeout(MAX_EXECUTABLE_BOOK_AGE_MS);
     try {
-      const data=await this.observer.read('/markets/'+encodeURIComponent(ticker)+'/orderbook?depth=1');
+      const data=await this.observer.read('/markets/'+encodeURIComponent(ticker)+'/orderbook?depth=1',{signal});
       receivedAt=this.now();
       const book=metalBook(data);
       checkedAt=this.now();
@@ -38,11 +39,16 @@ export class LateMarketRunner {
       s.yesAskSize=book.yes?.size??0;s.noAskSize=book.no?.size??0;
       // Age is measured from request start, not response completion.
       s.lastQuoteMessageTs=started;
+    } catch(error) {
+      if(!signal.aborted || outcome!=='READ_ERROR') throw error;
+      deadlineAborted=true;
+      outcome='EXECUTABLE_BOOK_STALE_RESPONSE';
+      throw new Error(outcome,{cause:error});
     } finally {
       const completedAt=receivedAt??this.now();
       this.log({event:'EXECUTABLE_BOOK_TIMING',asset,ticker,outcome,
         requestMs:completedAt-started,bookAgeMs:checkedAt===null?null:checkedAt-started,
-        limitMs:MAX_EXECUTABLE_BOOK_AGE_MS,
+        limitMs:MAX_EXECUTABLE_BOOK_AGE_MS,deadlineAborted,
         secondsRemainingAtStart:(closeTime-started)/1000,
         secondsRemainingAtCompletion:(closeTime-completedAt)/1000});
     }

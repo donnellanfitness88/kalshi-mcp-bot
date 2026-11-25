@@ -32,25 +32,30 @@ const SHRINK_TEST = 'all_four_shrinking_no_fixed_minimum_v1';
 // Shared observer/live qualification for the four approved markets.
 // No fixed distance/drop floor; live BTC retains its existing thresholds.
 export function metalShrinkingCheck({asset,ticker,side,target,proxy,history,
-  previous=null,at,secondsRemaining,requireLongRecovery=false,stabilizationSeconds=2,requireStableAlways=false,requireLongAlways=false,paperRecoveryPullback=null,projectedLookbackSeconds}) {
+  previous=null,at,secondsRemaining,requireLongRecovery=false,stabilizationSeconds=2,requireStableAlways=false,requireLongAlways=false,paperRecoveryPullback=null,projectedLookbackSeconds,onHistoryFailure=null}) {
   const blocked=reason=>({allowed:false,reason,guardState:previous});
   if(!Number.isFinite(target)||target<=0||!['yes','no'].includes(side))
     return blocked('INVALID_TARGET_OR_SIDE');
   if(proxy?.status!=='FRESH_PROXY'||!Number.isFinite(proxy.price)||proxy.price<=0||
-    !Number.isFinite(proxy.sourceAt)||at-proxy.sourceAt<0||at-proxy.sourceAt>2000)
+    !Number.isFinite(proxy.sourceAt)||at-proxy.sourceAt<0||at-proxy.sourceAt>2000) {
+    onHistoryFailure?.({issue:'MISSING_OR_STALE_PROXY'});
     return blocked('MISSING_OR_STALE_PROXY');
+  }
   if((side==='yes'?1:-1)*(proxy.price-target)<=0)
     return blocked('REFERENCE_NOT_ON_WINNING_SIDE');
   const rows=(history??[]).map(p=>({
     sourceTs:Math.trunc(p.sourceAt),price:p.price
   }));
   const last=rows.at(-1);
-  if(!last||last.sourceTs!==Math.trunc(proxy.sourceAt)||last.price!==proxy.price)
+  if(!last||last.sourceTs!==Math.trunc(proxy.sourceAt)||last.price!==proxy.price) {
+    onHistoryFailure?.({issue:last?'HISTORY_SNAPSHOT_MISMATCH':'NO_VALID_HISTORY',
+      snapshotSourceTs:proxy.sourceAt,lastHistorySourceTs:last?.sourceTs??null});
     return blocked('SHRINK_HISTORY_UNAVAILABLE');
+  }
   return evaluateShrinkingCushion({
     history:rows,asset,ticker,side,target,minimumDistance:0,
     rapidDropMinimum:0,observationOnlyNoMinimum:true,
-    secondsRemaining,previous,requireLongRecovery,stabilizationSeconds,requireStableAlways,requireLongAlways,paperRecoveryPullback,projectedLookbackSeconds,now:at
+    secondsRemaining,previous,requireLongRecovery,stabilizationSeconds,requireStableAlways,requireLongAlways,paperRecoveryPullback,projectedLookbackSeconds,onHistoryFailure,now:at
   });
 }
 const number = x => (typeof x === 'number' || (typeof x === 'string' && x.trim())) ? Number(x) : NaN;
@@ -167,7 +172,7 @@ function wtiRecoverySettlement(row) {
 }
 
 // Restrict the network adapter itself to public GET market/series endpoints.
-export async function publicMetalRead(route) {
+export async function publicMetalRead(route, {signal} = {}) {
   const exact = SERIES_ROUTE.test(route) || MARKET_ROUTE.test(route);
   let discovery=false;
   if(route.startsWith('/markets?')) {
@@ -176,7 +181,7 @@ export async function publicMetalRead(route) {
       Object.values(OBSERVED_MARKETS).includes(q.get('series_ticker')) && q.get('status')==='open' && q.get('limit')==='100';
   }
   if (!exact && !discovery) throw new Error('Observer route not allowed');
-  const r = await fetch(BASE+route, {method:'GET', signal:AbortSignal.timeout(8000), redirect:'error'});
+  const r = await fetch(BASE+route, {method:'GET', signal:signal??AbortSignal.timeout(8000), redirect:'error'});
   if (!r.ok) throw new Error('Public market read HTTP '+r.status);
   return r.json();
 }

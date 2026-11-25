@@ -522,3 +522,20 @@ test('BTC wick uses directional book depth and stays separate from stage five sp
   assert.ok(records.wick_5s.spent>0 && records.wick_5s.spent<10);
   assert.equal(records.under_45,undefined);
 });
+
+test('live order book aborts at its freshness deadline and records why',async()=>{
+  const {setTimeout:wait}=await import('node:timers/promises');
+  const shared={WTI:{ticker:'KXWTI15M-TEST',lastQuoteMessageTs:1}};
+  const market={ticker:shared.WTI.ticker,status:'active',close_time:new Date(Date.now()+60000).toISOString()};
+  const logs=[];
+  const observer={current:{WTI:market},read:async(_route,{signal})=>{
+    await wait(10000,null,{signal});
+    assert.fail('The stale order-book read should have aborted');
+  }};
+  const runner=new LateMarketRunner(observer,{shared,log:event=>logs.push(event)});
+  await assert.rejects(runner.refreshQuote('WTI'),/EXECUTABLE_BOOK_STALE_RESPONSE/);
+  assert.equal(shared.WTI.lastQuoteMessageTs,0);
+  assert.equal(logs.length,1);
+  assert.equal(logs[0].deadlineAborted,true);
+  assert.equal(logs[0].limitMs,2000);
+});

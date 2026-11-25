@@ -254,15 +254,18 @@ export function createScalpExecutor(deps = {}) {
     const key = wick ? 'wick:'+ctx.asset+':'+distance.side : ctx.asset;
     const requireLongRecovery=wick || stageBudget>=25;
     const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isPythLateMarket(ctx.asset)} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
+    const pilot = PILOT_WICK_MARKETS[ctx.asset];
     let referenceHistory;
-    const onHistoryFailure = ctx.asset === 'BTC' ? detail => { referenceHistory = detail; } : null;
+    const onHistoryFailure = ctx.asset === 'BTC' || pilot ? detail => { referenceHistory = detail; } : null;
+    const referenceFailure = guard => ({...guard,referenceHistory,
+      ...(pilot?{referenceFeed:ctx.proxy?.getDiagnostics?.(ctx.asset)??null}:{})});
     // Every late purchase must pass, including the first purchase.
     const check = isPythLateMarket(ctx.asset) ? metalShrinkingCheck({
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
       history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[key],
       secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,...extraOptions,
-      projectedLookbackSeconds:wick && ctx.asset==='WTI' ? 20 : undefined,at:Date.now()
+      projectedLookbackSeconds:wick && ctx.asset==='WTI' ? 20 : undefined,onHistoryFailure,at:Date.now()
     }) : evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' && !wick ? 50 : distance.minimumDistance,
@@ -275,7 +278,6 @@ export function createScalpExecutor(deps = {}) {
     }
     const now = Date.now();
     const projected = entryCrossingBuffer(check, ctx.asset, remainingSeconds(ctx.s, now), now);
-    const pilot = PILOT_WICK_MARKETS[ctx.asset];
     const checked = projected?.allowed && isPythLateMarket(ctx.asset)
       ? repeatedCrossingGuard(projected, ctx.asset, distance.side, distance.target,
           ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset], pilot?.repeatedCrossingCushion)
@@ -289,7 +291,7 @@ export function createScalpExecutor(deps = {}) {
         return {...checked, allowed: false, reason: 'USDJPY_LADDER_ADD_CUSHION_NOT_WIDENING'};
       }
     }
-    if (!wick || !checked?.allowed) return referenceHistory ? {...checked,referenceHistory} : checked;
+    if (!wick || !checked?.allowed) return referenceHistory ? referenceFailure(checked) : checked;
     if (pilot && !checked.crossingHistoryComplete) {
       return {...checked, allowed: false, reason: 'PILOT_WICK_CROSSING_HISTORY_INCOMPLETE'};
     }
@@ -329,9 +331,10 @@ export function createScalpExecutor(deps = {}) {
     const floor = checked.crossingWickMinimum ?? distance.minimumDistance;
     const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor, onHistoryFailure);
     if (!(metrics?.heldMs >= 5000)) {
-      return {...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED',
-        ...(onHistoryFailure?{referenceHistory:referenceHistory ??
-          {issue:'HOLD_BELOW_REQUIRED',heldMs:metrics?.heldMs ?? null,requiredHoldMs:5000,floor}}:{})};
+      const blocked={...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
+      if(referenceHistory) return referenceFailure(blocked);
+      return ctx.asset==='BTC'?{...blocked,referenceHistory:
+        {issue:'HOLD_BELOW_REQUIRED',heldMs:metrics?.heldMs ?? null,requiredHoldMs:5000,floor}}:blocked;
     }
     const result = {...checked, wickHeldMs:metrics.heldMs};
     if (pilot && checked.targetCrossings > 0 && metrics.heldMs < 15000) {
