@@ -36,22 +36,11 @@ async function main() {
   import('./engine/cryptoWickRunner.js').then(({ startCryptoWickRunner }) => startCryptoWickRunner())
     .catch(e => console.error('[CRYPTO_WICK] Startup failed:', e.message));
 
-  // Independent, public-data-only observer; errors cannot stop BTC execution.
-  if (process.env.METALS_OBSERVER_ENABLED !== 'false' || process.env.LATE_MARKETS_LIVE_ENABLED !== 'false' ||
+  if (process.env.LATE_MARKETS_LIVE_ENABLED !== 'false' ||
       Object.keys(LIVE_LATE_MARKETS).some(asset=>state[asset].activeTrade)) {
-    import('./research/metalsObserver.js').then(async ({ startMetalsObserver }) => {
-      const observer=startMetalsObserver();
-      const {startLateMarketRunner}=await import('./engine/lateMarketRunner.js');
-      startLateMarketRunner(observer);
-    })
-      .catch(e => console.error('[METALS_OBSERVER] Startup failed:', e.message));
+    import('./engine/lateMarketRunner.js').then(({ startLateMarketRunner }) => startLateMarketRunner())
+      .catch(e => console.error('[LATE_MARKETS] Startup failed:', e.message));
   }
-
-  // Research loop — always runs regardless of mode.
-  // Records live ticks to data/snapshots/ and runs coordinate-descent optimizer every 5m.
-  const { ResearchLoop } = await import('./research/loop.js');
-  const research = new ResearchLoop(null);
-  research.start().catch(e => console.error('[Research] start error:', e.message));
 
   if (MCP_MODE) {
     const { startMCPServer } = await import('./mcp/server.js');

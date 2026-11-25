@@ -14,7 +14,6 @@ import { KalshiWebSocket } from '../kalshi/websocket.js';
 import { getBalance, findActiveMarket, getPositions } from '../kalshi/client.js';
 import { executeSell } from '../kalshi/orders.js';
 import { loadBrain } from '../nn/store.js';
-import { startOfflineTraining, stopOfflineTraining } from './offlineTrainer.js';
 import { notify } from '../notify.js';
 import { scalpExecutor, restoreScalpExecution, isManagedTrade } from './scalpExecution.js';
 
@@ -175,12 +174,9 @@ function enterOfflineMode(asset) {
   );
   notify(
     '🔴 Offline Mode',
-    `${asset}: market unavailable — bots paused, NN training continues`,
+    `${asset}: market unavailable — bots paused`,
     'default'
   );
-
-  // Start offline learning loop
-  if (s.brain) startOfflineTraining(asset, s.brain);
 
   // Poll every 30s — resume when market comes back
   _offlinePollers[asset] = setInterval(async () => {
@@ -188,11 +184,10 @@ function enterOfflineMode(asset) {
       const market = await findActiveMarket(asset);
       await exitOfflineMode(asset, market);
     } catch {
-      // Market still unavailable — keep training, log every 5 polls
+      // Market still unavailable — log every five polls
       const polls = (_offlinePollers[asset + '_count'] = (_offlinePollers[asset + '_count'] ?? 0) + 1);
       if (polls % 5 === 0) {
-        const samples = s.brain?.data?.length ?? 0;
-        console.log(`[Offline] ${asset} — still waiting for market (${samples} samples trained)`);
+        console.log(`[Offline] ${asset} — still waiting for market`);
       }
     }
   }, OFFLINE_POLL_MS);
@@ -210,7 +205,6 @@ async function exitOfflineMode(asset, market) {
   _marketFails[asset]   = 0;
 
   // Stop offline trainer now that live data is flowing again
-  stopOfflineTraining(asset);
 
   const s = state[asset];
   s.ticker          = market.ticker;
@@ -299,6 +293,7 @@ async function _tickBody() {
 
   for (const asset of ['BTC', 'ETH']) {
     const s = state[asset];
+    if (state.disabledAssets.includes(asset) && !s.activeTrade) continue;
     s.secsLeft   = sl;
     s.clockUpdatedAt = now;
     s.spotPrice  = priceFeed.getPrice(asset);
@@ -494,6 +489,7 @@ export async function startClock() {
 
   console.log('[Clock] Connecting to Kalshi markets...');
   for (const asset of ['BTC', 'ETH']) {
+    if (state.disabledAssets.includes(asset) && !state[asset].activeTrade) continue;
     try {
       const market = await findActiveMarket(asset);
       state[asset].ticker = market.ticker;

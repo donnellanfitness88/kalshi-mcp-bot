@@ -734,3 +734,90 @@ test('Pyth live ladder and wick accept a 2.5s history gap and reject a wider gap
     }
   } finally { Date.now=clock; }
 });
+
+test('live-only falling 90 signal comes from live scan books with batch or single reads',async()=>{
+  const {LiveLateMarketData}=await import('../../src/engine/liveLateMarketData.js');
+  const previous=process.env.LATE_MARKETS_BATCH_BOOKS_ENABLED;
+  try {
+    for(const batching of [true,false]) {
+      process.env.LATE_MARKETS_BATCH_BOOKS_ENABLED=String(batching);
+      const f=fixture(), reads=[], signals=[];
+      let now=Date.now(), price=.92;
+      const data=new LiveLateMarketData({
+        now:()=>now,
+        log:()=>{},
+        proxy:{snapshot:()=>({status:'FRESH_PROXY'})},
+        read:async route=>{
+          reads.push(route);
+          const book={orderbook_fp:{yes_dollars:[],no_dollars:[[(1-price).toFixed(2),'500']]}};
+          if(route.startsWith('/markets/orderbooks?')) {
+            const tickers=new URL(route,'https://example.invalid').searchParams.getAll('tickers');
+            return {orderbooks:tickers.map(ticker=>({ticker,...book}))};
+          }
+          return book;
+        },
+      });
+      for(const asset of Object.keys(LIVE_LATE_MARKETS)) {
+        data.nextDiscovery[asset]=now+60000;
+        if(!['WTI','COPPER'].includes(asset)) continue;
+        data.current[asset]={ticker:f.shared[asset].ticker,status:'open',floor_strike:2000,
+          close_time:new Date(now+250000).toISOString()};
+        data.series[asset]={fee_type:'quadratic',fee_multiplier:1};
+      }
+      const runner=new LateMarketRunner(data,{shared:f.shared,now:()=>now,log:()=>{},
+        executor:{tick:async ctx=>signals.push(ctx.getFallingNinetySignal())}});
+      await runner.tick();
+      assert.deepEqual(signals,[null,null]);
+      now+=5000;price=.90;
+      await runner.tick();
+      assert.deepEqual(signals.slice(2).map(s=>[s.ticker,s.side,s.target,s.direction]),[
+        [f.shared.WTI.ticker,'yes',2000,'falling'],
+        [f.shared.COPPER.ticker,'yes',2000,'falling'],
+      ]);
+      assert.equal(reads.length,batching?2:4);
+      assert.ok(reads.every(route=>batching?route.startsWith('/markets/orderbooks?'):route.endsWith('/orderbook?depth=1')));
+      now+=5000;price=.89;
+      await runner.tick();
+      assert.deepEqual(signals.slice(4),[null,null]);
+      now+=5000;price=.90;
+      await runner.tick();
+      assert.deepEqual(signals.slice(6),[null,null]);
+    }
+  } finally {
+    if(previous===undefined) delete process.env.LATE_MARKETS_BATCH_BOOKS_ENABLED;
+    else process.env.LATE_MARKETS_BATCH_BOOKS_ENABLED=previous;
+  }
+});
+
+test('live-only metadata rolls at expiry and drops signals from the previous ticker',async()=>{
+  const {LiveLateMarketData}=await import('../../src/engine/liveLateMarketData.js');
+  let now=Date.now(), close=now+20000, ticker='KXWTI15M-FIRST';
+  const data=new LiveLateMarketData({
+    now:()=>now,
+    log:()=>{},
+    proxy:{snapshot:()=>({status:'FRESH_PROXY'})},
+    read:async route=>{
+      if(route==='/series/KXWTI15M')
+        return {series:{ticker:'KXWTI15M',frequency:'fifteen_min',fee_type:'quadratic',fee_multiplier:1}};
+      if(route.startsWith('/markets?'))
+        return {markets:[{ticker,status:'open',open_time:new Date(close-900000).toISOString(),
+          close_time:new Date(close).toISOString()}]};
+      assert.equal(route,'/markets/'+ticker);
+      return {market:{ticker,floor_strike:2000}};
+    },
+  });
+  await data.refreshAsset('WTI');
+  assert.equal(data.current.WTI.floor_strike,2000);
+  data.sampleFallingBook('WTI',data.current.WTI,{yes:{price:.92,size:500}},now);
+  now+=5000;
+  data.sampleFallingBook('WTI',data.current.WTI,{yes:{price:.90,size:500}},now-2001);
+  assert.equal(data.getFallingNinetySignal('WTI'),null);
+  data.sampleFallingBook('WTI',data.current.WTI,{yes:{price:.90,size:500}},now);
+  assert.equal(data.getFallingNinetySignal('WTI').ticker,ticker);
+  now=close;
+  close+=900000;
+  ticker='KXWTI15M-NEXT';
+  await data.refreshAsset('WTI');
+  assert.equal(data.current.WTI.ticker,ticker);
+  assert.equal(data.getFallingNinetySignal('WTI'),undefined);
+});

@@ -3,17 +3,17 @@ import { scalpExecutor } from './scalpExecution.js';
 import { LIVE_LATE_MARKETS, fourMarketsEnabled, isPilotWick, pilotWickEnabled,
   FALLING_NINETY_BUDGET, fallingNinetyEnabled, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from './lateMarkets.js';
 import { metalBook } from '../research/metalsObserver.js';
+import { startLiveLateMarketData } from './liveLateMarketData.js';
 
 const MAX_EXECUTABLE_BOOK_AGE_MS = 2000;
 const BATCH_RETRY_DELAY_MS = 60000;
 const batchBooksEnabled = () => process.env.LATE_MARKETS_BATCH_BOOKS_ENABLED !== 'false';
 
-// Reuse the observer's existing discovery and Pyth connections. The observer
-// itself remains read-only. Only the shared journaled executor can send orders.
+// Only the shared journaled executor can send orders.
 export class LateMarketRunner {
-  constructor(observer,{shared=state,executor=scalpExecutor,now=Date.now,
+  constructor(marketData,{shared=state,executor=scalpExecutor,now=Date.now,
     log=event=>console.log('[LATE_MARKETS] '+JSON.stringify(event))}={}) {
-    Object.assign(this,{observer,shared,executor,now,log});this.busy=false;
+    Object.assign(this,{marketData,shared,executor,now,log});this.busy=false;
     this.nextBatchAttemptAt=0;
   }
   applyBook(s, book, started) {
@@ -27,10 +27,12 @@ export class LateMarketRunner {
     if(!batchBooksEnabled() || !fourMarketsEnabled() || process.env.SCALP_ENABLED!=='true' ||
         scanAt<this.nextBatchAttemptAt) return null;
     const tickers=Object.keys(LIVE_LATE_MARKETS).flatMap(asset=>{
-      const s=this.shared[asset], market=this.observer.current[asset];
+      const s=this.shared[asset], market=this.marketData.current[asset];
       const remaining=Date.parse(market?.close_time)-scanAt;
       if(!s?.farmArmed || this.shared.disabledAssets?.includes(asset) || !['open','active'].includes(market?.status) ||
-          !(remaining>0 && remaining<180000) || (isPilotWick(asset) && !pilotWickEnabled())) return [];
+          !(remaining>0)) return [];
+      const wickScan=remaining<180000 && (!isPilotWick(asset) || pilotWickEnabled());
+      if(!wickScan && !this.marketData.canSampleFalling?.(asset)) return [];
       return [market.ticker];
     });
     if(tickers.length<2) return null;
@@ -38,7 +40,7 @@ export class LateMarketRunner {
     const started=this.now(), signal=AbortSignal.timeout(MAX_EXECUTABLE_BOOK_AGE_MS), books=new Map();
     let outcome='ACCEPTED';
     try {
-      const data=await this.observer.read(path,{signal});
+      const data=await this.marketData.read(path,{signal});
       if(!Array.isArray(data?.orderbooks)) throw new Error('Invalid batch order-book response');
       const expected=new Set(tickers);
       for(const row of data.orderbooks) {
@@ -61,18 +63,18 @@ export class LateMarketRunner {
     }
   }
   async refreshInitialQuote(asset, batch) {
-    const s=this.shared[asset], market=this.observer.current[asset];
+    const s=this.shared[asset], market=this.marketData.current[asset];
     const book=batch?.books.get(s.ticker), now=this.now(), age=now-batch?.started;
     if(book && age>=0 && age<=MAX_EXECUTABLE_BOOK_AGE_MS && market?.ticker===s.ticker &&
         ['open','active'].includes(market.status) && Date.parse(market.close_time)>now) {
       this.applyBook(s,book,batch.started);
-      this.log({event:'BATCH_BOOK_USED',asset,ticker:s.ticker,bookAgeMs:age});
+      this.log({event:batch.single?'SCAN_BOOK_REUSED':'BATCH_BOOK_USED',asset,ticker:s.ticker,bookAgeMs:age});
       return;
     }
     await this.refreshQuote(asset,'INITIAL');
   }
   async refreshQuote(asset, phase) {
-    const s=this.shared[asset], market=this.observer.current[asset];
+    const s=this.shared[asset], market=this.marketData.current[asset];
     s.lastQuoteMessageTs=0;
     if (!market || market.ticker!==s.ticker || !['open','active'].includes(market.status))
       throw new Error('Live market no longer current');
@@ -80,7 +82,7 @@ export class LateMarketRunner {
     let receivedAt=null, checkedAt=null, outcome='READ_ERROR', deadlineAborted=false;
     const signal=AbortSignal.timeout(MAX_EXECUTABLE_BOOK_AGE_MS);
     try {
-      const data=await this.observer.read('/markets/'+encodeURIComponent(ticker)+'/orderbook?depth=1',{signal});
+      const data=await this.marketData.read('/markets/'+encodeURIComponent(ticker)+'/orderbook?depth=1',{signal});
       receivedAt=this.now();
       const book=metalBook(data);
       checkedAt=this.now();
@@ -92,6 +94,7 @@ export class LateMarketRunner {
       if(outcome!=='ACCEPTED') throw new Error(outcome);
 
       this.applyBook(s,book,started);
+      return {started,book};
     } catch(error) {
       if(!signal.aborted || outcome!=='READ_ERROR') throw error;
       deadlineAborted=true;
@@ -110,13 +113,18 @@ export class LateMarketRunner {
     if(this.busy)return;this.busy=true;
     const scanAt=this.now();
     try {
+      void this.marketData.refreshMarkets?.();
       const batch=await this.prefetchBooks(scanAt);
       for(const asset of Object.keys(LIVE_LATE_MARKETS)) {
+        const market=this.marketData.current[asset], book=batch?.books.get(market?.ticker);
+        if(book) this.marketData.sampleFallingBook?.(asset,market,book,batch.started);
+      }
+      for(const asset of Object.keys(LIVE_LATE_MARKETS)) {
         const s=this.shared[asset];if(!s)continue;
-        const market=this.observer.current[asset];
+        const market=this.marketData.current[asset];
         if(market) {
           s.ticker=market.ticker;s.marketCloseTs=Date.parse(market.close_time);
-          const series=this.observer.series[asset];
+          const series=this.marketData.series[asset];
           s.lateFeeType=series?.fee_type;
           s.lateFeeMultiplier=series?.fee_multiplier==null?NaN:Number(series.fee_multiplier);
         } else s.lastQuoteMessageTs=0;
@@ -125,10 +133,21 @@ export class LateMarketRunner {
           if(!s.activeTrade && (!fourMarketsEnabled() || !market || (isPilotWick(asset) && !pilotWickEnabled() && !fallingNinetyEnabled())))continue;
           if(market && s.marketCloseTs>this.now() && s.marketCloseTs-this.now()<180000)
             this.log({event:'MARKET_SCAN_TIMING',asset,ticker:s.ticker,queueWaitMs:this.now()-scanAt});
+          let initial=batch;
+          if(market && !batch?.books.has(market.ticker) && s.farmArmed &&
+              !this.shared.disabledAssets?.includes(asset) && fourMarketsEnabled() &&
+              process.env.SCALP_ENABLED==='true' && s.marketCloseTs>this.now() &&
+              this.marketData.canSampleFalling?.(asset)) {
+            try {
+              const {started,book}=await this.refreshQuote(asset,'SCAN');
+              this.marketData.sampleFallingBook(asset,market,book,started);
+              initial={started,books:new Map([[market.ticker,book]]),single:true};
+            } catch(error) { this.log({event:'SCAN_ERROR',asset,message:error.message}); }
+          }
           await this.executor.tick({asset,s,balance:this.shared.balance,
-            proxy:this.observer.proxy,refreshQuote:phase=>this.refreshQuote(asset,phase),
-            refreshInitialQuote:()=>this.refreshInitialQuote(asset,batch),
-            getFallingNinetySignal:()=>this.observer.getFallingNinetySignal?.(asset)});
+            proxy:this.marketData.proxy,refreshQuote:phase=>this.refreshQuote(asset,phase),
+            refreshInitialQuote:()=>this.refreshInitialQuote(asset,initial),
+            getFallingNinetySignal:()=>this.marketData.getFallingNinetySignal?.(asset)});
         } catch(error) {this.log({event:'ERROR',asset,message:error.message});}
       }
     } finally {this.busy=false;}
@@ -143,6 +162,6 @@ export class LateMarketRunner {
       rapidDropFraction:.30,recoverySeconds:2});
     void this.tick();this.timer=setInterval(()=>void this.tick(),5000);this.timer.unref?.();return this;
   }
-  stop(){clearInterval(this.timer);}
+  stop(){clearInterval(this.timer);this.marketData.proxy?.stop?.();}
 }
-export const startLateMarketRunner=observer=>new LateMarketRunner(observer).start();
+export const startLateMarketRunner=()=>new LateMarketRunner(startLiveLateMarketData()).start();
