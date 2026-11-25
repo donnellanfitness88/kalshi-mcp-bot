@@ -215,10 +215,10 @@ test('directional path still blocks empty, crossed, stale, sub-contract and belo
 test('selected-side liquidity disappearing on final recheck prevents an order',async()=>{
   const f=fixture(),s=f.shared.GOLD;let reads=0;
   const runner=new LateMarketRunner({current:{GOLD:{ticker:s.ticker,status:'open'}},read:async()=>({
-    orderbook_fp:{yes_dollars:[['0.9800','10']],no_dollars:++reads<3?[['0.0100','10']]:[]}
+    orderbook_fp:{yes_dollars:[['0.9800','10']],no_dollars:++reads<2?[['0.0100','10']]:[]}
   })},{shared:f.shared,log:()=>{}});
   await f.executor.tick({...f.ctx('GOLD'),refreshQuote:()=>runner.refreshQuote('GOLD')});
-  assert.equal(f.requests.length,0);assert.equal(reads,3);
+  assert.equal(f.requests.length,0);assert.equal(reads,2);
 });
 
 import {silverEntryBuffer} from '../../src/engine/silverEntryBuffer.js';
@@ -646,13 +646,40 @@ test('batch scan cannot substitute for the final live wick book',async()=>{
   };
   let initial=0, singles=0;
   ctx.refreshInitialQuote=async()=>{initial++;await f.ctx('WTI').refreshQuote();};
-  ctx.refreshQuote=async()=>{
+  ctx.refreshQuote=async phase=>{
+    assert.equal(phase,'FINAL');
     singles++;
-    if(singles===2) ctx.s.yesAsk=.91;
+    ctx.s.yesAsk=.91;
     await f.ctx('WTI').refreshQuote();
   };
   await f.executor.tick(ctx);
   assert.equal(initial,1);
-  assert.equal(singles,2);
+  assert.equal(singles,1);
   assert.equal(f.requests.length,0);
+});
+
+test('Pyth ladder reads one final book after both account checks and sizes from its liquidity',async()=>{
+  const f=fixture(),ctx=f.ctx('GOLD'),refresh=ctx.refreshQuote;
+  ctx.s.marketCloseTs=Date.now()+40000;
+  ctx.s.yesAsk=.98;ctx.s.yesBid=.97;
+  let accountChecks=0;
+  const phases=[];
+  f.api.getOrders=async()=>{accountChecks++;return [];};
+  ctx.refreshInitialQuote=async()=>{
+    assert.equal(accountChecks,0);
+    phases.push('INITIAL');
+    ctx.s.yesAskSize=1;
+    await refresh();
+  };
+  ctx.refreshQuote=async phase=>{
+    assert.equal(phase,'FINAL');
+    assert.equal(accountChecks,2);
+    phases.push(phase);
+    ctx.s.yesAskSize=3;
+    await refresh();
+  };
+  await f.executor.tick(ctx);
+  assert.deepEqual(phases,['INITIAL','FINAL']);
+  assert.equal(f.requests.length,1);
+  assert.equal(f.requests[0].count,'3.00');
 });

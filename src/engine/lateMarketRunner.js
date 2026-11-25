@@ -69,9 +69,9 @@ export class LateMarketRunner {
       this.log({event:'BATCH_BOOK_USED',asset,ticker:s.ticker,bookAgeMs:age});
       return;
     }
-    await this.refreshQuote(asset);
+    await this.refreshQuote(asset,'INITIAL');
   }
-  async refreshQuote(asset) {
+  async refreshQuote(asset, phase) {
     const s=this.shared[asset], market=this.observer.current[asset];
     s.lastQuoteMessageTs=0;
     if (!market || market.ticker!==s.ticker || !['open','active'].includes(market.status))
@@ -99,7 +99,7 @@ export class LateMarketRunner {
       throw new Error(outcome,{cause:error});
     } finally {
       const completedAt=receivedAt??this.now();
-      this.log({event:'EXECUTABLE_BOOK_TIMING',asset,ticker,outcome,
+      this.log({event:'EXECUTABLE_BOOK_TIMING',asset,ticker,outcome,phase,
         requestMs:completedAt-started,bookAgeMs:checkedAt===null?null:checkedAt-started,
         limitMs:MAX_EXECUTABLE_BOOK_AGE_MS,deadlineAborted,
         secondsRemainingAtStart:(closeTime-started)/1000,
@@ -126,7 +126,7 @@ export class LateMarketRunner {
           if(market && s.marketCloseTs>this.now() && s.marketCloseTs-this.now()<180000)
             this.log({event:'MARKET_SCAN_TIMING',asset,ticker:s.ticker,queueWaitMs:this.now()-scanAt});
           await this.executor.tick({asset,s,balance:this.shared.balance,
-            proxy:this.observer.proxy,refreshQuote:()=>this.refreshQuote(asset),
+            proxy:this.observer.proxy,refreshQuote:phase=>this.refreshQuote(asset,phase),
             refreshInitialQuote:()=>this.refreshInitialQuote(asset,batch),
             getFallingNinetySignal:()=>this.observer.getFallingNinetySignal?.(asset)});
         } catch(error) {this.log({event:'ERROR',asset,message:error.message});}

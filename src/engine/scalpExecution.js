@@ -819,6 +819,7 @@ export function createScalpExecutor(deps = {}) {
   async function enter(ctx, wick = false) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
+    const pythLate = isPythLateMarket(asset);
     const pilot = isPilotWick(asset);
     if (pilot && (!wick || !pilotWickEnabled() || s.activeTrade?.strategy===fallingNinetyStage.id)) return;
     const cryptoWick = isCryptoWick(asset);
@@ -832,7 +833,7 @@ export function createScalpExecutor(deps = {}) {
     };
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
         lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
-    if (isPythLateMarket(asset)) {
+    if (pythLate) {
       if (!fourMarketsEnabled() || !ctx.refreshQuote || !ctx.proxy ||
           remainingSeconds(s)<=0 || remainingSeconds(s)>=180) return;
       if (!wick) await (ctx.refreshInitialQuote ?? ctx.refreshQuote)();
@@ -844,11 +845,10 @@ export function createScalpExecutor(deps = {}) {
     let wickBook, bookAt;
     async function readWickBook(initial = false) {
       bookAt = Date.now();
-      if (isPythLateMarket(asset)) {
-        if (initial && ctx.refreshInitialQuote) {
-          await ctx.refreshInitialQuote();
-          bookAt = s.lastQuoteMessageTs;
-        } else await ctx.refreshQuote();
+      if (pythLate) {
+        if (initial && ctx.refreshInitialQuote) await ctx.refreshInitialQuote();
+        else await ctx.refreshQuote(initial ? 'INITIAL' : 'FINAL');
+        bookAt = s.lastQuoteMessageTs;
         wickBook = s.lateBook;
       } else {
         wickBook = metalBook(await api.getMarketOrderbook(originalTicker,1));
@@ -857,7 +857,8 @@ export function createScalpExecutor(deps = {}) {
     function readSignal() {
       if (!wick) return entrySignal(s, mode);
       const ledger = lateStages[originalTicker];
-      if (s.ticker!==originalTicker || !wickWindowOpen() || Date.now()-bookAt>2000 ||
+      if (s.ticker!==originalTicker || !wickWindowOpen() || !Number.isFinite(bookAt) ||
+          Date.now()-bookAt>2000 || bookAt>Date.now() ||
           ledger?.closed || ledger?.attempted.includes(wickStage.id) ||
           (!ledger && lateEntryTickers.includes(originalTicker))) return {shouldEnter:false};
       const heldSide = s.activeTrade?.side ?? ledger?.side;
@@ -884,6 +885,7 @@ export function createScalpExecutor(deps = {}) {
     if (wick) await readWickBook(true);
     const signal = readSignal();
     if (!signal.shouldEnter) return;
+    const initialPrice = pythLate ? priceFor(signal.direction) : null;
     if (mode === 'LATE_SETTLEMENT') {
       const key = `${s.ticker}:${signal.stage.id}`;
       if (retryNow() - (lateChecks.get(key) ?? -Infinity) < SCALP_CONFIG.lateRetryMs) return;
@@ -918,7 +920,7 @@ export function createScalpExecutor(deps = {}) {
       const liveRisk = checkRiskGuards(s,balance);
       if (liveRisk.blocked) { entryBlocked(asset,liveRisk.reason); return; }
     }
-    if (isPythLateMarket(asset)) {
+    if (pythLate) {
       if (s.sessionStartBalance===null) startSession(s,balance);
       if (s.dailyStartBalance===null) startDay(s,balance);
       // Release only the USD/JPY session hold recorded after the Nov 23 9 p.m. PT settlement.
@@ -942,21 +944,20 @@ export function createScalpExecutor(deps = {}) {
       }
       persist();
       if (liveRisk.blocked) { entryBlocked(asset,liveRisk.reason); return; }
-      if (!wick) await ctx.refreshQuote();
     }
-    if (wick) await readWickBook();
-    // Revalidate the actual close time, ticker and quote after slow account reads.
-    if (s.activeTrade !== held || !compatibleHoldings(s, mode, sim) ||
-        s.ticker !== ticker || (!wick && selectedEntryMode(s) !== mode)) return;
-    const fresh = readSignal();
+    // For Pyth markets, use the initial signal until account checks finish. Take
+    // one new executable book just before submission and compare it to that signal.
+    if (wick && !pythLate) await readWickBook();
+    if (s.activeTrade !== held || !compatibleHoldings(s, mode, sim) || s.ticker !== ticker ||
+        (!pythLate && !wick && selectedEntryMode(s) !== mode)) return;
+    const fresh = pythLate ? signal : readSignal();
     if (!fresh.shouldEnter || fresh.direction !== signal.direction || fresh.stage?.id !== signal.stage?.id) return;
-    const price = priceFor(fresh.direction);
+    const price = pythLate ? initialPrice : priceFor(fresh.direction);
     const stageSpent = lateStages[ticker]?.records?.[fresh.stage?.id]?.spent ?? 0;
     let stageBudget = mode === 'LATE_SETTLEMENT' ? Math.min(fresh.stage.budget - stageSpent,
       (wick ? totalBudget(asset) : lateBudgetFor(asset)+(lateStages[ticker]?.records?.wick_5s?.spent ?? 0)) - (lateStages[ticker]?.spent ?? 0)) : null;
     const feeMultiplier=hasIndependentRisk(asset)?s.lateFeeMultiplier:1;
     let count = mode === 'LATE_SETTLEMENT' ? lateStageSize(price, balance, stageBudget,feeMultiplier) : scalpSize(price, balance, mode);
-    if (!wick && isPythLateMarket(asset)) count=Math.min(count,Math.floor(fresh.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (mode === 'LATE_SETTLEMENT' && !await accountMatches(asset, held, sim)) {
       entryBlocked(asset, 'CRYPTO_ACCOUNT_MISMATCH'); return;
     }
@@ -964,7 +965,7 @@ export function createScalpExecutor(deps = {}) {
     const btcCandle = btcWickRange ? await btcWickRange(Date.now()) : null;
     // The final account check may cross a time tier or receive a changed quote.
     if (wick) await readWickBook();
-    else if (isPythLateMarket(asset)) await ctx.refreshQuote();
+    else if (pythLate) await ctx.refreshQuote('FINAL');
     const distanceCheck = mode === 'LATE_SETTLEMENT' ? await proximity(ctx, fresh) : null;
     if (distanceCheck && !distanceCheck.allowed) {
       entryBlocked(asset, distanceCheck.reason, { proximity: distanceCheck }); return;
@@ -1004,10 +1005,10 @@ export function createScalpExecutor(deps = {}) {
       entryBlocked(asset, volatilityGuard.reason, { volatilityGuard });
       return;
     }
-    if (!wick && isPythLateMarket(asset)) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
+    if (!wick && pythLate) count=Math.min(count,Math.floor(final.direction==='UP'?s.yesAskSize:s.noAskSize));
     if (wick) count=Math.min(count,Math.floor(wickBook[final.direction==='UP'?'yes':'no'].size));
     if (!Number.isSafeInteger(count) || count<=0 || (mode === 'LATE_SETTLEMENT' && count * (1 - price) <= lateFee(count, price,feeMultiplier))) return;
-    const body = (wick || isPythLateMarket(asset)) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
+    const body = (wick || pythLate) ? buildDirectionalLateBuyBody(ticker,fresh.direction,count,price) :
       buildBuyBody(ticker, fresh.direction, count * price + 1e-9, s.yesAsk, s.yesBid);
     body.count = count.toFixed(2);
     if (hasIndependentRisk(asset)) body.exchange_index=exchangeForAsset(asset);
@@ -1053,7 +1054,7 @@ export function createScalpExecutor(deps = {}) {
     persist();
     const risk=checkRiskGuards(s,balance);
     if (risk.blocked) { entryBlocked(asset,risk.reason,{strategy:fallingNinetyStage.id}); return; }
-    await ctx.refreshQuote();
+    await ctx.refreshQuote('FINAL');
     const quote=s.lateBook?.[side], checked=reference(), bookAge=Date.now()-s.lastQuoteMessageTs;
     if (!eligible() || !checked || !Number.isFinite(bookAge) || bookAge<0 || bookAge>2000 ||
         quote?.price!==.90 || !Number.isFinite(quote.size)) return;
