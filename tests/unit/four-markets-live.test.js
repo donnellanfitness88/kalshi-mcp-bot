@@ -821,3 +821,41 @@ test('live-only metadata rolls at expiry and drops signals from the previous tic
   assert.equal(data.current.WTI.ticker,ticker);
   assert.equal(data.getFallingNinetySignal('WTI'),undefined);
 });
+
+test('USD/JPY wick requires 1.5 pips on either side before and after account checks',async()=>{
+  const clock=Date.now, now=clock();
+  Date.now=()=>now;
+  try {
+    for(const side of ['yes','no']) {
+      for(const [initial, final, expected] of [[.014,.014,0],[.015,.015,1],[.016,.014,0]]) {
+        const f=fixture({liveWick:true,selectLateStage:()=>null}), ctx=f.ctx('USDJPY');
+        ctx.s.yesAsk = side === 'yes' ? 0.92 : 0.09;
+        ctx.s.yesBid = side === 'yes' ? 0.91 : 0.08;
+        const place=f.api.placeOrder;
+        f.api.placeOrder=async body=>({...await place(body),average_fee_paid:'0.0000'});
+        let cushion=initial;
+        f.proxy.snapshot=asset=>{
+          const sign=side==='yes'?1:-1;
+          const history=Array.from({length:1001},(_,i)=>({
+            sourceAt:now-200000+i*200,
+            price:2000+sign*(cushion-(1000-i)*.000005),
+          }));
+          f.proxy.history[asset]=history;
+          return {status:'FRESH_PROXY',sourceAt:now,price:history.at(-1).price};
+        };
+        const refresh=ctx.refreshQuote;
+        ctx.refreshQuote=async phase=>{
+          if(phase==='FINAL') cushion=final;
+          await refresh();
+        };
+        await f.executor.tick(ctx);
+        assert.equal(f.requests.length,expected,JSON.stringify(f.logs));
+        if(!expected) {
+          const blocked=f.logs.find(e=>e.reason==='USDJPY_WICK_CUSHION_TOO_SMALL');
+          assert.equal(blocked?.shrinkingGuard.minimumCushion,.015);
+          assert.equal(blocked?.shrinkingGuard.targetCrossings,0);
+        } else assert.equal(ctx.s.activeTrade?.side,side,JSON.stringify(f.logs));
+      }
+    }
+  } finally { Date.now=clock; }
+});

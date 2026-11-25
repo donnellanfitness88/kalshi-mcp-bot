@@ -310,6 +310,11 @@ export function createScalpExecutor(deps = {}) {
       }
     }
     if (ctx.asset === 'USDJPY') {
+      const usdJpyWickMinimum = 0.015; // 1.5 pips.
+      if (!(checked.currentCushion + 1e-9 >= usdJpyWickMinimum)) {
+        return {...checked, allowed: false, reason: 'USDJPY_WICK_CUSHION_TOO_SMALL',
+          minimumCushion: usdJpyWickMinimum};
+      }
       const change60 = checked.longRecovery?.cushionChange60;
       if (!Number.isFinite(change60) || change60 <= 1e-9) {
         return {...checked, allowed: false, reason: 'USDJPY_WICK_CUSHION_NOT_WIDENING'};
