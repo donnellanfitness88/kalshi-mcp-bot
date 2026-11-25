@@ -539,3 +539,50 @@ test('live order book aborts at its freshness deadline and records why',async()=
   assert.equal(logs[0].deadlineAborted,true);
   assert.equal(logs[0].limitMs,2000);
 });
+
+test('falling 90-cent live entries use the 300 budget, recheck reference and do not stack',async()=>{
+  const setup=(asset='WTI',options={})=>{
+    const f=fixture(options),s=f.shared[asset];
+    s.marketCloseTs=Date.now()+480000;
+    let calls=0;
+    f.proxy.snapshot=()=>({status:'FRESH_PROXY',estimatedCushion:.06,
+      movement:{15:{cushionChange:.01},60:{cushionChange:++calls===2&&options.fallLate?-.001:.001}}});
+    f.api.placeOrder=async body=>{
+      f.requests.push(body);
+      return {order_id:'n90',fill_count:options.zeroFill?'0.00':body.count,remaining_count:'0.00',
+        average_fill_price:body.price,average_fee_paid:'0.0063'};
+    };
+    const signal={ticker:s.ticker,at:Date.now(),side:'yes',target:2000,direction:'falling'};
+    return {f,s,ctx:{...f.ctx(asset),getFallingNinetySignal:()=>signal}};
+  };
+  const a=setup('WTI',{liveWick:true});
+  await a.f.executor.tick(a.ctx);
+  assert.equal(a.f.requests.length,1,JSON.stringify(a.f.logs));
+  assert.equal(a.f.requests[0].count,'331.00');
+  assert.equal(a.f.requests[0].time_in_force,'immediate_or_cancel');
+  assert.equal(a.f.requests[0].exchange_index,2);
+  assert.equal(a.s.activeTrade.strategy,'falling_90_cushion_trend');
+  assert.ok(a.s.activeTrade.originalCost<=300);
+  a.s.marketCloseTs=Date.now()+90000;
+  await a.f.executor.tick(a.ctx);
+  assert.equal(a.f.requests.length,1);
+  const blocked=setup('WTI',{fallLate:true});
+  await blocked.f.executor.tick(blocked.ctx);
+  assert.equal(blocked.f.requests.length,0);
+  const zero=setup('COPPER',{zeroFill:true});
+  await zero.f.executor.tick(zero.ctx);
+  zero.f.executor.restore(zero.f.saved());
+  await zero.f.executor.tick(zero.ctx);
+  assert.equal(zero.f.requests.length,1);
+  assert.equal(zero.f.saved().pending,null);
+  assert.equal(zero.s.activeTrade,null);
+  const wtiWithWick=setup();
+  const state={lateStages:{[wtiWithWick.s.ticker]:{spent:99,side:'yes',attempted:['wick_5s']}}};
+  wtiWithWick.f.executor.restore(state);
+  await wtiWithWick.f.executor.tick(wtiWithWick.ctx);
+  assert.equal(wtiWithWick.f.requests.length,0);
+  const wrongPrice=setup('USDCAD');
+  wrongPrice.s.yesAsk=.901;
+  await wrongPrice.f.executor.tick(wrongPrice.ctx);
+  assert.equal(wrongPrice.f.requests.length,0);
+});

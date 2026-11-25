@@ -1,6 +1,8 @@
 // Read-only observation. Returned estimates assume displayed top-level volume survives.
 export class NinetyStudy {
-  constructor() {
+  constructor({fallingOnly=false,budget=900}={}) {
+    this.fallingOnly=fallingOnly;
+    this.budget=budget;
     this.assets = new Map();
   }
   sample({asset, row, book, proxy, at, started, estimate}) {
@@ -31,7 +33,7 @@ export class NinetyStudy {
       if (sign && state.lastSign && sign!==state.lastSign) state.crossings++;
       if (sign) state.lastSign=sign;
     }
-    if (row.study90 || !book) return null;
+    if ((!this.fallingOnly && row.study90) || !book) return null;
     const sides = ['yes','no'].filter(s=>book[s]?.price===0.90 && book[s].size>0);
     state.path = state.path.filter(p=>at-p.at<=60000);
     const previous = {};
@@ -39,14 +41,16 @@ export class NinetyStudy {
       previous[side] = state.path.findLast(p=>p[side]!=null && p[side]!==0.90)?.[side];
     state.path.push({at,yes:book.yes?.price??null,no:book.no?.price??null,spot:ref?.price??null});
     if (!sides.length) return null;
-    const side=sides[0], p=proxy?.snapshot(asset,row.target,side);
+    const side=sides[0];
+    if (this.fallingOnly && (sides.length!==1 || !(previous[side]>.90))) return null;
+    const p=proxy?.snapshot(asset,row.target,side);
     const cutoff=(p?.sourceAt??0)-14400000, bucket=Math.floor(cutoff/5000);
     const prior=[bucket,bucket-1,bucket-2,bucket-3,bucket-4].map(b=>state.points.get(b))
       .find(v=>v && v.at<=cutoff && cutoff-v.at<=20000);
     const trend=p?.status==='FRESH_PROXY' && prior
       ? (side==='yes'?1:-1)*(p.price/prior.price-1) : null;
     const plan=row.feeType==='quadratic'
-      ? estimate({book,stage:{minPrice:.90,budget:900},side,feeMultiplier:row.feeMultiplier}) : null;
+      ? estimate({book,stage:{minPrice:.90,budget:this.budget},side,feeMultiplier:row.feeMultiplier}) : null;
     return {side,at,started,firstSample:state.first,maxSampleGapMs:state.maxGap,
       ambiguous:sides.length>1,secondsLeft:(Date.parse(row.closeTime)-at)/1000,
       direction:previous[side]==null?'unknown':previous[side]<.90?'rising':'falling',

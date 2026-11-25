@@ -1,7 +1,7 @@
 import { PullbackHistory, observeWick, updateWickTotals, wickMetrics, wickOutcome } from './btcWickStudy.js';
 import { entryCrossingBuffer } from '../engine/silverEntryBuffer.js';
 import { repeatedCrossingGuard } from '../engine/repeatedCrossingGuard.js';
-import { PILOT_WICK_MARKETS, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from '../engine/lateMarkets.js';
+import { FALLING_NINETY_BUDGET, PILOT_WICK_MARKETS, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from '../engine/lateMarkets.js';
 import { NinetyStudy } from './ninetyStudy.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -211,6 +211,7 @@ export class MetalsObserver {
     if(this.state.version!==1 || !this.state.markets || !this.state.totals) throw new Error('Invalid metals observer journal');
     this.current={}; this.nextDiscovery={}; this.nextTargetRead={}; this.nextSettlement=0; this.series={}; this.busy=false;
     this.paperWaitingForProxy=new Set();
+    this.fallingNinetySignals=new Map();
   }
   emit(event) { this.log({at:this.now(), observationOnly:true, ...event}); }
   persist(next, event) {
@@ -243,6 +244,7 @@ export class MetalsObserver {
       this.persist(next,{event:'MARKET',asset,ticker:market.ticker,closeTime:market.close_time});
     }
   }
+  getFallingNinetySignal(asset) { return this.fallingNinetySignals.get(asset); }
   async observe(asset) {
     const paperOnly=Object.hasOwn(PAPER_MARKETS,asset);
     const market=this.current[asset];
@@ -285,8 +287,19 @@ export class MetalsObserver {
     const pullbacks=this.wickHistories[asset]??=new PullbackHistory();
     pullbacks.ingest(history,at);
     this.ninetyStudy ??= new NinetyStudy();
-    const observation=this.ninetyStudy.sample({asset,row:currentRow,book,proxy:this.proxy,at,started,estimate:estimateMetalEntry});
-    if(!stage && !observation) return;
+    const ninetyInput={asset,row:currentRow,book,proxy:this.proxy,at,started,estimate:estimateMetalEntry};
+    const observation=this.ninetyStudy.sample(ninetyInput);
+    let fallingPaper=null;
+    if(paperOnly) {
+      this.fallingNinetyStudy ??= new NinetyStudy({fallingOnly:true,budget:FALLING_NINETY_BUDGET});
+      const falling=this.fallingNinetyStudy.sample(ninetyInput);
+      if(falling?.plan) {
+        this.fallingNinetySignals.set(asset,{ticker:market.ticker,side:falling.side,at:falling.at,
+          target:falling.target,direction:falling.direction});
+        if(!currentRow.study90Falling) fallingPaper=falling;
+      } else this.fallingNinetySignals.delete(asset);
+    }
+    if(!stage && !observation && !fallingPaper) return;
     const next=structuredClone(this.state), row=next.markets[market.ticker];
     if(stage && row.feeType==='quadratic') {
       const close=Date.parse(row.closeTime);
@@ -306,9 +319,12 @@ export class MetalsObserver {
         }
       });
     }
-    if(observation) {
-      row.study90=observation;
-      this.persist(next,{event:paperOnly?'PAPER90_QUOTE':'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
+    if(observation) row.study90=observation;
+    if(fallingPaper) row.study90Falling=fallingPaper;
+    if(observation || fallingPaper) {
+      this.persist(next);
+      if(observation) this.emit({event:paperOnly?'PAPER90_QUOTE':'FOUR90_QUOTE',asset,ticker:row.ticker,...observation});
+      if(fallingPaper) this.emit({event:'PAPER90_FALLING_QUOTE',asset,ticker:row.ticker,...fallingPaper});
     }
     if(!stage) return;
     const wtiRecoveryEvents=asset==='WTI'
@@ -469,6 +485,10 @@ export class MetalsObserver {
     this.emit({event:paperOnly?'PAPER90_SETTLED':'FOUR90_SETTLED',asset:r.asset,ticker:r.ticker,result:r.result,
       observedAt:quote?.at??null,modelNet:net,trendNet:net===null||quote.signedFourHourReturn===null
         ? null : quote.signedFourHourReturn>0?net:0});
+    const falling=r.study90Falling;
+    if(falling) this.emit({event:'PAPER90_FALLING_SETTLED',asset:r.asset,ticker:r.ticker,
+      result:r.result,observedAt:falling.at,plan:falling.plan,
+      modelNet:(falling.side===r.result?falling.plan.count:0)-falling.plan.estimatedCost});
     if(cushionSettlement)this.emit(cushionSettlement);
     if(shrinkSettlement)this.emit(shrinkSettlement);
   }

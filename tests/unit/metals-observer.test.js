@@ -160,3 +160,39 @@ test('four wick studies use their own proxy at greater than 90 cents and settle 
   assert.equal(new Set(events.map(x=>x.asset)).size,4);
   assert.ok(events.every(x=>x.net[0]<0 && x.totals.incomplete===1));
 });
+
+test('falling 90-cent paper study skips the earlier rising quote and settles separately',async()=>{
+  const ticker='KXWTI15M-TEST';
+  const marketData={ticker,status:'active',open_time:new Date(base-100000).toISOString(),
+    close_time:new Date(base+800000).toISOString(),floor_strike:80};
+  let now=base,ask=.89,saved=null;
+  const events=[];
+  const read=async route=>{
+    if(route.startsWith('/series/'))return {series:{ticker:'KXWTI15M',frequency:'fifteen_min',
+      fee_type:'quadratic',fee_multiplier:1}};
+    if(route.startsWith('/markets?'))return {markets:[marketData]};
+    if(route.endsWith('depth=1'))return book('yes',ask,500);
+    return {market:{...marketData,status:'finalized',result:'yes'}};
+  };
+  const observer=new MetalsObserver({read,now:()=>now,log:e=>events.push(e),
+    store:{load:()=>null,save:s=>{saved=structuredClone(s);}},
+    proxy:{snapshot:()=>({status:'FRESH_PROXY',sourceAt:now,price:80.2})}});
+  await observer.discover('WTI');
+  for(const p of [.89,.90,.95,.90,.90]) {
+    ask=p;
+    await observer.observe('WTI');
+    now+=5000;
+  }
+  assert.equal(saved.markets[ticker].study90.direction,'rising');
+  assert.equal(saved.markets[ticker].study90Falling.direction,'falling');
+  assert.equal(saved.markets[ticker].study90Falling.plan.budget,300);
+  assert.equal(events.filter(e=>e.event==='PAPER90_FALLING_QUOTE').length,1);
+  assert.equal(observer.getFallingNinetySignal('WTI').side,'yes');
+  ask=.91;
+  await observer.observe('WTI');
+  assert.equal(observer.getFallingNinetySignal('WTI'),undefined);
+  now=base+800000;
+  await observer.settleOne();
+  assert.ok(events.find(e=>e.event==='PAPER90_FALLING_SETTLED').modelNet>0);
+  assert.ok(events.find(e=>e.event==='PAPER90_SETTLED').modelNet>0);
+});

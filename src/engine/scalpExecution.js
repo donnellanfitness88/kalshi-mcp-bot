@@ -3,7 +3,8 @@ import { CRYPTO_WICK_TIERS, isCryptoWick, cryptoWickEnabled, cryptoWickTier } fr
 import { contractQuantity, quantityUnits, addQuantity, subtractQuantity } from '../kalshi/quantity.js';
 import crypto from 'node:crypto';
 import { MANAGED_ASSETS, isPythLateMarket, fourMarketsEnabled, exchangeForAsset, LIVE_LATE_MARKETS,
-  isPilotWick, pilotWickEnabled, PILOT_WICK_MARKETS, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS } from './lateMarkets.js';
+  isPilotWick, pilotWickEnabled, PILOT_WICK_MARKETS, PILOT_WICK_BUDGET, PILOT_WICK_CUTOFF_SECONDS,
+  FALLING_NINETY_BUDGET, fallingNinetyEnabled } from './lateMarkets.js';
 import { wickMetrics } from '../research/btcWickStudy.js';
 import { metalBook, metalShrinkingCheck } from '../research/metalsObserver.js';
 import { startSession, startDay } from './riskManager.js';
@@ -45,6 +46,7 @@ const btcChartSetupWindowMs = 90000;
 const btcChartMaxReferenceGapMs = 1500;
 const btcChartMinEntryPrice = 0.05;
 const wickStage = Object.freeze({id:'wick_5s',minPrice:0.90});
+const fallingNinetyStage = Object.freeze({id:'falling_90_cushion_trend',budget:FALLING_NINETY_BUDGET});
 const wickAsset = asset => asset==='BTC' || isPythLateMarket(asset) || isCryptoWick(asset);
 const wickBudgetFor = asset => {
   if (isPilotWick(asset)) return PILOT_WICK_BUDGET;
@@ -490,8 +492,9 @@ export function createScalpExecutor(deps = {}) {
       }
       const cost = fill.count * fill.price + fill.fees;
       const ledger = lateStages[p.body.ticker];
+      const maximumCost=p.stageId===fallingNinetyStage.id?fallingNinetyStage.budget:totalBudget(p.asset);
       if (p.stageId && (!ledger || cost > p.stageBudget + 1e-9 ||
-          ledger.spent + cost > totalBudget(p.asset) + 1e-9)) {
+          ledger.spent + cost > maximumCost + 1e-9)) {
         throw new Error('Late fill exceeds reserved budget; reconciliation required');
       }
       let next;
@@ -509,11 +512,13 @@ export function createScalpExecutor(deps = {}) {
           mode: p.mode ?? 'SCALP', entryOrderId: p.orderId, entryOrderIds: p.orderId ? [p.orderId] : [],
           ...(p.chartSignal ? { chartSignal: p.chartSignal, strategy: btcChartTrade } : {}),
           ...(p.retestSignal ? { strategy: btcRetestStrategy(p.retestSignal) } : {}),
+          ...(p.stageId===fallingNinetyStage.id ? { strategy:fallingNinetyStage.id } : {}),
           sim: p.sim, entrySecondsRemaining: p.entrySecondsRemaining, realizedNet: 0, originalCost: cost };
       }
       const stageRecord = ledger?.records?.[p.stageId];
       const stageLimit = p.ladderCap ?? stageRecord?.ladderCap ?? (p.stageId === wickStage.id
-        ? wickBudgetFor(p.asset) : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget);
+        ? wickBudgetFor(p.asset) : p.stageId===fallingNinetyStage.id ? fallingNinetyStage.budget
+          : lateStagesFor(p.asset).find(stage => stage.id === p.stageId)?.budget);
       const fillCushion = p.shrinkingGuard?.currentCushion;
       const recordCushion = usesLadderCushionCap(p.asset) && p.stageId !== wickStage.id &&
         Number.isFinite(fillCushion);
@@ -538,13 +543,13 @@ export function createScalpExecutor(deps = {}) {
         side: p.side, stage: p.stageId, strategy: next.strategy, chartConfirmation: p.chartConfirmation,
         retestSignal: p.retestSignal,
         ticker: p.body.ticker, proximity: p.proximity, shrinkingGuard: p.shrinkingGuard,
-        ladderCap: p.ladderCap, totalContracts: next.count, totalCost: next.originalCost });
+        fallingNinety: p.fallingNinety, ladderCap: p.ladderCap, totalContracts: next.count, totalCost: next.originalCost });
       return;
     } else if (p.kind === 'entry' && p.stageId && !fill.count) {
       const saved = snapshot(); saved.pending = null;
       save(saved); pending = null;
       log({ event: 'LATE_ZERO_FILL', asset: p.asset, stage: p.stageId,
-        ticker: p.body.ticker, retryAfterMs: SCALP_CONFIG.lateRetryMs });
+        ticker: p.body.ticker, retryAfterMs: p.stageId===fallingNinetyStage.id?null:SCALP_CONFIG.lateRetryMs });
       return;
     } else if (p.kind === 'exit' && fill.count) {
       const trade = s.activeTrade;
@@ -815,7 +820,7 @@ export function createScalpExecutor(deps = {}) {
     const { asset, s } = ctx;
     if (process.env.SCALP_ENABLED !== 'true' || !s.farmArmed || shared.disabledAssets.includes(asset)) return;
     const pilot = isPilotWick(asset);
-    if (pilot && (!wick || !pilotWickEnabled())) return;
+    if (pilot && (!wick || !pilotWickEnabled() || s.activeTrade?.strategy===fallingNinetyStage.id)) return;
     const cryptoWick = isCryptoWick(asset);
     if (cryptoWick && (!wick || !cryptoWickEnabled())) return;
     const originalTicker = s.ticker;
@@ -1008,6 +1013,62 @@ export function createScalpExecutor(deps = {}) {
     await submit({ kind: 'entry', asset, mode, side: fresh.direction === 'UP' ? 'yes' : 'no',
       stageId: fresh.stage?.id, stageBudget, ladderCap, proximity: distanceCheck, shrinkingGuard: volatilityGuard ? { ...shrinkCheck, volatilityGuard } : shrinkCheck, entrySecondsRemaining: remainingSeconds(s), direction: fresh.direction, body, sim, simYesPrice: body.price, startedAt: Date.now() });
   }
+  async function enterFallingNinety(ctx) {
+    const {asset,s}=ctx;
+    if (!isPilotWick(asset) || !fourMarketsEnabled() || !fallingNinetyEnabled() ||
+        process.env.SCALP_ENABLED!=='true' || !s.farmArmed || simulated() ||
+        shared.disabledAssets.includes(asset) || !ctx.refreshQuote) return;
+    const signal=ctx.getFallingNinetySignal?.();
+    if (signal?.direction!=='falling' || !['yes','no'].includes(signal.side)) return;
+    const {side,ticker,target}=signal;
+    const direction=side==='yes'?'UP':'DOWN';
+    const eligible=()=>{
+      const now=Date.now(), age=now-signal.at, ledger=lateStages[ticker];
+      // A fresh executable quote is required below. The observer sample only
+      // supplies the recent direction of the ask.
+      return Number.isFinite(age) && age>=0 && age<=10000 && ctx.getFallingNinetySignal()===signal &&
+        s.ticker===ticker && remainingSeconds(s,now)>0 && !s.activeTrade &&
+        !ledger?.closed && !ledger?.spent && !ledger?.attempted.includes(fallingNinetyStage.id) &&
+        (!ledger || ledger.side===side) && compatibleHoldings(s,'LATE_SETTLEMENT',false);
+    };
+    const reference=()=>{
+      const p=ctx.proxy?.snapshot(asset,target,side);
+      if (p?.status!=='FRESH_PROXY' || !Number.isFinite(p.estimatedCushion) ||
+          p.estimatedCushion+1e-9<PILOT_WICK_MARKETS[asset].minimumCushion ||
+          ![15,60].every(k=>Number.isFinite(p.movement?.[k]?.cushionChange) &&
+            p.movement[k].cushionChange>=-1e-9)) return null;
+      return p;
+    };
+    if (!eligible()) return;
+    const distance=await proximity(ctx,{stage:fallingNinetyStage,direction});
+    if (!distance.allowed || distance.target!==target || !reference() ||
+        !await accountMatches(asset,null,false)) return;
+    const balance=(await api.getBalance(exchangeForAsset(asset)))/100;
+    if (!Number.isFinite(balance) || balance<=0 || !eligible()) return;
+    if (s.sessionStartBalance===null) startSession(s,balance);
+    if (s.dailyStartBalance===null) startDay(s,balance);
+    persist();
+    const risk=checkRiskGuards(s,balance);
+    if (risk.blocked) { entryBlocked(asset,risk.reason,{strategy:fallingNinetyStage.id}); return; }
+    await ctx.refreshQuote();
+    const quote=s.lateBook?.[side], checked=reference(), bookAge=Date.now()-s.lastQuoteMessageTs;
+    if (!eligible() || !checked || !Number.isFinite(bookAge) || bookAge<0 || bookAge>2000 ||
+        quote?.price!==.90 || !Number.isFinite(quote.size)) return;
+    const budget=fallingNinetyStage.budget, feeMultiplier=s.lateFeeMultiplier;
+    const count=Math.min(Math.floor(quote.size),lateStageSize(quote.price,balance,budget,feeMultiplier));
+    if (!Number.isSafeInteger(count) || count<1 || count*(1-quote.price)<=lateFee(count,quote.price,feeMultiplier)) return;
+    const body=buildDirectionalLateBuyBody(ticker,direction,count,quote.price);
+    body.count=count.toFixed(2);
+    body.exchange_index=exchangeForAsset(asset);
+    body.time_in_force='immediate_or_cancel';
+    body.client_order_id=crypto.randomUUID();
+    await submit({kind:'entry',asset,mode:'LATE_SETTLEMENT',side,direction,body,sim:false,
+      stageId:fallingNinetyStage.id,stageBudget:budget,proximity:distance,
+      fallingNinety:{signalAt:signal.at,displayedSize:quote.size,cushion:checked.estimatedCushion,
+        cushionChange15:checked.movement[15].cushionChange,cushionChange60:checked.movement[60].cushionChange},
+      entrySecondsRemaining:remainingSeconds(s),startedAt:Date.now()});
+  }
+
   async function enterBtcRetest(ctx) {
     const { asset, s } = ctx;
     const signal = btcRetestSignal;
@@ -1366,6 +1427,7 @@ export function createScalpExecutor(deps = {}) {
       if (deps.liveWick && !pending && !isBtcRetestTrade(ctx.s.activeTrade?.strategy) &&
           (!ctx.s.activeTrade || ctx.s.activeTrade.mode==='LATE_SETTLEMENT'))
         await enter(ctx,true);
+      if (!pending && !ctx.s.activeTrade) await enterFallingNinety(ctx);
     } catch (error) { log({ event: pending ? 'ORDER_UNCERTAIN' : 'BLOCKED', asset: ctx.asset, ticker: ctx.s.activeTrade?.ticker ?? ctx.s.ticker, error: error.message,
       clientOrderId: pending?.body.client_order_id,
       ...(pending ? { orderId: pending.orderId, requested: pending.body.count,
