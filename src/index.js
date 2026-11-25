@@ -26,7 +26,6 @@ if (MCP_MODE) {
 
 console.log(`[Boot] Kalshi MCP Bot — ${MCP_MODE ? 'MCP' : 'Terminal'} mode`);
 
-import { scalpExecutor } from './engine/scalpExecution.js';
 import { startClock } from './engine/clock.js';
 import { state } from './engine/state.js';
 import { LIVE_LATE_MARKETS } from './engine/lateMarkets.js';
@@ -36,18 +35,6 @@ async function main() {
 
   import('./engine/cryptoWickRunner.js').then(({ startCryptoWickRunner }) => startCryptoWickRunner())
     .catch(e => console.error('[CRYPTO_WICK] Startup failed:', e.message));
-
-  // BTC observer supplies confirmed wick-rejection signals to the shared executor.
-  if(process.env.BTC_LARGE_OBSERVER_ENABLED!=='false') {
-    Promise.all([import('./research/btcLargeObserver.js'),import('./prices/cfBenchmarks.js')])
-      .then(([{BtcLargeObserver},{benchmarkFeed}])=>new BtcLargeObserver({
-        feed: benchmarkFeed,
-        onWickSignal: scalpExecutor.queueBtcWickSignal,
-        onBearishRetest: scalpExecutor.queueBtcBearishRetest,
-        onBullishPullback: scalpExecutor.queueBtcBullishPullback
-      }).start())
-      .catch(e=>console.error('[BTC_LARGE_OBSERVER] Startup failed:',e.message));
-  }
 
   // Independent, public-data-only observer; errors cannot stop BTC execution.
   if (process.env.METALS_OBSERVER_ENABLED !== 'false' || process.env.LATE_MARKETS_LIVE_ENABLED !== 'false' ||

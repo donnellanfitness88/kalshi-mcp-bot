@@ -1,4 +1,3 @@
-import { recordBtcApproach } from '../research/btc90Approach.js';
 import WebSocket from 'ws';
 import { buildHeaders } from './client.js';
 import { getMarketOrderbook } from './client.js';
@@ -495,14 +494,6 @@ _bestPrices() {
     const p = parseFloat(price);
     if (p > bestNoBid) bestNoBid = p;
   }
-
-  
-if (this.ticker?.startsWith('KXBTC15M-')) {
-  try {
-    recordBtcApproach(this.ticker, this._lastBookSeq, bestYesBid, bestNoBid,
-      this._yesBook.get(bestYesBid) ?? 0, this._noBook.get(bestNoBid) ?? 0);
-  } catch { /* Keep research logging isolated from price updates. */ }
-}
 
 if (bestYesBid === -Infinity) {
   return invalid('EMPTY_YES_BOOK');
