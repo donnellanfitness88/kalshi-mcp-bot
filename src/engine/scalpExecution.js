@@ -415,7 +415,7 @@ export function createScalpExecutor(deps = {}) {
     }:{}) });
   }
   const lateChecks = new Map();
-  let busy = false;
+  let tickQueue = Promise.resolve();
   let pending = null;
   let lastAttempt = 0;
   let nextReconcileAt = 0;
@@ -1397,10 +1397,12 @@ export function createScalpExecutor(deps = {}) {
     await submit({ kind: 'exit', asset, side: trade.side, body, sim: trade.sim,
       simYesPrice: String(trade.side === 'yes' ? bid : ask), reason: decision.reason, startedAt: Date.now() });
   }
-  async function tick(ctx) {
-    if (busy) return;
-    busy = true;
+  async function runTick(ctx, queuedAt) {
     try {
+      const queueWaitMs = Date.now() - queuedAt;
+      if (queueWaitMs >= 100) {
+        log({ event: 'EXECUTOR_QUEUE_WAIT', asset: ctx.asset, ticker: ctx.s.ticker, queueWaitMs });
+      }
       if (pending) {
         if (Date.now() < nextReconcileAt) return;
         nextReconcileAt = Date.now() + 3000;
@@ -1437,7 +1439,14 @@ export function createScalpExecutor(deps = {}) {
       ...(pending ? { orderId: pending.orderId, requested: pending.body.count,
         responseFillCount: pending.response?.fill_count,
         responseRemainingCount: pending.response?.remaining_count } : {}) }); }
-    finally { busy = false; }
+  }
+  function tick(ctx) {
+    // The clock and both market runners await each tick. Serialize their work
+    // so an in-flight account check cannot silently discard another market.
+    const queuedAt = Date.now();
+    const run = tickQueue.then(() => runTick(ctx, queuedAt));
+    tickQueue = run.catch(() => {});
+    return run;
   }
   return { tick, restore, snapshot, queueBtcWickSignal, queueBtcBearishRetest, queueBtcBullishPullback };
 }

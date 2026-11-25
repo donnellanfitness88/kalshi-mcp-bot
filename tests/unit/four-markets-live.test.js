@@ -683,3 +683,25 @@ test('Pyth ladder reads one final book after both account checks and sizes from 
   assert.equal(f.requests.length,1);
   assert.equal(f.requests[0].count,'3.00');
 });
+
+test('shared executor queues a market behind a live order and runs it after reconciliation',async()=>{
+  const f=fixture();
+  const hold=Promise.withResolvers(),started=Promise.withResolvers();
+  const place=f.api.placeOrder;
+  f.api.placeOrder=async body=>{
+    if (body.ticker===f.shared.GOLD.ticker) {
+      started.resolve();
+      await hold.promise;
+    }
+    return place(body);
+  };
+  const gold=f.executor.tick(f.ctx('GOLD'));
+  await started.promise;
+  const silver=f.executor.tick(f.ctx('SILVER'));
+  await Promise.resolve();
+  assert.equal(f.requests.length,0);
+  hold.resolve();
+  await Promise.all([gold,silver]);
+  assert.deepEqual(f.requests.map(body=>body.ticker),[f.shared.GOLD.ticker,f.shared.SILVER.ticker]);
+  assert.equal(f.saved().pending,null);
+});
