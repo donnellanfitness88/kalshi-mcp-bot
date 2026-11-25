@@ -196,3 +196,23 @@ test('falling 90-cent paper study skips the earlier rising quote and settles sep
   assert.ok(events.find(e=>e.event==='PAPER90_FALLING_SETTLED').modelNet>0);
   assert.ok(events.find(e=>e.event==='PAPER90_SETTLED').modelNet>0);
 });
+
+test('batch order-book reads only permit explicit distinct tickers in observed series',async()=>{
+  const fetchOriginal=globalThis.fetch;
+  const calls=[];
+  globalThis.fetch=async(url,options)=>{
+    calls.push([url,options]);
+    return {ok:true,json:async()=>({orderbooks:[]})};
+  };
+  try {
+    const request='/markets/orderbooks?tickers=KXGOLD15M-TEST&tickers=KXWTI15M-TEST';
+    const deadline=AbortSignal.timeout(2000);
+    assert.deepEqual(await publicMetalRead(request,{signal:deadline}),{orderbooks:[]});
+    assert.equal(calls[0][1].signal,deadline);
+    for(const wrong of [request+'&depth=1',request+'&tickers=KXBTC15M-TEST',
+      '/markets/orderbooks?tickers=KXGOLD15M-TEST%2CKXWTI15M-TEST',
+      '/markets/orderbooks?tickers=KXGOLD15M-TEST&tickers=KXGOLD15M-TEST'])
+      await assert.rejects(publicMetalRead(wrong),/not allowed/);
+    assert.equal(calls.length,1);
+  } finally {globalThis.fetch=fetchOriginal;}
+});

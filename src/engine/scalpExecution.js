@@ -835,17 +835,20 @@ export function createScalpExecutor(deps = {}) {
     if (isPythLateMarket(asset)) {
       if (!fourMarketsEnabled() || !ctx.refreshQuote || !ctx.proxy ||
           remainingSeconds(s)<=0 || remainingSeconds(s)>=180) return;
-      if (!wick) await ctx.refreshQuote();
+      if (!wick) await (ctx.refreshInitialQuote ?? ctx.refreshQuote)();
     }
     const held = s.activeTrade;
     if (Date.now() - lastAttempt < SCALP_CONFIG.reentryCooldownMs) return;
     if (Date.now() - Math.max(...assets().map(a => a.lastExitTime || 0)) < SCALP_CONFIG.reentryCooldownMs) return;
     const mode = wick ? 'LATE_SETTLEMENT' : selectedEntryMode(s);
     let wickBook, bookAt;
-    async function readWickBook() {
+    async function readWickBook(initial = false) {
       bookAt = Date.now();
       if (isPythLateMarket(asset)) {
-        await ctx.refreshQuote();
+        if (initial && ctx.refreshInitialQuote) {
+          await ctx.refreshInitialQuote();
+          bookAt = s.lastQuoteMessageTs;
+        } else await ctx.refreshQuote();
         wickBook = s.lateBook;
       } else {
         wickBook = metalBook(await api.getMarketOrderbook(originalTicker,1));
@@ -878,7 +881,7 @@ export function createScalpExecutor(deps = {}) {
     const risk = hasIndependentRisk(asset) ? {blocked:false} :
       checkRiskGuards(s, ctx.balance, false, { skipLossCooldown: mode === 'SCALP' });
     if (risk.blocked) { entryBlocked(asset, risk.reason); return; }
-    if (wick) await readWickBook();
+    if (wick) await readWickBook(true);
     const signal = readSignal();
     if (!signal.shouldEnter) return;
     if (mode === 'LATE_SETTLEMENT') {

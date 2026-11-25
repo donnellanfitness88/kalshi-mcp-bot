@@ -17,6 +17,7 @@ const PAPER_WICK_BUDGET = 300;
 const OBSERVED_MARKETS = {...METALS,...PAPER_MARKETS};
 const SERIES_PATTERN = Object.values(OBSERVED_MARKETS).join('|');
 const SERIES_ROUTE = new RegExp('^/series/(?:'+SERIES_PATTERN+')$');
+const OBSERVED_TICKER = new RegExp('^(?:'+SERIES_PATTERN+')-[A-Z0-9-]+$');
 const MARKET_ROUTE = new RegExp('^/markets/(?:'+SERIES_PATTERN+')-[A-Z0-9-]+(?:/orderbook[?]depth=1)?$');
 export const METALS_STAGES = [
   { id: 'under_180', maxSeconds: 180, minPrice: .90, budget: 2 },
@@ -180,7 +181,15 @@ export async function publicMetalRead(route, {signal} = {}) {
     discovery=[...q.keys()].length===3 && [...q.keys()].every(k=>['series_ticker','status','limit'].includes(k)) &&
       Object.values(OBSERVED_MARKETS).includes(q.get('series_ticker')) && q.get('status')==='open' && q.get('limit')==='100';
   }
-  if (!exact && !discovery) throw new Error('Observer route not allowed');
+  let batch=false;
+  if(route.startsWith('/markets/orderbooks?')) {
+    const q=new URLSearchParams(route.slice('/markets/orderbooks?'.length));
+    const tickers=q.getAll('tickers');
+    batch=tickers.length>=2 && tickers.length<=Object.keys(OBSERVED_MARKETS).length &&
+      [...q.keys()].length===tickers.length && new Set(tickers).size===tickers.length &&
+      tickers.every(ticker=>OBSERVED_TICKER.test(ticker));
+  }
+  if (!exact && !discovery && !batch) throw new Error('Observer route not allowed');
   const r = await fetch(BASE+route, {method:'GET', signal:signal??AbortSignal.timeout(8000), redirect:'error'});
   if (!r.ok) throw new Error('Public market read HTTP '+r.status);
   return r.json();

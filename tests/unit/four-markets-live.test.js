@@ -586,3 +586,73 @@ test('falling 90-cent live entries use the 300 budget, recheck reference and do 
   await wrongPrice.f.executor.tick(wrongPrice.ctx);
   assert.equal(wrongPrice.f.requests.length,0);
 });
+
+test('batch scan shares one read but preserves the single-market execution refresh',async()=>{
+  const f=fixture(),requests=[],seen=[];
+  let now=Date.now();
+  const markets=Object.fromEntries(['GOLD','SILVER','COPPER'].map(asset=>{
+    const ticker=f.shared[asset].ticker;
+    return [asset,{ticker,status:'active',close_time:new Date(now+120000).toISOString()}];
+  }));
+  const rows=Object.values(markets).map(({ticker})=>({ticker,orderbook_fp:{
+    yes_dollars:[['.20','5'],['.89','17']],no_dollars:[['.10','9']]}}));
+  const observer={current:markets,series:{},read:async(path)=>{
+    requests.push(path);
+    return path.startsWith('/markets/orderbooks?')?{orderbooks:rows}:rows[0];
+  }};
+  const runner=new LateMarketRunner(observer,{shared:f.shared,now:()=>now,log:()=>{},
+    executor:{tick:async ctx=>{
+      await ctx.refreshInitialQuote();
+      seen.push([ctx.asset,ctx.s.yesAsk,ctx.s.yesAskSize,ctx.s.lastQuoteMessageTs]);
+      if(ctx.asset==='GOLD') await ctx.refreshQuote();
+      if(ctx.asset==='SILVER') now+=2001;
+    }}});
+  await runner.tick();
+  assert.deepEqual(seen.map(v=>v.slice(0,3)),[['GOLD',.9,9],['SILVER',.9,9],['COPPER',.9,9]]);
+  assert.equal(seen[0][3],seen[1][3]);
+  assert.ok(seen[2][3]-seen[1][3]>2000);
+  assert.equal(requests.length,3);
+  assert.deepEqual(new URL(requests[0],'https://example.invalid').searchParams.getAll('tickers'),
+    Object.values(markets).map(m=>m.ticker));
+  assert.equal(requests[1],'/markets/'+markets.GOLD.ticker+'/orderbook?depth=1');
+  assert.equal(requests[2],'/markets/'+markets.COPPER.ticker+'/orderbook?depth=1');
+});
+
+test('batch scan falls back to single books when the batch route slows or fails',async()=>{
+  const f=fixture(),requests=[];
+  let now=Date.now();
+  const markets=Object.fromEntries(['GOLD','SILVER'].map(asset=>[asset,{
+    ticker:f.shared[asset].ticker,status:'active',close_time:new Date(now+120000).toISOString()}]));
+  const observer={current:markets,series:{},read:async(path)=>{
+    requests.push(path);
+    if(path.startsWith('/markets/orderbooks?')){now+=2001;return {orderbooks:[]};}
+    return {orderbook_fp:{yes_dollars:[['.89','5']],no_dollars:[['.10','9']]}};
+  }};
+  const runner=new LateMarketRunner(observer,{shared:f.shared,now:()=>now,log:()=>{},
+    executor:{tick:async ctx=>ctx.refreshInitialQuote()}});
+  await runner.tick();
+  await runner.tick();
+  assert.equal(requests.filter(p=>p.startsWith('/markets/orderbooks?')).length,1);
+  assert.equal(requests.filter(p=>p.endsWith('/orderbook?depth=1')).length,4);
+});
+
+test('batch scan cannot substitute for the final live wick book',async()=>{
+  const f=fixture({liveWick:true,selectLateStage:()=>null});
+  const ctx=f.ctx('WTI');
+  f.proxy.snapshot=asset=>{
+    const at=Date.now();
+    f.proxy.history[asset]=Array.from({length:1001},(_,i)=>({sourceAt:at-(1000-i)*200,price:2010}));
+    return {status:'FRESH_PROXY',sourceAt:at,price:2010};
+  };
+  let initial=0, singles=0;
+  ctx.refreshInitialQuote=async()=>{initial++;await f.ctx('WTI').refreshQuote();};
+  ctx.refreshQuote=async()=>{
+    singles++;
+    if(singles===2) ctx.s.yesAsk=.91;
+    await f.ctx('WTI').refreshQuote();
+  };
+  await f.executor.tick(ctx);
+  assert.equal(initial,1);
+  assert.equal(singles,2);
+  assert.equal(f.requests.length,0);
+});
