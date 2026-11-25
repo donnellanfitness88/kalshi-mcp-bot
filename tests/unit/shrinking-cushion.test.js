@@ -181,3 +181,26 @@ test('history diagnostics identify a checkpoint, an internal gap and stale data 
   assert.equal(decision.reason,'SHRINK_LONG_HISTORY_UNAVAILABLE');
   assert.equal(longGap[0].lookbackMs,60000);
 });
+
+test('WTI extended scan catches an older projected crossing and still requires strict recovery',()=>{
+  const now=1800000000000;
+  const args={asset:'WTI',ticker:'WTI',side:'yes',target:80,minimumDistance:0,rapidDropMinimum:0,
+    observationOnlyNoMinimum:true,secondsRemaining:165,now,requireLongRecovery:true,
+    requireLongAlways:true,stabilizationSeconds:5};
+  const history=(stabilized,drop)=>Array.from({length:326},(_,i)=>{
+    const offset=-65000+i*200;
+    const earlyCushion=offset< -18000 ? .25 : .25-drop;
+    const recoveredCushion=!stabilized && offset===-1000 ? .259 : .26;
+    return {sourceTs:now+offset,price:80+(offset< -14000?earlyCushion:recoveredCushion)};
+  });
+  const warning=history(false,.13);
+  assert.equal(evaluateShrinkingCushion({...args,history:warning}).allowed,true);
+  const blocked=evaluateShrinkingCushion({...args,history:warning,projectedLookbackSeconds:20});
+  assert.equal(blocked.reason,'SHRINK_PROJECTED_CROSSING');
+  assert.equal(blocked.guardState.triggeredAt,now-16000);
+  assert.equal(evaluateShrinkingCushion({...args,history:history(true,.13),
+    projectedLookbackSeconds:20}).allowed,true);
+  const rapidOnly=history(false,.08);
+  assert.equal(evaluateShrinkingCushion({...args,history:rapidOnly,secondsRemaining:10,
+    projectedLookbackSeconds:20}).allowed,true);
+});

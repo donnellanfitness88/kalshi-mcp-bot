@@ -1,8 +1,9 @@
 const STABILIZATION_SECONDS = 2;
+const TRIGGER_LOOKBACK_SECONDS = 10;
 
 // Add-on protection only. These measurements are trend checks, not forecasts.
 export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
-  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, paperRecoveryPullback = null, onHistoryFailure = null, now = Date.now() }) {
+  minimumDistance, rapidDropMinimum = minimumDistance, secondsRemaining, previous = null, requireLongRecovery = false, stabilizationSeconds = STABILIZATION_SECONDS, requireStableAlways = false, requireLongAlways = false, observationOnlyNoMinimum = false, paperRecoveryPullback = null, onHistoryFailure = null, projectedLookbackSeconds = TRIGGER_LOOKBACK_SECONDS, now = Date.now() }) {
   const prior = previous?.ticker === ticker && previous.side === side ? previous : null;
   const reject = reason => ({ allowed: false, reason, guardState: prior });
   if (!['yes','no'].includes(side) || !Number.isFinite(target) || target <= 0 ||
@@ -66,13 +67,15 @@ export function evaluateShrinkingCushion({ history, asset, ticker, side, target,
     else diagnoseLookback(15000);
     return reject('SHRINK_HISTORY_UNAVAILABLE');
   }
-  // Detect a trigger in the last ten seconds even if no order check ran at that
-  // instant. A previously latched trigger survives longer through the journal.
+  // Find warnings even when no order check ran at that instant. The journal
+  // retains a latched warning until the existing recovery checks clear it.
   let trigger=null;
-  for(let ago=0;ago<=10;ago++) {
+  for(let ago=0;ago<=Math.max(TRIGGER_LOOKBACK_SECONDS,projectedLookbackSeconds);ago++) {
     const point=at(last.sourceTs-ago*1000);
     const m=point && measure(point);
-    if(m?.rapid || m?.projection){trigger={...m,at:point.sourceTs};break;}
+    const rapid=ago<=TRIGGER_LOOKBACK_SECONDS && m?.rapid;
+    const projection=ago<=projectedLookbackSeconds && m?.projection;
+    if(rapid || projection){trigger={rapid,at:point.sourceTs};break;}
   }
   const checkpoints=Array.from({length:stabilizationSeconds+1},(_,i)=>at(last.sourceTs-(stabilizationSeconds-i)*1000));
   const stableRows=rows.filter(p=>p.sourceTs>=last.sourceTs-stabilizationSeconds*1000);

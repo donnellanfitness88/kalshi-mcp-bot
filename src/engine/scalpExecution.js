@@ -261,7 +261,8 @@ export function createScalpExecutor(deps = {}) {
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       proxy:ctx.proxy?.snapshot(ctx.asset,distance.target,distance.side),
       history:ctx.proxy?.history?.[ctx.asset],previous:shrinkingGuards[key],
-      secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,...extraOptions,at:Date.now()
+      secondsRemaining:remainingSeconds(ctx.s),requireLongRecovery,...extraOptions,
+      projectedLookbackSeconds:wick && ctx.asset==='WTI' ? 20 : undefined,at:Date.now()
     }) : evaluateShrinkingCushion({ history:getReferenceHistory(ctx.asset),
       asset:ctx.asset,ticker:ctx.s.ticker,side:distance.side,target:distance.target,
       minimumDistance:distance.minimumDistance, rapidDropMinimum:ctx.asset === 'BTC' && !wick ? 50 : distance.minimumDistance,
@@ -308,11 +309,19 @@ export function createScalpExecutor(deps = {}) {
         return {...checked, allowed: false, reason: 'USDJPY_WICK_CUSHION_NOT_WIDENING'};
       }
     }
-    const silverWickMinimum = 0.05;
-    if (ctx.asset === 'SILVER' && (!Number.isFinite(checked.currentCushion) ||
-        checked.currentCushion + 1e-9 < silverWickMinimum)) {
-      return {...checked, allowed: false, reason: 'SILVER_WICK_CUSHION_TOO_SMALL',
-        silverWickMinimum};
+    if (ctx.asset === 'SILVER') {
+      const silverWickMinimum = 0.05;
+      if (!Number.isFinite(checked.currentCushion) || checked.currentCushion + 1e-9 < silverWickMinimum) {
+        return {...checked, allowed: false, reason: 'SILVER_WICK_CUSHION_TOO_SMALL',
+          silverWickMinimum};
+      }
+      const minimumCushionChange60 = 0.003; // 0.30 cents per ounce.
+      const change60 = checked.longRecovery?.cushionChange60;
+      if (remainingSeconds(ctx.s, now)>120 &&
+          (!Number.isFinite(change60) || change60+1e-9<minimumCushionChange60)) {
+        return {...checked, allowed: false, reason: 'SILVER_EARLY_WICK_CUSHION_NOT_WIDENING',
+          minimumCushionChange60};
+      }
     }
     const rows = isPythLateMarket(ctx.asset)
       ? ctx.proxy.history[ctx.asset].map(p=>({sourceTs:Math.trunc(p.sourceAt),price:p.price}))
