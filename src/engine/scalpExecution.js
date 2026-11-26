@@ -27,6 +27,7 @@ import { checkRiskGuards, recordTradePnL } from './riskManager.js';
 // Journal before sending: an ambiguous response is reconciled, never resubmitted.
 const btcChartBudget = 10;
 const btcSettlementRecoveryTicker = 'KXBTC15M-26NOV230045-45';
+const eurUsdSettlementRecoveryTicker = 'KXEURUSD15M-26NOV251700-30';
 const btcChartTrade = 'btc_wick_rejection';
 const btcBearishRetestTrade = 'btc_confirmed_bearish_retest';
 const btcBullishPullbackTrade = 'btc_confirmed_bullish_pullback';
@@ -255,7 +256,7 @@ export function createScalpExecutor(deps = {}) {
   function shrinkingCheck(ctx, distance, stageBudget, wick = false) {
     const key = wick ? 'wick:'+ctx.asset+':'+distance.side : ctx.asset;
     const requireLongRecovery=wick || stageBudget>=25;
-    const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isPythLateMarket(ctx.asset)} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
+    const extraOptions=wick ? {stabilizationSeconds:5,requireLongAlways:isPythLateMarket(ctx.asset),requireStableAlways:ctx.asset==='COPPER'} : stageBudget===900?{stabilizationSeconds:5,requireLongAlways:true}:{};
     const pilot = PILOT_WICK_MARKETS[ctx.asset];
     const pythLate = isPythLateMarket(ctx.asset);
     const maxHistoryGapMs = pythLate ? PYTH_LIVE_MAX_HISTORY_GAP_MS : undefined;
@@ -460,6 +461,7 @@ export function createScalpExecutor(deps = {}) {
   }
   let lateStages = {};
   let btcSettlementRecovery = null;
+  let eurUsdSettlementRecovery = null;
   const settlementPolls = new Map();
   const manualPolls = new Map();
   const assetNames = () => MANAGED_ASSETS.filter(asset=>shared[asset]);
@@ -468,6 +470,7 @@ export function createScalpExecutor(deps = {}) {
     'usdJpyDailyReset','eurUsdDailyReset','totalPnL','tradeCount','consecutiveLosses','lastLossTime','sessionKillAt','lastExitTime'];
   const snapshot = () => ({ pending, lateEntryTickers, lateStages, shrinkingGuards, btcChartAttemptedTickers, btcBearishRetestAttempted,
     btcSettlementRecovery,
+    eurUsdSettlementRecovery,
     // Retain new markets' risk counters across deployments as well as holdings.
     marketRisk:Object.fromEntries(assetNames().filter(hasIndependentRisk).map(asset=>[asset,
       Object.fromEntries(riskFields.map(k=>[k,shared[asset][k]]))])),
@@ -479,6 +482,7 @@ export function createScalpExecutor(deps = {}) {
     if (!saved) return;
     pending = saved.pending ?? null;
     btcSettlementRecovery = saved.btcSettlementRecovery ?? null;
+    eurUsdSettlementRecovery = saved.eurUsdSettlementRecovery ?? null;
     shrinkingGuards = structuredClone(saved.shrinkingGuards ?? {});
     lateEntryTickers = saved.lateEntryTickers ?? [];
     btcChartAttemptedTickers = saved.btcChartAttemptedTickers ?? [];
@@ -839,7 +843,7 @@ export function createScalpExecutor(deps = {}) {
       const beforeEntryCutoff = seconds > (pilot ? PILOT_WICK_CUTOFF_SECONDS : 0);
       if (!beforeEntryCutoff) return false;
       if (asset === 'WTI') return seconds <= 90;
-      if (asset === 'GOLD' || asset === 'SILVER' || asset === 'COPPER') return seconds <= 150;
+      if (asset === 'GOLD' || asset === 'SILVER') return seconds <= 150;
       return seconds < 180;
     };
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
@@ -1273,7 +1277,9 @@ export function createScalpExecutor(deps = {}) {
       if (!trade.entryOrderId || otherFills.length) {
         // This account settlement is final and flat. Preserve the mixed fills
         // for review without assigning exchange-level P&L to the bot lot.
-        if (asset !== 'BTC' || trade.ticker !== btcSettlementRecoveryTicker ||
+        const recoverBtc = asset === 'BTC' && trade.ticker === btcSettlementRecoveryTicker;
+        const recoverEurUsd = asset === 'EURUSD' && trade.ticker === eurUsdSettlementRecoveryTicker;
+        if ((!recoverBtc && !recoverEurUsd) ||
             trade.mode !== 'LATE_SETTLEMENT' || !trade.entryOrderId ||
             !fills.some(fill => entryOrderIds.includes(fill.order_id))) {
           throw new Error('Other fills affected late holding; settlement reconciliation required');
@@ -1285,16 +1291,18 @@ export function createScalpExecutor(deps = {}) {
           trade: structuredClone(trade), settlement: record, otherFills };
         const saved = snapshot();
         saved.positions[asset] = null;
-        saved.btcSettlementRecovery = recovery;
+        if (recoverBtc) saved.btcSettlementRecovery = recovery;
+        else saved.eurUsdSettlementRecovery = recovery;
         if (lateStages[trade.ticker]) saved.lateStages = {
           ...lateStages, [trade.ticker]: { ...lateStages[trade.ticker], closed: true }
         };
         save(saved);
-        btcSettlementRecovery = recovery;
+        if (recoverBtc) btcSettlementRecovery = recovery;
+        else eurUsdSettlementRecovery = recovery;
         lateStages = saved.lateStages;
         s.activeTrade = null;
         s.lastExitTime = archivedAt;
-        log({ event: 'BTC_SETTLEMENT_RECONCILED', asset, ticker: trade.ticker, result,
+        log({ event: recoverBtc ? 'BTC_SETTLEMENT_RECONCILED' : 'EURUSD_SETTLEMENT_RECONCILED', asset, ticker: trade.ticker, result,
           otherFillCount: otherFills.length, pnl: null, sim: false });
         return;
       }
@@ -1419,7 +1427,9 @@ export function createScalpExecutor(deps = {}) {
         nextReconcileAt = Date.now() + 3000;
         await reconcile(); return;
       }
-      if (ctx.asset === 'BTC' && ctx.s.activeTrade?.ticker === btcSettlementRecoveryTicker &&
+      const recoveryTicker = ctx.asset === 'BTC' ? btcSettlementRecoveryTicker :
+        ctx.asset === 'EURUSD' ? eurUsdSettlementRecoveryTicker : null;
+      if (recoveryTicker && ctx.s.activeTrade?.ticker === recoveryTicker &&
           ctx.s.activeTrade.mode === 'LATE_SETTLEMENT' && !ctx.s.activeTrade.sim) {
         await settle(ctx);
         return;
