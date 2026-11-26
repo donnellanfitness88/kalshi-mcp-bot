@@ -858,7 +858,7 @@ export function createScalpExecutor(deps = {}) {
       const beforeEntryCutoff = seconds > (pilot ? PILOT_WICK_CUTOFF_SECONDS : 0);
       if (!beforeEntryCutoff) return false;
       if (asset === 'WTI') return seconds <= 90;
-      if (asset === 'GOLD' || asset === 'SILVER') return seconds <= 150;
+      if (asset === 'GOLD' || asset === 'SILVER' || asset === 'USDCAD') return seconds <= 150;
       return seconds < 180;
     };
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
