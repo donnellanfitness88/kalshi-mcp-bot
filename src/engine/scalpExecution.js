@@ -321,6 +321,14 @@ export function createScalpExecutor(deps = {}) {
         return {...checked, allowed: false, reason: 'USDJPY_WICK_CUSHION_NOT_WIDENING'};
       }
     }
+    if (ctx.asset === 'COPPER') {
+      const minimumCushionChange60 = 0.001; // 0.10 cents per pound.
+      const change60 = checked.longRecovery?.cushionChange60;
+      if (!Number.isFinite(change60) || change60 + 1e-9 < minimumCushionChange60) {
+        return {...checked, allowed: false, reason: 'COPPER_WICK_CUSHION_NOT_WIDENING',
+          minimumCushionChange60};
+      }
+    }
     if (ctx.asset === 'SILVER') {
       const silverWickMinimum = 0.05;
       if (!Number.isFinite(checked.currentCushion) || checked.currentCushion + 1e-9 < silverWickMinimum) {
