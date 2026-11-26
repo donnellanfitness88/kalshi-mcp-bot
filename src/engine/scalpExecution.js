@@ -304,6 +304,13 @@ export function createScalpExecutor(deps = {}) {
       return {...checked, allowed: false, reason: 'PILOT_WICK_CUSHION_TOO_SMALL',
         minimumCushion: pilot.minimumCushion};
     }
+    if (ctx.asset === 'EURUSD') {
+      const eurUsdWickMinimum = 0.00014; // 1.4 pips.
+      if (!Number.isFinite(checked.currentCushion) || checked.currentCushion + 1e-9 < eurUsdWickMinimum) {
+        return {...checked, allowed: false, reason: 'EURUSD_WICK_CUSHION_TOO_SMALL',
+          minimumCushion: eurUsdWickMinimum};
+      }
+    }
     if (ctx.asset === 'EURUSD' && checked.guardState?.triggeredAt != null) {
       const change15 = checked.longRecovery?.cushionChange15;
       if (!Number.isFinite(change15) || change15 <= 1e-9) {
