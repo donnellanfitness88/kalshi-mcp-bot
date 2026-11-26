@@ -288,6 +288,12 @@ export function createScalpExecutor(deps = {}) {
           ctx.s.marketCloseTs, now, ctx.proxy?.history?.[ctx.asset], pilot?.repeatedCrossingCushion)
       : projected;
     if (!wick && checked?.allowed && ctx.asset === 'USDJPY') {
+      const usdJpyLadderMinimum = 0.014; // 1.4 pips.
+      if (!Number.isFinite(checked.currentCushion) ||
+          checked.currentCushion + 1e-9 < usdJpyLadderMinimum) {
+        return {...checked, allowed: false, reason: 'USDJPY_LADDER_CUSHION_TOO_SMALL',
+          minimumCushion: usdJpyLadderMinimum};
+      }
       const records = lateStages[ctx.s.ticker]?.records ?? {};
       const hasLadderFill = Object.entries(records).some(
         ([stageId, record]) => stageId !== wickStage.id && record.spent > 0
