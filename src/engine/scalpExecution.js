@@ -837,7 +837,10 @@ export function createScalpExecutor(deps = {}) {
     const wickWindowOpen = () => {
       const seconds = remainingSeconds(s);
       const beforeEntryCutoff = seconds > (pilot ? PILOT_WICK_CUTOFF_SECONDS : 0);
-      return beforeEntryCutoff && (asset === 'WTI' ? seconds <= 90 : seconds < 180);
+      if (!beforeEntryCutoff) return false;
+      if (asset === 'WTI') return seconds <= 90;
+      if (asset === 'GOLD' || asset === 'SILVER' || asset === 'COPPER') return seconds <= 150;
+      return seconds < 180;
     };
     if (wick && (!wickAsset(asset) || !wickWindowOpen() || !originalTicker ||
         lateStages[originalTicker]?.attempted.includes(wickStage.id))) return;
