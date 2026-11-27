@@ -1064,6 +1064,7 @@ export function createScalpExecutor(deps = {}) {
     const direction=side==='yes'?'UP':'DOWN';
     const eligible=()=>{
       const now=Date.now(), age=now-signal.at, ledger=lateStages[ticker];
+      if (asset === 'WTI' && remainingSeconds(s,now) > 300) return false;
       // A fresh executable quote is required below. The observer sample only
       // supplies the recent direction of the ask.
       return Number.isFinite(age) && age>=0 && age<=10000 && ctx.getFallingNinetySignal()===signal &&
