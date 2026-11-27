@@ -317,6 +317,14 @@ export function createScalpExecutor(deps = {}) {
           minimumCushion: eurUsdWickMinimum};
       }
     }
+    if (ctx.asset === 'EURUSD') {
+      const minimumCushionChange60 = 0.00003; // 0.3 pips.
+      const change60 = checked.longRecovery?.cushionChange60;
+      if (!Number.isFinite(change60) || change60 + 1e-9 < minimumCushionChange60) {
+        return {...checked, allowed: false, reason: 'EURUSD_WICK_CUSHION_60S_NOT_WIDENING',
+          minimumCushionChange60};
+      }
+    }
     if (ctx.asset === 'EURUSD' && checked.guardState?.triggeredAt != null) {
       const change15 = checked.longRecovery?.cushionChange15;
       if (!Number.isFinite(change15) || change15 <= 1e-9) {
