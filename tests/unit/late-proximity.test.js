@@ -20,6 +20,25 @@ test('all stage and side proximity boundaries use signed dollars, including equa
     }
   }
 });
+test('BTC wick entries require $50 only when more than two minutes remain', () => {
+  const target = 59700.43;
+  for (const side of ['yes', 'no']) {
+    const direction = side === 'yes' ? 1 : -1;
+    const check = (distance, secondsRemaining, stageId = 'wick_5s') =>
+      evaluateLateProximity({ asset: 'BTC', stageId, side, target,
+        quote: quote(target + direction * distance), secondsRemaining, now });
+
+    const early = check(49.26, 144.378);
+    assert.equal(early.allowed, false);
+    assert.equal(early.entryMinimumDistance, 50);
+    assert.equal(early.minimumDistance, 30);
+    assert.equal(check(49.99, 120.001).allowed, false);
+    assert.equal(check(50, 120.001).allowed, true);
+    assert.equal(check(30, 120).allowed, true);
+    assert.equal(check(29.99, 119.999).allowed, false);
+    assert.equal(check(30, 150, 'under_180').allowed, true);
+  }
+});
 test('missing, stale, future, malformed and substitute-feed prices cannot authorize a buy',()=>{
   for(const q of [null,{...quote(65100),source:'BINANCE'}, {...quote(65100),price:NaN},
     {...quote(65100),sourceTs:now-2001},{...quote(65100),receivedAt:now-2001},

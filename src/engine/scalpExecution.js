@@ -433,9 +433,11 @@ export function createScalpExecutor(deps = {}) {
       return {allowed:Number.isFinite(target),reason:Number.isFinite(target)?'PROXY_GUARD_REQUIRED':'MISSING_TARGET',
         side:signal.direction==='UP'?'yes':'no',target,minimumDistance:0,exchangeIndex:expected.exchangeIndex};
     }
+    const quote = getReferenceQuote(ctx.asset);
+    const now = Date.now();
     return evaluateLateProximity({ asset: ctx.asset, ticker, stageId: signal.stage.id,
-      side: signal.direction === 'UP' ? 'yes' : 'no', target,
-      quote: getReferenceQuote(ctx.asset), now: Date.now() });
+      side: signal.direction === 'UP' ? 'yes' : 'no', target, quote,
+      secondsRemaining: remainingSeconds(ctx.s, now), now });
   }
   // New early/low-price entries are disabled; existing holdings still receive exits.
   const earlyScalpsEnabled = deps.earlyScalpsEnabled ?? false;

@@ -5,7 +5,7 @@ export const LATE_MIN_DISTANCE_USD = {
   ETH: { under_180: 1, under_120: 0.75, under_60: 0.50 }
 };
 
-export function evaluateLateProximity({ asset, ticker, stageId, side, target, quote, now = Date.now() }) {
+export function evaluateLateProximity({ asset, ticker, stageId, side, target, quote, secondsRemaining, now = Date.now() }) {
   const minimumDistance = LATE_MIN_DISTANCE_USD[asset]?.[stageId];
   const detail = { asset, ticker, stageId, side, target, minimumDistance, checkedAt: now };
   const reject = reason => ({ ...detail, allowed: false, reason });
@@ -17,9 +17,13 @@ export function evaluateLateProximity({ asset, ticker, stageId, side, target, qu
       now - quote.sourceTs > BENCHMARK_MAX_AGE_MS || now - quote.receivedAt > BENCHMARK_MAX_AGE_MS) {
     return reject('PROXIMITY_REFERENCE_STALE');
   }
+  // The early wick entry floor applies to the current quote only.
+  const entryMinimumDistance = asset === 'BTC' && stageId === 'wick_5s' && secondsRemaining > 120
+    ? 50 : minimumDistance;
   const distance = side === 'yes' ? quote.price - target : target - quote.price;
-  return { ...detail, referencePrice: quote.price, source: quote.source,
+  const allowed = distance + 1e-9 >= entryMinimumDistance;
+  return { ...detail, entryMinimumDistance, referencePrice: quote.price, source: quote.source,
     sourceTs: quote.sourceTs, referenceAgeMs: now - quote.sourceTs,
-    distance, allowed: distance + 1e-9 >= minimumDistance,
-    reason: distance + 1e-9 >= minimumDistance ? 'PROXIMITY_OK' : 'PROXIMITY_TOO_CLOSE' };
+    distance, allowed,
+    reason: allowed ? 'PROXIMITY_OK' : 'PROXIMITY_TOO_CLOSE' };
 }
