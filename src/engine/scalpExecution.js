@@ -369,11 +369,13 @@ export function createScalpExecutor(deps = {}) {
       : getReferenceHistory(ctx.asset);
     const floor = checked.crossingWickMinimum ?? distance.minimumDistance;
     const metrics = wickMetrics(rows, now, distance.target, distance.side==='yes'?1:-1, ctx.s.marketCloseTs, floor, onHistoryFailure, maxHistoryGapMs);
-    if (!(metrics?.heldMs >= 5000)) {
+    const requiredHoldMs = ctx.asset === 'BTC' && remainingSeconds(ctx.s, now) > 120
+      ? 15000 : 5000;
+    if (!(metrics?.heldMs >= requiredHoldMs)) {
       const blocked={...checked,allowed:false,reason:'WICK_HOLD_UNCONFIRMED'};
       if(referenceHistory) return referenceFailure(blocked);
       return ctx.asset==='BTC'?{...blocked,referenceHistory:
-        {issue:'HOLD_BELOW_REQUIRED',heldMs:metrics?.heldMs ?? null,requiredHoldMs:5000,floor}}:blocked;
+        {issue:'HOLD_BELOW_REQUIRED',heldMs:metrics?.heldMs ?? null,requiredHoldMs,floor}}:blocked;
     }
     const result = {...checked, wickHeldMs:metrics.heldMs};
     if (pilot && checked.targetCrossings > 0 && metrics.heldMs < 15000) {
